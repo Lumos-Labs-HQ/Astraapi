@@ -14,6 +14,9 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth);
 // Returns a new reference to PyBytes, or NULL on error.
 PyObject* serialize_to_json_pybytes(PyObject* obj);
 
+// Initialize cached type objects (call at module init)
+void json_writer_init();
+
 // Clean up cached type objects (call at module shutdown)
 void json_writer_cleanup();
 

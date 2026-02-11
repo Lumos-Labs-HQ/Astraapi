@@ -20,6 +20,7 @@ import signal
 import socket
 import struct
 import sys
+import time
 from typing import Any
 
 # ── Pre-built responses (allocated once, reused forever) ─────────────────────
@@ -33,24 +34,19 @@ _500_RESP = (
     b'{"detail":"Internal Server Error"}'
 )
 
-# ── Type cache (initialized once on first request) ──────────────────────────
+# ── Type cache (initialized at import time) ──────────────────────────────────
 
-_InlineResult: type | None = None
-_types_ready = False
+try:
+    from fastapi._core_bridge import InlineResult as _InlineResult
+except ImportError:
+    _InlineResult = None
 
+# ── Pydantic validation (initialized at import time) ─────────────────────────
 
-def _ensure_types() -> None:
-    global _InlineResult, _types_ready
-    if _types_ready:
-        return
-    from fastapi._core_bridge import InlineResult
-    _InlineResult = InlineResult
-    _types_ready = True
-
-
-# ── Pydantic validation (lazy import) ───────────────────────────────────────
-
-_request_body_to_args: Any = None
+try:
+    from fastapi.dependencies.utils import request_body_to_args as _request_body_to_args
+except ImportError:
+    _request_body_to_args = None
 
 
 # ── WebSocket wrapper for Python endpoint access ────────────────────────────
@@ -165,7 +161,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_buf", "_ka", "_loop", "_wr_paused", "_ws")
+    __slots__ = ("_core", "_transport", "_buf", "_ka", "_ka_deadline", "_loop", "_wr_paused", "_ws")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop) -> None:
         self._core = core_app
@@ -173,6 +169,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._transport: asyncio.Transport | None = None
         self._buf = bytearray()
         self._ka: asyncio.TimerHandle | None = None
+        self._ka_deadline: float = 0.0
         self._wr_paused = False
         self._ws: CppWebSocket | None = None
 
@@ -206,7 +203,6 @@ class CppHttpProtocol(asyncio.Protocol):
             self._handle_ws_frames(data)
             return
 
-        self._ka_cancel()
         buf = self._buf
         buf += data
 
@@ -217,7 +213,6 @@ class CppHttpProtocol(asyncio.Protocol):
         if not transport or transport.is_closing():
             return
 
-        _ensure_types()
         core = self._core
         IR = _InlineResult
 
@@ -421,11 +416,6 @@ class CppHttpProtocol(asyncio.Protocol):
     async def _handle_pydantic(self, ir: Any) -> None:
         """Handle routes needing Pydantic validation (POST with body models)."""
         try:
-            global _request_body_to_args
-            if _request_body_to_args is None:
-                from fastapi.dependencies.utils import request_body_to_args
-                _request_body_to_args = request_body_to_args
-
             if ir.has_body_params and ir.json_body is not None:
                 body_values, body_errors = await _request_body_to_args(
                     body_fields=ir.body_params,
@@ -475,10 +465,10 @@ class CppHttpProtocol(asyncio.Protocol):
     # ── Keep-alive timer ─────────────────────────────────────────────────
 
     def _ka_reset(self) -> None:
-        if self._ka:
-            self._ka.cancel()
-        if self._transport and not self._transport.is_closing():
-            self._ka = self._loop.call_later(15.0, self._ka_expire)
+        # Update deadline (O(1) — no timer cancel/create)
+        self._ka_deadline = time.monotonic() + 15.0
+        if not self._ka and self._transport and not self._transport.is_closing():
+            self._ka = self._loop.call_later(15.0, self._ka_check)
 
     def _ka_cancel(self) -> None:
         h = self._ka
@@ -486,9 +476,15 @@ class CppHttpProtocol(asyncio.Protocol):
             h.cancel()
             self._ka = None
 
-    def _ka_expire(self) -> None:
-        if self._transport and not self._transport.is_closing():
-            self._transport.close()
+    def _ka_check(self) -> None:
+        """Check if deadline passed; reschedule if not."""
+        self._ka = None
+        remaining = self._ka_deadline - time.monotonic()
+        if remaining <= 0:
+            if self._transport and not self._transport.is_closing():
+                self._transport.close()
+        elif self._transport and not self._transport.is_closing():
+            self._ka = self._loop.call_later(remaining, self._ka_check)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -535,7 +531,6 @@ async def run_server(
                         max_age=kw.get("max_age", 600),
                     )
                 except Exception as exc:
-                    import sys
                     print(f"[cpp-server] CORS sync failed: {exc}", file=sys.stderr)
                 break
 

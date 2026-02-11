@@ -141,9 +141,11 @@ static PyObject* CoreRouter_match_route(CoreRouterObject* self, PyObject* arg) {
     // Return (route_index, path_params_dict)
     PyRef params_dict(PyDict_New());
     if (!params_dict) return nullptr;
-    for (const auto& [k, v] : match->params) {
-        PyRef pk(PyUnicode_FromStringAndSize(k.c_str(), k.size()));
-        PyRef pv(PyUnicode_FromStringAndSize(v.c_str(), v.size()));
+    for (int pi = 0; pi < match->param_count; pi++) {
+        auto k = match->params[pi].name;
+        auto v = match->params[pi].value;
+        PyRef pk(PyUnicode_FromStringAndSize(k.data(), k.size()));
+        PyRef pv(PyUnicode_FromStringAndSize(v.data(), v.size()));
         if (!pk || !pv) return nullptr;
         if (PyDict_SetItem(params_dict.get(), pk.get(), pv.get()) < 0) return nullptr;
     }
@@ -301,6 +303,9 @@ PyMODINIT_FUNC PyInit__fastapi_core(void) {
     if (PyType_Ready(&CoreRouterType) < 0) { Py_DECREF(m); return nullptr; }
     Py_INCREF(&CoreRouterType);
     PyModule_AddObject(m, "CoreRouter", (PyObject*)&CoreRouterType);
+
+    // Pre-initialize JSON writer special type caches
+    json_writer_init();
 
     return m;
 }

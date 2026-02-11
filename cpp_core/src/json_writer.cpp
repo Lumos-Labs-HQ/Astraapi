@@ -59,6 +59,10 @@ static void ensure_special_types() {
     PyErr_Clear();
 }
 
+void json_writer_init() {
+    ensure_special_types();
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 static inline void buf_append(std::vector<char>& buf, const char* s, size_t len) {
@@ -86,13 +90,13 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
         if (p > safe) buf.insert(buf.end(), safe, p);
         // Emit escape
         switch (c) {
-            case '"':  buf.push_back('\\'); buf.push_back('"'); break;
-            case '\\': buf.push_back('\\'); buf.push_back('\\'); break;
-            case '\b': buf.push_back('\\'); buf.push_back('b'); break;
-            case '\f': buf.push_back('\\'); buf.push_back('f'); break;
-            case '\n': buf.push_back('\\'); buf.push_back('n'); break;
-            case '\r': buf.push_back('\\'); buf.push_back('r'); break;
-            case '\t': buf.push_back('\\'); buf.push_back('t'); break;
+            case '"':  { static const char e[]="\\\""; buf.insert(buf.end(),e,e+2); break; }
+            case '\\': { static const char e[]="\\\\"; buf.insert(buf.end(),e,e+2); break; }
+            case '\b': { static const char e[]="\\b";  buf.insert(buf.end(),e,e+2); break; }
+            case '\f': { static const char e[]="\\f";  buf.insert(buf.end(),e,e+2); break; }
+            case '\n': { static const char e[]="\\n";  buf.insert(buf.end(),e,e+2); break; }
+            case '\r': { static const char e[]="\\r";  buf.insert(buf.end(),e,e+2); break; }
+            case '\t': { static const char e[]="\\t";  buf.insert(buf.end(),e,e+2); break; }
             default: {
                 char esc[7];
                 snprintf(esc, sizeof(esc), "\\u%04x", c);
@@ -231,6 +235,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
     if (PyList_Check(obj)) {
         buf_push(buf, '[');
         Py_ssize_t len = PyList_GET_SIZE(obj);
+        if (len > 8) buf.reserve(buf.size() + len * 80);  // heuristic for large lists
         for (Py_ssize_t i = 0; i < len; i++) {
             if (i > 0) buf_push(buf, ',');
             PyObject* item = PyList_GET_ITEM(obj, i);  // borrowed ref
@@ -254,7 +259,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
     }
 
     // ── Special types (datetime, Decimal, UUID, Enum) ──────────────────────
-    ensure_special_types();
+    // Types are initialized at module load via json_writer_init()
 
     // Enum → serialize .value (must check before other types since Enum can wrap int/str)
     if (s_enum_type && PyObject_IsInstance(obj, s_enum_type)) {

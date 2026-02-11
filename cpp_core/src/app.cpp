@@ -626,7 +626,13 @@ static PyObject* CoreApp_match_request(CoreAppObject* self, PyObject* args) {
     mr->exclude_unset = route.exclude_unset;
     mr->exclude_defaults = route.exclude_defaults;
     mr->exclude_none = route.exclude_none;
-    new (&mr->path_params) std::vector<std::pair<std::string, std::string>>(std::move(match->params));
+    new (&mr->path_params) std::vector<std::pair<std::string, std::string>>();
+    mr->path_params.reserve(match->param_count);
+    for (int i = 0; i < match->param_count; i++) {
+        mr->path_params.emplace_back(
+            std::string(match->params[i].name),
+            std::string(match->params[i].value));
+    }
 
     return (PyObject*)mr;
 }
@@ -752,6 +758,32 @@ static inline PyObject* build_500_tuple() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// HELPER: Fast (consumed, True) tuple — avoids PyTuple_Pack varargs overhead
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static inline PyObject* make_consumed_true(size_t consumed) {
+    PyObject* c = PyLong_FromLongLong((long long)consumed);
+    if (!c) return nullptr;
+    PyObject* t = PyTuple_New(2);
+    if (!t) { Py_DECREF(c); return nullptr; }
+    PyTuple_SET_ITEM(t, 0, c);
+    Py_INCREF(Py_True);
+    PyTuple_SET_ITEM(t, 1, Py_True);
+    return t;
+}
+
+// HELPER: Fast (consumed, obj) tuple — obj ref is stolen
+static inline PyObject* make_consumed_obj(size_t consumed, PyObject* obj) {
+    PyObject* c = PyLong_FromLongLong((long long)consumed);
+    if (!c) { Py_DECREF(obj); return nullptr; }
+    PyObject* t = PyTuple_New(2);
+    if (!t) { Py_DECREF(c); Py_DECREF(obj); return nullptr; }
+    PyTuple_SET_ITEM(t, 0, c);
+    PyTuple_SET_ITEM(t, 1, obj);
+    return t;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HELPER: Build error response tuple for HTTPException
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -869,8 +901,10 @@ static PyObject* CoreApp_handle_and_respond(
     if (!kwargs) return nullptr;
 
     // ── Path parameters (using split path_specs vector) ──────────────────
-    if (!match->params.empty()) {
-        for (const auto& [pname, pval] : match->params) {
+    if (match->param_count > 0) {
+        for (int pi = 0; pi < match->param_count; pi++) {
+            auto pname = match->params[pi].name;
+            auto pval = match->params[pi].value;
             bool coerced = false;
             for (const auto& fs : spec.path_specs) {
                 if (fs.field_name == pname) {
@@ -883,8 +917,8 @@ static PyObject* CoreApp_handle_and_respond(
                 }
             }
             if (!coerced) {
-                PyRef key(PyUnicode_FromStringAndSize(pname.c_str(), pname.size()));
-                PyRef val(PyUnicode_FromStringAndSize(pval.c_str(), pval.size()));
+                PyRef key(PyUnicode_FromStringAndSize(pname.data(), pname.size()));
+                PyRef val(PyUnicode_FromStringAndSize(pval.data(), pval.size()));
                 PyDict_SetItem(kwargs.get(), key.get(), val.get());
             }
         }
@@ -1273,8 +1307,10 @@ static PyObject* CoreApp_handle_request_inline(
     if (!kwargs) return nullptr;
 
     // Path params
-    if (!match->params.empty()) {
-        for (const auto& [pname, pval] : match->params) {
+    if (match->param_count > 0) {
+        for (int pi = 0; pi < match->param_count; pi++) {
+            auto pname = match->params[pi].name;
+            auto pval = match->params[pi].value;
             bool coerced = false;
             for (const auto& fs : spec.path_specs) {
                 if (fs.field_name == pname) {
@@ -1287,8 +1323,8 @@ static PyObject* CoreApp_handle_request_inline(
                 }
             }
             if (!coerced) {
-                PyRef key(PyUnicode_FromStringAndSize(pname.c_str(), pname.size()));
-                PyRef val(PyUnicode_FromStringAndSize(pval.c_str(), pval.size()));
+                PyRef key(PyUnicode_FromStringAndSize(pname.data(), pname.size()));
+                PyRef val(PyUnicode_FromStringAndSize(pval.data(), pval.size()));
                 PyDict_SetItem(kwargs.get(), key.get(), val.get());
             }
         }
@@ -1989,15 +2025,14 @@ static const char* try_compress_inline(
 {
     if (body_len < 500) return nullptr;
 
-    // Quick scan for accepted encodings
-    bool accept_br = false, accept_gzip = false;
+    // Quick scan for accepted encodings — SSO handles ≤22 bytes without heap alloc
     std::string ae_lower(ae, ae_len);
     for (auto& c : ae_lower) if (c >= 'A' && c <= 'Z') c += 32;
-
+    bool accept_br = false, accept_gzip = false;
 #if HAS_BROTLI
-    if (ae_lower.find("br") != std::string::npos) accept_br = true;
+    accept_br = ae_lower.find("br") != std::string::npos;
 #endif
-    if (ae_lower.find("gzip") != std::string::npos) accept_gzip = true;
+    accept_gzip = ae_lower.find("gzip") != std::string::npos;
 
     if (!accept_br && !accept_gzip) return nullptr;
 
@@ -2153,17 +2188,16 @@ static PyObject* build_http_error_response(int status_code, const char* message,
 static int write_to_transport(PyObject* transport, PyObject* data) {
     if (!transport || transport == Py_None) return -1;
 
-    // Lazily intern method name strings (GIL protects from races in practice)
     if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
     if (!g_str_is_closing) g_str_is_closing = PyUnicode_InternFromString("is_closing");
 
-    // Check if transport is closing before writing
+    // Check if transport is closing before writing — avoids exception overhead
     PyRef closing(PyObject_CallMethodNoArgs(transport, g_str_is_closing));
     if (closing && PyObject_IsTrue(closing.get())) return -1;
 
     PyRef result(PyObject_CallMethodOneArg(transport, g_str_write, data));
     if (!result) {
-        PyErr_Clear();  // Don't propagate transport write errors
+        PyErr_Clear();
         return -1;
     }
     return 0;
@@ -2237,14 +2271,26 @@ static PyObject* CoreApp_handle_http(
     StringView accept_encoding_sv;
     StringView content_type_sv;
     for (int i = 0; i < req.header_count; i++) {
-        if (origin_sv.empty() && req.headers[i].name.iequals("origin", 6)) {
-            origin_sv = req.headers[i].value;
-        } else if (host_sv.empty() && req.headers[i].name.iequals("host", 4)) {
-            host_sv = req.headers[i].value;
-        } else if (accept_encoding_sv.empty() && req.headers[i].name.iequals("accept-encoding", 15)) {
-            accept_encoding_sv = req.headers[i].value;
-        } else if (content_type_sv.empty() && req.headers[i].name.iequals("content-type", 12)) {
-            content_type_sv = req.headers[i].value;
+        const auto& hdr = req.headers[i];
+        size_t nlen = hdr.name.len;
+        char fb = nlen > 0 ? (hdr.name.data[0] | 0x20) : 0;
+        switch (nlen) {
+            case 4:
+                if (host_sv.empty() && fb == 'h' && hdr.name.iequals("host", 4))
+                    host_sv = hdr.value;
+                break;
+            case 6:
+                if (origin_sv.empty() && fb == 'o' && hdr.name.iequals("origin", 6))
+                    origin_sv = hdr.value;
+                break;
+            case 12:
+                if (content_type_sv.empty() && fb == 'c' && hdr.name.iequals("content-type", 12))
+                    content_type_sv = hdr.value;
+                break;
+            case 15:
+                if (accept_encoding_sv.empty() && fb == 'a' && hdr.name.iequals("accept-encoding", 15))
+                    accept_encoding_sv = hdr.value;
+                break;
         }
         if (!origin_sv.empty() && !host_sv.empty() &&
             !accept_encoding_sv.empty() && !content_type_sv.empty()) break;
@@ -2257,9 +2303,7 @@ static PyObject* CoreApp_handle_http(
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             PyRef resp(build_http_error_response(400, "Invalid host header", req.keep_alive));
             if (resp) write_to_transport(transport, resp.get());
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            return make_consumed_true(req.total_consumed);
         }
     }
 
@@ -2273,9 +2317,7 @@ static PyObject* CoreApp_handle_http(
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
         PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive));
         if (resp) write_to_transport(transport, resp.get());
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        return make_consumed_true(req.total_consumed);
     }
 
     // ── Serve /openapi.json, /docs, /redoc (pre-built responses) ──────
@@ -2284,23 +2326,17 @@ static PyObject* CoreApp_handle_http(
         if (self->openapi_json_resp && path_sv == self->openapi_url) {
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             write_to_transport(transport, self->openapi_json_resp);
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            return make_consumed_true(req.total_consumed);
         }
         if (self->docs_html_resp && path_sv == self->docs_url) {
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             write_to_transport(transport, self->docs_html_resp);
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            return make_consumed_true(req.total_consumed);
         }
         if (self->redoc_html_resp && path_sv == self->redoc_url) {
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             write_to_transport(transport, self->redoc_html_resp);
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            return make_consumed_true(req.total_consumed);
         }
     }
 
@@ -2341,10 +2377,12 @@ static PyObject* CoreApp_handle_http(
                 // Return (consumed, ("ws", endpoint, path_params_dict)) for Python to handle
                 PyRef ws_tag(PyUnicode_InternFromString("ws"));
                 PyRef path_params(PyDict_New());
-                if (ws_match && !ws_match->params.empty()) {
-                    for (const auto& [k, v] : ws_match->params) {
-                        PyRef pk(PyUnicode_FromStringAndSize(k.c_str(), k.size()));
-                        PyRef pv(PyUnicode_FromStringAndSize(v.c_str(), v.size()));
+                if (ws_match && ws_match->param_count > 0) {
+                    for (int pi = 0; pi < ws_match->param_count; pi++) {
+                        auto k = ws_match->params[pi].name;
+                        auto v = ws_match->params[pi].value;
+                        PyRef pk(PyUnicode_FromStringAndSize(k.data(), k.size()));
+                        PyRef pv(PyUnicode_FromStringAndSize(v.data(), v.size()));
                         if (pk && pv) PyDict_SetItem(path_params.get(), pk.get(), pv.get());
                     }
                 }
@@ -2391,9 +2429,7 @@ static PyObject* CoreApp_handle_http(
             PyRef resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
             release_buffer(std::move(buf));
             if (resp) write_to_transport(transport, resp.get());
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            return make_consumed_true(req.total_consumed);
         }
 
         lock.unlock();
@@ -2401,9 +2437,7 @@ static PyObject* CoreApp_handle_http(
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        return make_consumed_true(req.total_consumed);
     }
 
     int idx = match->route_index;
@@ -2413,9 +2447,7 @@ static PyObject* CoreApp_handle_http(
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        return make_consumed_true(req.total_consumed);
     }
 
     const auto& route = self->routes[idx];
@@ -2437,9 +2469,7 @@ static PyObject* CoreApp_handle_http(
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            return make_consumed_true(req.total_consumed);
         }
     }
 
@@ -2449,9 +2479,7 @@ static PyObject* CoreApp_handle_http(
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        return make_consumed_true(req.total_consumed);
     }
 
     // Copy route data to locals and release lock early.
@@ -2481,8 +2509,10 @@ static PyObject* CoreApp_handle_http(
     if (!kwargs) return nullptr;
 
     // ── Path parameters ──────────────────────────────────────────────────
-    if (!match->params.empty()) {
-        for (const auto& [pname, pval] : match->params) {
+    if (match->param_count > 0) {
+        for (int pi = 0; pi < match->param_count; pi++) {
+            auto pname = match->params[pi].name;
+            auto pval = match->params[pi].value;
             bool coerced = false;
             for (const auto& fs : spec.path_specs) {
                 if (fs.field_name == pname) {
@@ -2495,8 +2525,8 @@ static PyObject* CoreApp_handle_http(
                 }
             }
             if (!coerced) {
-                PyRef key(PyUnicode_FromStringAndSize(pname.c_str(), pname.size()));
-                PyRef val(PyUnicode_FromStringAndSize(pval.c_str(), pval.size()));
+                PyRef key(PyUnicode_FromStringAndSize(pname.data(), pname.size()));
+                PyRef val(PyUnicode_FromStringAndSize(pval.data(), pval.size()));
                 PyDict_SetItem(kwargs.get(), key.get(), val.get());
             }
         }
@@ -2749,9 +2779,7 @@ static PyObject* CoreApp_handle_http(
                         PyRef resp(build_http_error_response(422, "Validation Error", req.keep_alive,
                                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                         if (resp) write_to_transport(transport, resp.get());
-                        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                        Py_INCREF(Py_True);
-                        return PyTuple_Pack(2, consumed.get(), Py_True);
+                        return make_consumed_true(req.total_consumed);
                     }
                 }
                 Py_DECREF(dep_raw);
@@ -2773,8 +2801,7 @@ static PyObject* CoreApp_handle_http(
                              endpoint_local, kwargs.release(),
                              get_cached_status(status_code_local), ka));
                 // endpoint_local ref transferred to tuple
-                PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                return PyTuple_Pack(2, consumed.get(), di_info.get());
+                return make_consumed_obj(req.total_consumed, di_info.release());
             } else {
                 // PYGEN_ERROR — dependency resolution failed
                 PyErr_Clear();
@@ -2851,9 +2878,7 @@ static PyObject* CoreApp_handle_http(
                                 Py_DECREF(body_params_local);
                                 self->active_requests.fetch_sub(1, std::memory_order_relaxed);
                                 self->total_errors.fetch_add(1, std::memory_order_relaxed);
-                                PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                                Py_INCREF(Py_True);
-                                return PyTuple_Pack(2, consumed.get(), Py_True);
+                                return make_consumed_true(req.total_consumed);
                             }
 
                             // ── Validation succeeded — merge values into kwargs ──
@@ -2903,8 +2928,7 @@ static PyObject* CoreApp_handle_http(
             ir->body_params = body_params_local;
 
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            return PyTuple_Pack(2, consumed.get(), (PyObject*)ir);
+            return make_consumed_obj(req.total_consumed, (PyObject*)ir);
         }
     }
 
@@ -2949,9 +2973,7 @@ static PyObject* CoreApp_handle_http(
                         }
                     }
                     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-                    PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                    Py_INCREF(Py_True);
-                    return PyTuple_Pack(2, consumed.get(), Py_True);
+                    return make_consumed_true(req.total_consumed);
                 }
 
                 Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
@@ -2962,9 +2984,7 @@ static PyObject* CoreApp_handle_http(
                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                     if (resp) write_to_transport(transport, resp.get());
                     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-                    PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                    Py_INCREF(Py_True);
-                    return PyTuple_Pack(2, consumed.get(), Py_True);
+                    return make_consumed_true(req.total_consumed);
                 }
             }
             Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
@@ -2975,9 +2995,7 @@ static PyObject* CoreApp_handle_http(
         if (resp) write_to_transport(transport, resp.get());
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
         self->total_errors.fetch_add(1, std::memory_order_relaxed);
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        return make_consumed_true(req.total_consumed);
     }
 
     // Clean up json_body_obj if it was allocated
@@ -3006,9 +3024,7 @@ static PyObject* CoreApp_handle_http(
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
                 self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-                PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                Py_INCREF(Py_True);
-                return PyTuple_Pack(2, consumed.get(), Py_True);
+                return make_consumed_true(req.total_consumed);
             }
 
             // field.serialize_python(validated) → serializable dict
@@ -3038,9 +3054,7 @@ static PyObject* CoreApp_handle_http(
                 if (resp) write_to_transport(transport, resp.get());
                 self->active_requests.fetch_sub(1, std::memory_order_relaxed);
                 self->total_errors.fetch_add(1, std::memory_order_relaxed);
-                PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                Py_INCREF(Py_True);
-                return PyTuple_Pack(2, consumed.get(), Py_True);
+                return make_consumed_true(req.total_consumed);
             }
 
             char* json_data;
@@ -3051,6 +3065,7 @@ static PyObject* CoreApp_handle_http(
             const char* encoding = nullptr;
             std::vector<char> compressed;
             if (accept_encoding_sv.len > 0 && json_len > 500) {
+                compressed = acquire_buffer();
                 encoding = try_compress_inline(
                     json_data, (size_t)json_len,
                     accept_encoding_sv.data, accept_encoding_sv.len,
@@ -3067,14 +3082,14 @@ static PyObject* CoreApp_handle_http(
                 has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
                 encoding));
 
+            if (!compressed.empty()) release_buffer(std::move(compressed));
+
             if (http_resp) {
                 write_to_transport(transport, http_resp.get());
             }
 
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            return make_consumed_true(req.total_consumed);
         }
 
         // ── Response object detection ─────────────────────────────────────
@@ -3169,9 +3184,7 @@ static PyObject* CoreApp_handle_http(
 
             Py_DECREF(raw_result);
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            return make_consumed_true(req.total_consumed);
         }
 
         // ── Fallback: serialize as string ────────────────────────────────
@@ -3187,9 +3200,7 @@ static PyObject* CoreApp_handle_http(
             }
         }
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        return make_consumed_true(req.total_consumed);
     }
 
     if (send_status == PYGEN_NEXT) {
@@ -3206,8 +3217,7 @@ static PyObject* CoreApp_handle_http(
         Py_INCREF(ka);
         PyRef async_info(PyTuple_Pack(4, s_async_tag, coro.release(),
                          get_cached_status(status_code_local), ka));
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        return PyTuple_Pack(2, consumed.get(), async_info.get());
+        return make_consumed_obj(req.total_consumed, async_info.release());
     }
 
     // PYGEN_ERROR — exception handler dispatch
@@ -3242,9 +3252,7 @@ static PyObject* CoreApp_handle_http(
                     }
                 }
                 self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-                PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                Py_INCREF(Py_True);
-                return PyTuple_Pack(2, consumed.get(), Py_True);
+                return make_consumed_true(req.total_consumed);
             }
 
             Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
@@ -3255,9 +3263,7 @@ static PyObject* CoreApp_handle_http(
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
                 self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-                PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-                Py_INCREF(Py_True);
-                return PyTuple_Pack(2, consumed.get(), Py_True);
+                return make_consumed_true(req.total_consumed);
             }
         }
         Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
@@ -3268,9 +3274,7 @@ static PyObject* CoreApp_handle_http(
     if (resp) write_to_transport(transport, resp.get());
     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
     self->total_errors.fetch_add(1, std::memory_order_relaxed);
-    PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-    Py_INCREF(Py_True);
-    return PyTuple_Pack(2, consumed.get(), Py_True);
+    return make_consumed_true(req.total_consumed);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3503,20 +3507,16 @@ static PyObject* CoreApp_parse_and_route(
     if (!match) {
         if (lock.owns_lock()) lock.unlock();
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        if (resp) return PyTuple_Pack(2, consumed.get(), resp.release());
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        if (resp) return make_consumed_obj(req.total_consumed, resp.release());
+        return make_consumed_true(req.total_consumed);
     }
 
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
         if (lock.owns_lock()) lock.unlock();
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        if (resp) return PyTuple_Pack(2, consumed.get(), resp.release());
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        if (resp) return make_consumed_obj(req.total_consumed, resp.release());
+        return make_consumed_true(req.total_consumed);
     }
 
     const auto& route = self->routes[idx];
@@ -3535,20 +3535,16 @@ static PyObject* CoreApp_parse_and_route(
         if (!(route.method_mask & req_method)) {
             if (lock.owns_lock()) lock.unlock();
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
-            PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-            if (resp) return PyTuple_Pack(2, consumed.get(), resp.release());
-            Py_INCREF(Py_True);
-            return PyTuple_Pack(2, consumed.get(), Py_True);
+            if (resp) return make_consumed_obj(req.total_consumed, resp.release());
+            return make_consumed_true(req.total_consumed);
         }
     }
 
     if (!route.fast_spec) {
         if (lock.owns_lock()) lock.unlock();
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive));
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        if (resp) return PyTuple_Pack(2, consumed.get(), resp.release());
-        Py_INCREF(Py_True);
-        return PyTuple_Pack(2, consumed.get(), Py_True);
+        if (resp) return make_consumed_obj(req.total_consumed, resp.release());
+        return make_consumed_true(req.total_consumed);
     }
 
     // Copy route data to locals and release lock early.
@@ -3571,8 +3567,10 @@ static PyObject* CoreApp_parse_and_route(
     if (!kwargs) { Py_DECREF(endpoint_local); Py_XDECREF(body_params_local); return nullptr; }
 
     // ── Path parameters ──────────────────────────────────────────────────
-    if (!match->params.empty()) {
-        for (const auto& [pname, pval] : match->params) {
+    if (match->param_count > 0) {
+        for (int pi = 0; pi < match->param_count; pi++) {
+            auto pname = match->params[pi].name;
+            auto pval = match->params[pi].value;
             bool coerced = false;
             for (const auto& fs : spec.path_specs) {
                 if (fs.field_name == pname) {
@@ -3585,8 +3583,8 @@ static PyObject* CoreApp_parse_and_route(
                 }
             }
             if (!coerced) {
-                PyRef key(PyUnicode_FromStringAndSize(pname.c_str(), pname.size()));
-                PyRef val(PyUnicode_FromStringAndSize(pval.c_str(), pval.size()));
+                PyRef key(PyUnicode_FromStringAndSize(pname.data(), pname.size()));
+                PyRef val(PyUnicode_FromStringAndSize(pval.data(), pval.size()));
                 if (key && val) PyDict_SetItem(kwargs.get(), key.get(), val.get());
             }
         }
@@ -3729,8 +3727,7 @@ static PyObject* CoreApp_parse_and_route(
         ir->endpoint = endpoint_local;
         ir->body_params = body_params_local;
 
-        PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-        return PyTuple_Pack(2, consumed.get(), (PyObject*)ir);
+        return make_consumed_obj(req.total_consumed, (PyObject*)ir);
     }
 
     // Clean up body_params_local if not used
@@ -3764,8 +3761,7 @@ static PyObject* CoreApp_parse_and_route(
     prep->is_coroutine = is_coroutine_local ? Py_True : Py_False;
     Py_INCREF(prep->is_coroutine);
 
-    PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
-    return PyTuple_Pack(2, consumed.get(), (PyObject*)prep);
+    return make_consumed_obj(req.total_consumed, (PyObject*)prep);
 }
 
 // ── Method table ────────────────────────────────────────────────────────────
