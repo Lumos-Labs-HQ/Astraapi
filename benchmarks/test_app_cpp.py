@@ -5,6 +5,7 @@ Bypasses uvicorn + ASGI entirely for maximum performance.
 
 from fastapi import FastAPI, Query, Header, Cookie, Body, Depends, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.websockets import WebSocketDisconnect
 from pydantic import BaseModel
 from typing import Optional
 from starlette.exceptions import HTTPException
@@ -206,6 +207,43 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     data = await websocket.receive_text()
     await websocket.send_text(f"Echo: {data}")
+    await websocket.close()
+
+
+# ── WebSocket benchmark endpoints ───────────────────────────────────────────
+
+@app.websocket("/ws_echo")
+async def ws_echo(websocket: WebSocket):
+    """Sustained echo — receives text, sends it back, repeat until close."""
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_text(data)
+    except WebSocketDisconnect:
+        pass
+
+
+@app.websocket("/ws_json")
+async def ws_json_echo(websocket: WebSocket):
+    """JSON echo — receives JSON, sends it back, repeat until close."""
+    await websocket.accept()
+    try:
+        while True:
+            data = await websocket.receive_json()
+            await websocket.send_json(data)
+    except WebSocketDisconnect:
+        pass
+
+
+@app.websocket("/ws_throughput")
+async def ws_throughput(websocket: WebSocket):
+    """Throughput test — client sends count, server pushes that many messages."""
+    await websocket.accept()
+    msg = await websocket.receive_text()
+    count = int(msg) if msg.isdigit() else 1000
+    for i in range(count):
+        await websocket.send_text(f"msg_{i}")
     await websocket.close()
 
 

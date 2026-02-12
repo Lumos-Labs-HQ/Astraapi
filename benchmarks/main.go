@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,6 +19,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // ── Configuration ───────────────────────────────────────────────────────────
@@ -53,7 +56,7 @@ type BenchResult struct {
 type TestCase struct {
 	Name        string
 	Endpoint    string
-	Method      string
+	Method      string // "GET", "POST", "WS", "WS_THROUGHPUT"
 	Body        []byte
 	Headers     map[string]string
 	Concurrency int
@@ -147,6 +150,193 @@ func fireRequests(url, method string, body []byte, headers map[string]string,
 	return latencies, int(okCount), int(errCount)
 }
 
+// ── WebSocket Load Generator ────────────────────────────────────────────────
+
+// fireWSEcho: each goroutine dials a WS connection, then loops send/receive
+// measuring per-message round-trip latency. Uses a persistent connection.
+func fireWSEcho(wsURL string, payload []byte,
+	duration, warmup time.Duration, concurrency int) (latencies []float64, ok, fail int) {
+
+	var (
+		mu         sync.Mutex
+		okCount    int64
+		errCount   int64
+		firstErr   sync.Once
+		firstErrMs string
+	)
+
+	start := time.Now()
+	warmupEnd := start.Add(warmup)
+	testEnd := warmupEnd.Add(duration)
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
+		ReadBufferSize:   4096,
+		WriteBufferSize:  4096,
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			local := make([]float64, 0, 8192)
+
+			// Each goroutine maintains its own WebSocket connection
+			// Reconnect if connection drops
+			var conn *websocket.Conn
+			defer func() {
+				if conn != nil {
+					conn.WriteMessage(websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+					conn.Close()
+				}
+			}()
+
+			for time.Now().Before(testEnd) {
+				// Connect if needed
+				if conn == nil {
+					var err error
+					conn, _, err = dialer.Dial(wsURL, nil)
+					if err != nil {
+						firstErr.Do(func() { firstErrMs = fmt.Sprintf("WS dial error: %v", err) })
+						if time.Now().After(warmupEnd) {
+							atomic.AddInt64(&errCount, 1)
+						}
+						time.Sleep(10 * time.Millisecond)
+						continue
+					}
+				}
+
+				// Send message + read echo response
+				t0 := time.Now()
+				if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+					conn.Close()
+					conn = nil
+					if time.Now().After(warmupEnd) {
+						atomic.AddInt64(&errCount, 1)
+					}
+					continue
+				}
+
+				_, _, readErr := conn.ReadMessage()
+				if readErr != nil {
+					conn.Close()
+					conn = nil
+					if time.Now().After(warmupEnd) {
+						atomic.AddInt64(&errCount, 1)
+					}
+					continue
+				}
+
+				elapsed := float64(time.Since(t0).Microseconds()) / 1000.0
+
+				if time.Now().After(warmupEnd) {
+					local = append(local, elapsed)
+					atomic.AddInt64(&okCount, 1)
+				}
+			}
+
+			mu.Lock()
+			latencies = append(latencies, local...)
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+	if firstErrMs != "" && int(okCount) == 0 {
+		fmt.Printf("    %s\n", firstErrMs)
+	}
+	return latencies, int(okCount), int(errCount)
+}
+
+// fireWSThroughput: dial WS, send count, receive that many messages.
+// Measures total throughput (messages per second).
+func fireWSThroughput(wsURL string, msgCount int,
+	duration, warmup time.Duration, concurrency int) (latencies []float64, ok, fail int) {
+
+	var (
+		mu       sync.Mutex
+		okCount  int64
+		errCount int64
+	)
+
+	start := time.Now()
+	warmupEnd := start.Add(warmup)
+	testEnd := warmupEnd.Add(duration)
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
+		ReadBufferSize:   4096,
+		WriteBufferSize:  4096,
+	}
+
+	countStr := fmt.Sprintf("%d", msgCount)
+
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			defer wg.Done()
+			local := make([]float64, 0, 1024)
+
+			for time.Now().Before(testEnd) {
+				conn, _, err := dialer.Dial(wsURL, nil)
+				if err != nil {
+					if time.Now().After(warmupEnd) {
+						atomic.AddInt64(&errCount, 1)
+					}
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+
+				// Send the count
+				t0 := time.Now()
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(countStr)); err != nil {
+					conn.Close()
+					if time.Now().After(warmupEnd) {
+						atomic.AddInt64(&errCount, 1)
+					}
+					continue
+				}
+
+				// Receive all messages
+				received := 0
+				for received < msgCount {
+					_, _, err := conn.ReadMessage()
+					if err != nil {
+						break
+					}
+					received++
+				}
+				elapsed := float64(time.Since(t0).Microseconds()) / 1000.0
+
+				// Server closes connection after sending all messages
+				conn.Close()
+
+				if time.Now().After(warmupEnd) && received == msgCount {
+					// Record latency per batch, count each message
+					local = append(local, elapsed)
+					atomic.AddInt64(&okCount, int64(received))
+				} else if time.Now().After(warmupEnd) {
+					atomic.AddInt64(&errCount, 1)
+				}
+			}
+
+			mu.Lock()
+			latencies = append(latencies, local...)
+			mu.Unlock()
+		}()
+	}
+
+	wg.Wait()
+	return latencies, int(okCount), int(errCount)
+}
+
+// ── Stats ───────────────────────────────────────────────────────────────────
+
 func computeStats(lats []float64, durationSec float64, ok, fail int) Stats {
 	if len(lats) == 0 {
 		return Stats{}
@@ -178,6 +368,15 @@ func computeStats(lats []float64, durationSec float64, ok, fail int) Stats {
 	}
 }
 
+// computeStatsMsg computes stats for WebSocket throughput where ok = total messages
+func computeStatsMsg(lats []float64, durationSec float64, totalMsgs, fail int) Stats {
+	s := computeStats(lats, durationSec, len(lats), fail)
+	// Override RPS with actual message throughput
+	s.TotalRequests = totalMsgs
+	s.RPS = math.Round(float64(totalMsgs)/durationSec*10) / 10
+	return s
+}
+
 // Run multiple rounds and combine all latencies for stable results
 func benchmark(url, method string, body []byte, headers map[string]string, concurrency int) Stats {
 	var allLats []float64
@@ -191,6 +390,34 @@ func benchmark(url, method string, body []byte, headers map[string]string, concu
 	}
 
 	return computeStats(allLats, TestDuration.Seconds()*float64(NumRuns), totalOk, totalFail)
+}
+
+func benchmarkWS(wsURL string, payload []byte, concurrency int) Stats {
+	var allLats []float64
+	var totalOk, totalFail int
+
+	for run := 0; run < NumRuns; run++ {
+		lats, ok, fail := fireWSEcho(wsURL, payload, TestDuration, WarmupTime, concurrency)
+		allLats = append(allLats, lats...)
+		totalOk += ok
+		totalFail += fail
+	}
+
+	return computeStats(allLats, TestDuration.Seconds()*float64(NumRuns), totalOk, totalFail)
+}
+
+func benchmarkWSThroughput(wsURL string, msgCount, concurrency int) Stats {
+	var allLats []float64
+	var totalMsgs, totalFail int
+
+	for run := 0; run < NumRuns; run++ {
+		lats, msgs, fail := fireWSThroughput(wsURL, msgCount, TestDuration, WarmupTime, concurrency)
+		allLats = append(allLats, lats...)
+		totalMsgs += msgs
+		totalFail += fail
+	}
+
+	return computeStatsMsg(allLats, TestDuration.Seconds()*float64(NumRuns), totalMsgs, totalFail)
 }
 
 // ── Server Management ───────────────────────────────────────────────────────
@@ -251,9 +478,20 @@ func (s *Server) Stop() {
 	}
 }
 
+// ── URL Helpers ─────────────────────────────────────────────────────────────
+
+func httpToWS(httpURL string) string {
+	u, err := url.Parse(httpURL)
+	if err != nil {
+		return strings.Replace(httpURL, "http://", "ws://", 1)
+	}
+	u.Scheme = "ws"
+	return u.String()
+}
+
 // ── Output ──────────────────────────────────────────────────────────────────
 
-func printComparison(r, p BenchResult) {
+func printComparison(r, p BenchResult, unit string) {
 	if p.RPS == 0 {
 		return
 	}
@@ -271,9 +509,9 @@ func printComparison(r, p BenchResult) {
 	}
 	reset := "\033[0m"
 
-	fmt.Printf("\n  %s%s wins: %+.1f%% RPS, %+.1f%% faster p50%s\n",
-		color, winner, rpsPct, latPct, reset)
-	fmt.Printf("    RPS:  C++: %8.0f  FastAPI: %8.0f\n", r.RPS, p.RPS)
+	fmt.Printf("\n  %s%s wins: %+.1f%% %s, %+.1f%% faster p50%s\n",
+		color, winner, rpsPct, unit, latPct, reset)
+	fmt.Printf("    %s:  C++: %8.0f  FastAPI: %8.0f\n", unit, r.RPS, p.RPS)
 	fmt.Printf("    p50:  C++: %7.2fms  FastAPI: %7.2fms\n", r.P50, p.P50)
 	fmt.Printf("    p95:  C++: %7.2fms  FastAPI: %7.2fms\n", r.P95, p.P95)
 	fmt.Printf("    p99:  C++: %7.2fms  FastAPI: %7.2fms\n", r.P99, p.P99)
@@ -367,7 +605,9 @@ func main() {
 		runtime.Version(), Concurrency, TestDuration, NumRuns, WarmupTime)
 	fmt.Println(strings.Repeat("=", 80))
 
-	tests := []TestCase{
+	// ── HTTP test cases (trimmed: removed CORS Preflight, Response Model,
+	//    Mixed Params, POST Raw JSON, High Concurrency — all >75K RPS) ────
+	httpTests := []TestCase{
 		{Name: "Simple GET", Endpoint: "/simple", Method: "GET", Concurrency: Concurrency},
 		{Name: "Path Parameter", Endpoint: "/items/123", Method: "GET", Concurrency: Concurrency},
 		{Name: "Query Parameters", Endpoint: "/search?q=test&page=1&limit=20&sort=name", Method: "GET", Concurrency: Concurrency},
@@ -389,13 +629,6 @@ func main() {
 			Headers:     map[string]string{"Authorization": "Bearer test-token-12345", "Accept": "application/json", "X-Request-ID": "bench-001"},
 			Concurrency: Concurrency,
 		},
-		{Name: "High Concurrency", Endpoint: "/simple", Method: "GET", Concurrency: 500},
-		{
-			Name: "POST Raw JSON", Endpoint: "/post_raw", Method: "POST",
-			Body:        []byte(`{"key":"value","count":42,"active":true}`),
-			Headers:     map[string]string{"Content-Type": "application/json"},
-			Concurrency: Concurrency,
-		},
 		{
 			Name: "POST Large JSON", Endpoint: "/post_large", Method: "POST",
 			Body:        []byte(`{"user_id":123,"username":"testuser","email":"test@example.com","first_name":"John","last_name":"Doe","age":30,"address":{"street":"123 Main St","city":"NYC","zip":"10001"},"metadata":{"source":"api","version":"2.0"},"tags":["admin","active","premium"],"is_active":true,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-06-15T12:30:00Z"}`),
@@ -403,22 +636,27 @@ func main() {
 			Concurrency: Concurrency,
 		},
 		{
-			Name: "CORS Preflight", Endpoint: "/simple", Method: "OPTIONS",
-			Headers:     map[string]string{"Origin": "http://localhost:3000", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type"},
-			Concurrency: Concurrency,
-		},
-		{
-			Name: "Mixed Params", Endpoint: "/mixed/42?q=test&limit=20", Method: "GET",
-			Headers:     map[string]string{"Authorization": "Bearer token123", "Cookie": "session_id=abc123"},
-			Concurrency: Concurrency,
-		},
-		{
 			Name: "Dependency Injection", Endpoint: "/with_deps?q=search&skip=10", Method: "GET",
 			Concurrency: Concurrency,
 		},
+	}
+
+	// ── WebSocket test cases ─────────────────────────────────────────────
+	wsTests := []TestCase{
 		{
-			Name: "Response Model", Endpoint: "/user/123", Method: "GET",
-			Concurrency: Concurrency,
+			Name: "WS Echo Text", Endpoint: "/ws_echo", Method: "WS",
+			Body:        []byte("Hello WebSocket benchmark test message"),
+			Concurrency: 50,
+		},
+		{
+			Name: "WS Echo JSON", Endpoint: "/ws_json", Method: "WS",
+			Body:        []byte(`{"action":"echo","data":"benchmark","id":1,"tags":["perf","test"]}`),
+			Concurrency: 50,
+		},
+		{
+			Name: "WS Throughput (1K)", Endpoint: "/ws_throughput", Method: "WS_THROUGHPUT",
+			Body:        []byte("1000"),
+			Concurrency: 20,
 		},
 	}
 
@@ -433,7 +671,12 @@ func main() {
 		os.Exit(1)
 	}()
 
-	for _, tc := range tests {
+	// ── Run HTTP benchmarks ─────────────────────────────────────────────
+	fmt.Printf("\n%s\n", strings.Repeat("─", 80))
+	fmt.Println("  HTTP BENCHMARKS")
+	fmt.Println(strings.Repeat("─", 80))
+
+	for _, tc := range httpTests {
 		fmt.Printf("\n%s\n", tc.Name)
 		fmt.Println(strings.Repeat("-", 80))
 
@@ -467,7 +710,60 @@ func main() {
 		ps.Stop()
 		time.Sleep(time.Second)
 
-		printComparison(rr, pr)
+		printComparison(rr, pr, "RPS")
+	}
+
+	// ── Run WebSocket benchmarks ────────────────────────────────────────
+	fmt.Printf("\n%s\n", strings.Repeat("─", 80))
+	fmt.Println("  WEBSOCKET BENCHMARKS")
+	fmt.Println(strings.Repeat("─", 80))
+
+	for _, tc := range wsTests {
+		fmt.Printf("\n%s\n", tc.Name)
+		fmt.Println(strings.Repeat("-", 80))
+
+		conc := tc.Concurrency
+		unit := "msg/s"
+
+		// ── C++ FastAPI WebSocket ────────────────────────
+		cppWSURL := httpToWS(fmt.Sprintf("http://127.0.0.1:8002%s", tc.Endpoint))
+		var rStats Stats
+
+		switch tc.Method {
+		case "WS":
+			rStats = benchmarkWS(cppWSURL, tc.Body, conc)
+		case "WS_THROUGHPUT":
+			msgCount := 1000
+			rStats = benchmarkWSThroughput(cppWSURL, msgCount, conc)
+		}
+
+		rr := BenchResult{TestName: tc.Name, Implementation: "cpp",
+			Duration: TestDuration.Seconds() * float64(NumRuns), Stats: rStats}
+		allResults = append(allResults, rr)
+		fmt.Printf("  %-25s C++:       %7.0f %s  p50: %6.2fms\n", tc.Name, rStats.RPS, unit, rStats.P50)
+		time.Sleep(time.Second)
+
+		// ── Pure Python FastAPI WebSocket (uvicorn) ──────
+		ps := startUvicornServer(pythonExe, "benchmarks.normal.main:app", 8001)
+		pyWSURL := httpToWS(fmt.Sprintf("http://127.0.0.1:8001%s", tc.Endpoint))
+		var pStats Stats
+
+		switch tc.Method {
+		case "WS":
+			pStats = benchmarkWS(pyWSURL, tc.Body, conc)
+		case "WS_THROUGHPUT":
+			msgCount := 1000
+			pStats = benchmarkWSThroughput(pyWSURL, msgCount, conc)
+		}
+
+		pr := BenchResult{TestName: tc.Name, Implementation: "fastapi",
+			Duration: TestDuration.Seconds() * float64(NumRuns), Stats: pStats}
+		allResults = append(allResults, pr)
+		fmt.Printf("  %-25s FastAPI:   %7.0f %s  p50: %6.2fms\n", tc.Name, pStats.RPS, unit, pStats.P50)
+		ps.Stop()
+		time.Sleep(time.Second)
+
+		printComparison(rr, pr, unit)
 	}
 
 	saveResults(allResults)
