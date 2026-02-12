@@ -33,6 +33,9 @@ extern PyObject* py_ws_parse_json(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_serialize_json(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_batch_parse(PyObject* self, PyObject* arg);
 
+// ws_frame_parser.cpp
+extern void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]);
+
 // dep_engine.cpp
 extern PyObject* py_compile_dep_plan(PyObject* self, PyObject* args, PyObject* kwargs);
 extern PyObject* py_unregister_dep_plan(PyObject* self, PyObject* arg);
@@ -170,6 +173,36 @@ static PyTypeObject CoreRouterType = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
+// WebSocket unmask — Python-callable wrapper for ws_frame_parser.cpp
+// ══════════════════════════════════════════════════════════════════════════════
+
+static PyObject* py_ws_unmask(PyObject* /*self*/, PyObject* args) {
+    // ws_unmask(payload: bytearray, mask: bytes) -> None
+    // Unmasks payload in-place using 8-byte-at-a-time XOR
+    Py_buffer payload_buf;
+    const char* mask_data;
+    Py_ssize_t mask_len;
+
+    if (!PyArg_ParseTuple(args, "y*y#", &payload_buf, &mask_data, &mask_len)) {
+        return nullptr;
+    }
+
+    if (mask_len != 4) {
+        PyBuffer_Release(&payload_buf);
+        PyErr_SetString(PyExc_ValueError, "mask must be exactly 4 bytes");
+        return nullptr;
+    }
+
+    if (!payload_buf.readonly && payload_buf.buf && payload_buf.len > 0) {
+        ws_unmask((uint8_t*)payload_buf.buf, (size_t)payload_buf.len,
+                  (const uint8_t*)mask_data);
+    }
+
+    PyBuffer_Release(&payload_buf);
+    Py_RETURN_NONE;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Module method table
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -195,6 +228,7 @@ static PyMethodDef module_methods[] = {
     {"ws_parse_json", (PyCFunction)py_ws_parse_json, METH_O, nullptr},
     {"ws_serialize_json", (PyCFunction)py_ws_serialize_json, METH_O, nullptr},
     {"ws_batch_parse", (PyCFunction)py_ws_batch_parse, METH_O, nullptr},
+    {"ws_unmask", (PyCFunction)py_ws_unmask, METH_VARARGS, nullptr},
 
     // v2.0: Dependency engine
     {"compile_dep_plan", (PyCFunction)py_compile_dep_plan, METH_VARARGS | METH_KEYWORDS, nullptr},

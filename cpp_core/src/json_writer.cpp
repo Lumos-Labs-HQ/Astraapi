@@ -198,6 +198,8 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
 
     // Dict
     if (PyDict_Check(obj)) {
+        Py_ssize_t dict_size = PyDict_GET_SIZE(obj);
+        if (dict_size > 4) buf.reserve(buf.size() + dict_size * 48);
         buf_push(buf, '{');
         PyObject* key;
         PyObject* value;
@@ -235,7 +237,8 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
     if (PyList_Check(obj)) {
         buf_push(buf, '[');
         Py_ssize_t len = PyList_GET_SIZE(obj);
-        if (len > 8) buf.reserve(buf.size() + len * 80);  // heuristic for large lists
+        // Aggressive pre-sizing: dict items with string keys+values average ~120 bytes each
+        if (len > 4) buf.reserve(buf.size() + len * 128);
         for (Py_ssize_t i = 0; i < len; i++) {
             if (i > 0) buf_push(buf, ',');
             PyObject* item = PyList_GET_ITEM(obj, i);  // borrowed ref

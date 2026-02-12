@@ -73,6 +73,7 @@ struct FastRouteSpec {
 
     // O(1) lookup maps (built at registration, immutable during requests)
     // Keys are string_views into the FieldSpec vectors above (stable after registration)
+    std::unordered_map<std::string_view, size_t> path_map;    // field_name → index
     std::unordered_map<std::string_view, size_t> query_map;   // alias/field_name → index
     std::unordered_map<std::string_view, size_t> header_map;  // header_lookup_key → index
     std::unordered_map<std::string_view, size_t> cookie_map;  // field_name → index
@@ -81,6 +82,11 @@ struct FastRouteSpec {
     bool has_dependencies = false;
     PyObject* dependant;          // Python Dependant object (strong ref, or NULL)
     PyObject* dep_solver;         // Python callable: _fast_solve_deps (strong ref, or NULL)
+
+    // Pydantic model fast-path: call model.model_validate() directly from C++
+    // Set at registration when body has exactly 1 Pydantic model param
+    PyObject* model_validate;     // bound method: Model.model_validate (strong ref, or NULL)
+    bool body_is_plain_dict;      // True if body param is plain dict (no Pydantic model)
 };
 
 // ── Method bitmask for O(1) method checking ─────────────────────────────────

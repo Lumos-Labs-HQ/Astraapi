@@ -285,6 +285,7 @@ static void CoreApp_dealloc(CoreAppObject* self) {
             Py_XDECREF(route.fast_spec->body_params);
             Py_XDECREF(route.fast_spec->dependant);
             Py_XDECREF(route.fast_spec->dep_solver);
+            Py_XDECREF(route.fast_spec->model_validate);
             // Release pre-interned py_field_name + default_value refs
             auto release_specs = [](std::vector<FieldSpec>& specs) {
                 for (auto& fs : specs) {
@@ -874,25 +875,34 @@ static PyObject* CoreApp_handle_and_respond(
     if (!method_str || !path_str) return nullptr;
 
     // ── Route matching ───────────────────────────────────────────────────
-    std::shared_lock lock(self->routes_mutex);
+    // Skip lock when routes are frozen (after startup) — atomic check first
+    bool frozen = self->routes_frozen.load(std::memory_order_acquire);
+    std::shared_lock lock(self->routes_mutex, std::defer_lock);
+    if (!frozen) lock.lock();
+
     auto match = self->router.at(path_str, (size_t)path_len);
-    if (!match) { lock.unlock(); Py_RETURN_NONE; }
+    if (!match) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
 
     int idx = match->route_index;
-    if (idx < 0 || idx >= (int)self->routes.size()) { lock.unlock(); Py_RETURN_NONE; }
+    if (idx < 0 || idx >= (int)self->routes.size()) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
 
     const auto& route = self->routes[idx];
 
-    // Method check
-    if (!route.methods.empty()) {
-        bool found = false;
-        for (const auto& m : route.methods) {
-            if (strcasecmp(m.c_str(), method_str) == 0) { found = true; break; }
-        }
-        if (!found) { lock.unlock(); Py_RETURN_NONE; }
+    // Method check — O(1) bitmask (same as handle_http)
+    if (route.method_mask) {
+        size_t mlen = strlen(method_str);
+        uint8_t req_method = 0;
+        if (mlen == 3 && memcmp(method_str, "GET", 3) == 0) req_method = METHOD_GET;
+        else if (mlen == 4 && memcmp(method_str, "POST", 4) == 0) req_method = METHOD_POST;
+        else if (mlen == 3 && memcmp(method_str, "PUT", 3) == 0) req_method = METHOD_PUT;
+        else if (mlen == 6 && memcmp(method_str, "DELETE", 6) == 0) req_method = METHOD_DELETE;
+        else if (mlen == 5 && memcmp(method_str, "PATCH", 5) == 0) req_method = METHOD_PATCH;
+        else if (mlen == 4 && memcmp(method_str, "HEAD", 4) == 0) req_method = METHOD_HEAD;
+        else if (mlen == 7 && memcmp(method_str, "OPTIONS", 7) == 0) req_method = METHOD_OPTIONS;
+        if (!(route.method_mask & req_method)) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
     }
 
-    if (!route.fast_spec) { lock.unlock(); Py_RETURN_NONE; }
+    if (!route.fast_spec) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
 
     const auto& spec = *route.fast_spec;
 
@@ -900,23 +910,19 @@ static PyObject* CoreApp_handle_and_respond(
     PyRef kwargs(PyDict_New());
     if (!kwargs) return nullptr;
 
-    // ── Path parameters (using split path_specs vector) ──────────────────
+    // ── Path parameters — O(1) hash map lookup ──────────────────────────
     if (match->param_count > 0) {
         for (int pi = 0; pi < match->param_count; pi++) {
             auto pname = match->params[pi].name;
             auto pval = match->params[pi].value;
-            bool coerced = false;
-            for (const auto& fs : spec.path_specs) {
-                if (fs.field_name == pname) {
-                    PyObject* py_val = coerce_param(pval, fs.type_tag);
-                    if (!py_val) return nullptr;
-                    PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
-                    Py_DECREF(py_val);
-                    coerced = true;
-                    break;
-                }
-            }
-            if (!coerced) {
+            auto pit = spec.path_map.find(pname);
+            if (pit != spec.path_map.end()) {
+                const auto& fs = spec.path_specs[pit->second];
+                PyObject* py_val = coerce_param(pval, fs.type_tag);
+                if (!py_val) return nullptr;
+                PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
+                Py_DECREF(py_val);
+            } else {
                 PyRef key(PyUnicode_FromStringAndSize(pname.data(), pname.size()));
                 PyRef val(PyUnicode_FromStringAndSize(pval.data(), pval.size()));
                 PyDict_SetItem(kwargs.get(), key.get(), val.get());
@@ -1080,9 +1086,44 @@ static PyObject* CoreApp_handle_and_respond(
     PyObject* har_body_params = spec.body_params;
     if (har_body_params) Py_INCREF(har_body_params);
     bool har_embed_body = spec.embed_body_fields;
+    std::optional<std::string> har_body_param_name = spec.body_param_name;
+
+    // Pydantic model fast-path flags
+    bool asgi_body_is_dict = spec.body_is_plain_dict;
+    PyObject* asgi_model_validate = spec.model_validate;
+    if (asgi_model_validate) Py_INCREF(asgi_model_validate);
 
     // Release lock — no more references to route/spec after this point
-    lock.unlock();
+    if (!frozen) lock.unlock();
+
+    // ── Body params fast paths ──────────────────────────────────────────
+    // FAST PATH 1: Plain dict body → inject directly, skip Pydantic
+    if (har_has_body_params && har_body_params && asgi_body_is_dict
+        && json_body_obj != Py_None && har_body_param_name) {
+        PyRef bp_key(PyUnicode_FromString(har_body_param_name->c_str()));
+        PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
+        if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+        Py_XDECREF(asgi_model_validate);
+        goto asgi_call_endpoint;
+    }
+
+    // FAST PATH 2: Single Pydantic model → call model_validate directly
+    if (har_has_body_params && har_body_params && asgi_model_validate
+        && json_body_obj != Py_None && har_body_param_name) {
+        PyRef validated(PyObject_CallOneArg(asgi_model_validate, json_body_obj));
+        Py_DECREF(asgi_model_validate);
+        asgi_model_validate = nullptr;
+        if (validated) {
+            PyRef bp_key(PyUnicode_FromString(har_body_param_name->c_str()));
+            PyDict_SetItem(kwargs.get(), bp_key.get(), validated.get());
+            if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+            goto asgi_call_endpoint;
+        }
+        // Validation error
+        PyErr_Clear();
+        // Fall through to InlineResult path
+    }
+    Py_XDECREF(asgi_model_validate);
 
     // ── If route has body params needing Pydantic → return InlineResult ──
     if (har_has_body_params && har_body_params) {
@@ -1113,6 +1154,7 @@ static PyObject* CoreApp_handle_and_respond(
         return (PyObject*)result;
     }
 
+asgi_call_endpoint:
     // Clean up body_params if not used in InlineResult
     Py_XDECREF(har_body_params);
 
@@ -1661,10 +1703,42 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
         }
     }
 
+    // Pydantic model fast-path init
+    spec.model_validate = nullptr;
+    spec.body_is_plain_dict = false;
+
     if (body_params_obj != Py_None) {
         Py_INCREF(body_params_obj);
         spec.body_params = body_params_obj;
         spec.has_body_params = true;
+
+        // Detect if body is a single Pydantic model → cache model_validate for direct call
+        // Also detect plain dict body (no Pydantic, skip validation entirely)
+        if (PyList_Check(body_params_obj) && PyList_GET_SIZE(body_params_obj) == 1) {
+            PyObject* field_info = PyList_GET_ITEM(body_params_obj, 0);  // borrowed
+            // field_info.field_info.annotation is the type
+            PyObject* fi_attr = PyObject_GetAttrString(field_info, "field_info");
+            if (fi_attr) {
+                PyObject* annotation = PyObject_GetAttrString(fi_attr, "annotation");
+                if (annotation) {
+                    // Check if annotation is dict (plain dict body)
+                    if (annotation == (PyObject*)&PyDict_Type) {
+                        spec.body_is_plain_dict = true;
+                    } else {
+                        // Check if annotation has model_validate (Pydantic BaseModel)
+                        PyObject* mv = PyObject_GetAttrString(annotation, "model_validate");
+                        if (mv) {
+                            spec.model_validate = mv;  // strong ref
+                        } else {
+                            PyErr_Clear();
+                        }
+                    }
+                    Py_DECREF(annotation);
+                }
+                Py_DECREF(fi_attr);
+            }
+            PyErr_Clear();  // Clear any attribute errors
+        }
     } else {
         spec.body_params = nullptr;
     }
@@ -1687,6 +1761,8 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
 
     // Build O(1) lookup maps AFTER move — string_views must point into final location
     auto& final_spec = *route.fast_spec;
+    for (size_t i = 0; i < final_spec.path_specs.size(); i++)
+        final_spec.path_map[std::string_view(final_spec.path_specs[i].field_name)] = i;
     for (size_t i = 0; i < final_spec.query_specs.size(); i++) {
         const auto& fs = final_spec.query_specs[i];
         final_spec.query_map[std::string_view(fs.field_name)] = i;
@@ -2399,7 +2475,11 @@ static PyObject* CoreApp_handle_http(
     }
 
     // ── Route matching ───────────────────────────────────────────────────
-    std::shared_lock lock(self->routes_mutex);
+    // Skip lock when routes are frozen (after startup) — atomic check first
+    bool rt_frozen = self->routes_frozen.load(std::memory_order_acquire);
+    std::shared_lock lock(self->routes_mutex, std::defer_lock);
+    if (!rt_frozen) lock.lock();
+
     auto match = self->router.at(req.path.data, req.path.len);
     if (!match) {
         // ── Trailing slash redirect: try with/without '/' ───────────
@@ -2411,7 +2491,7 @@ static PyObject* CoreApp_handle_http(
         }
         auto alt_match = self->router.at(alt_path.c_str(), alt_path.size());
         if (alt_match) {
-            lock.unlock();
+            if (!rt_frozen) lock.unlock();
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             // Build 307 redirect response
             auto buf = acquire_buffer();
@@ -2432,7 +2512,7 @@ static PyObject* CoreApp_handle_http(
             return make_consumed_true(req.total_consumed);
         }
 
-        lock.unlock();
+        if (!rt_frozen) lock.unlock();
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -2442,7 +2522,7 @@ static PyObject* CoreApp_handle_http(
 
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
-        lock.unlock();
+        if (!rt_frozen) lock.unlock();
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -2464,7 +2544,7 @@ static PyObject* CoreApp_handle_http(
         else if (req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0) req_method = METHOD_OPTIONS;
 
         if (!(route.method_mask & req_method)) {
-            lock.unlock();
+            if (!rt_frozen) lock.unlock();
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -2474,7 +2554,7 @@ static PyObject* CoreApp_handle_http(
     }
 
     if (!route.fast_spec) {
-        lock.unlock();
+        if (!rt_frozen) lock.unlock();
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -2495,8 +2575,9 @@ static PyObject* CoreApp_handle_http(
     PyObject* response_model_local = route.response_model_field;
     if (response_model_local) Py_INCREF(response_model_local);  // strong ref
     bool is_form_local = route.is_form;
+    bool is_coro_local = route.is_coroutine;
 
-    lock.unlock();
+    if (!rt_frozen) lock.unlock();
 
     // RAII guard — auto-DECREF response_model_local on any return path
     struct PyObjGuard { PyObject* p; ~PyObjGuard() { Py_XDECREF(p); } };
@@ -2508,23 +2589,19 @@ static PyObject* CoreApp_handle_http(
     PyRef kwargs(PyDict_New());
     if (!kwargs) return nullptr;
 
-    // ── Path parameters ──────────────────────────────────────────────────
+    // ── Path parameters — O(1) hash map lookup ────────────────────────
     if (match->param_count > 0) {
         for (int pi = 0; pi < match->param_count; pi++) {
             auto pname = match->params[pi].name;
             auto pval = match->params[pi].value;
-            bool coerced = false;
-            for (const auto& fs : spec.path_specs) {
-                if (fs.field_name == pname) {
-                    PyObject* py_val = coerce_param(pval, fs.type_tag);
-                    if (!py_val) return nullptr;
-                    PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
-                    Py_DECREF(py_val);
-                    coerced = true;
-                    break;
-                }
-            }
-            if (!coerced) {
+            auto pit = spec.path_map.find(pname);
+            if (pit != spec.path_map.end()) {
+                const auto& fs = spec.path_specs[pit->second];
+                PyObject* py_val = coerce_param(pval, fs.type_tag);
+                if (!py_val) return nullptr;
+                PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
+                Py_DECREF(py_val);
+            } else {
                 PyRef key(PyUnicode_FromStringAndSize(pname.data(), pname.size()));
                 PyRef val(PyUnicode_FromStringAndSize(pval.data(), pval.size()));
                 PyDict_SetItem(kwargs.get(), key.get(), val.get());
@@ -2751,15 +2828,47 @@ static PyObject* CoreApp_handle_http(
 
     // ── Dependency injection (resolve Depends() callables) ──────────────
     if (spec.has_dependencies && spec.dep_solver) {
-        // Call dep_solver(kwargs) → coroutine → (values_dict, errors_list)
-        // dep_solver merges resolved dependencies directly into kwargs
-        PyRef dep_coro(PyObject_CallOneArg(spec.dep_solver, kwargs.get()));
-        if (dep_coro) {
+        // dep_solver may be sync (returns tuple) or async (returns coroutine).
+        // Detect at runtime: if result is a coroutine, drive it; if tuple, use directly.
+        PyRef dep_call_result(PyObject_CallOneArg(spec.dep_solver, kwargs.get()));
+        if (dep_call_result) {
             PyObject* dep_raw = nullptr;
-            PySendResult dep_send = PyIter_Send(dep_coro.get(), Py_None, &dep_raw);
+            bool dep_resolved = false;
 
-            if (dep_send == PYGEN_RETURN && dep_raw) {
-                // dep_solver returned (values_dict, errors_list)
+            if (PyCoro_CheckExact(dep_call_result.get())) {
+                // Async dep solver — drive coroutine
+                PySendResult dep_send = PyIter_Send(dep_call_result.get(), Py_None, &dep_raw);
+
+                if (dep_send == PYGEN_RETURN && dep_raw) {
+                    dep_resolved = true;
+                } else if (dep_send == PYGEN_NEXT) {
+                    // Async dependency — return to Python for awaiting
+                    Py_XDECREF(dep_raw);
+                    self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                    if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                    Py_XDECREF(body_params_local);
+
+                    static PyObject* s_async_di_tag = nullptr;
+                    if (!s_async_di_tag) s_async_di_tag = PyUnicode_InternFromString("async_di");
+                    Py_INCREF(s_async_di_tag);
+
+                    PyObject* ka = req.keep_alive ? Py_True : Py_False;
+                    Py_INCREF(ka);
+                    PyRef di_info(PyTuple_Pack(6, s_async_di_tag, dep_call_result.release(),
+                                 endpoint_local, kwargs.release(),
+                                 get_cached_status(status_code_local), ka));
+                    return make_consumed_obj(req.total_consumed, di_info.release());
+                } else {
+                    PyErr_Clear();
+                }
+            } else if (PyTuple_Check(dep_call_result.get())) {
+                // Sync dep solver — result is already the tuple, no coroutine overhead
+                dep_raw = dep_call_result.get();
+                Py_INCREF(dep_raw);  // keep alive while we inspect it
+                dep_resolved = true;
+            }
+
+            if (dep_resolved && dep_raw) {
                 if (PyTuple_Check(dep_raw) && PyTuple_GET_SIZE(dep_raw) >= 2) {
                     PyObject* dep_values = PyTuple_GET_ITEM(dep_raw, 0);
                     PyObject* dep_errors = PyTuple_GET_ITEM(dep_raw, 1);
@@ -2783,28 +2892,6 @@ static PyObject* CoreApp_handle_http(
                     }
                 }
                 Py_DECREF(dep_raw);
-            } else if (dep_send == PYGEN_NEXT) {
-                // Async dependency — return to Python for awaiting
-                // Pack: ("async_di", dep_coro, endpoint, kwargs, status_code, keep_alive)
-                Py_XDECREF(dep_raw);
-                self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-                if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-                Py_XDECREF(body_params_local);
-
-                static PyObject* s_async_di_tag = nullptr;
-                if (!s_async_di_tag) s_async_di_tag = PyUnicode_InternFromString("async_di");
-                Py_INCREF(s_async_di_tag);
-
-                PyObject* ka = req.keep_alive ? Py_True : Py_False;
-                Py_INCREF(ka);
-                PyRef di_info(PyTuple_Pack(6, s_async_di_tag, dep_coro.release(),
-                             endpoint_local, kwargs.release(),
-                             get_cached_status(status_code_local), ka));
-                // endpoint_local ref transferred to tuple
-                return make_consumed_obj(req.total_consumed, di_info.release());
-            } else {
-                // PYGEN_ERROR — dependency resolution failed
-                PyErr_Clear();
             }
         } else {
             PyErr_Clear();
@@ -2816,6 +2903,66 @@ static PyObject* CoreApp_handle_http(
     // (only awaits for FormData). So PyIter_Send completes inline → PYGEN_RETURN.
     // This makes POST JSON follow the exact same zero-transition path as GET.
     if (has_body_params_local && body_params_local) {
+
+        // ── FAST PATH: plain dict body (no Pydantic model) ──────────────
+        // For routes like `body: dict = Body(...)`, skip validation entirely
+        if (spec.body_is_plain_dict && json_body_obj != Py_None && spec.body_param_name) {
+            PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
+            PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
+            Py_XDECREF(body_params_local);
+            goto body_done;
+        }
+
+        // ── FAST PATH: single Pydantic model → call model_validate directly ──
+        // Avoids going through request_body_to_args async wrapper
+        if (spec.model_validate && json_body_obj != Py_None && spec.body_param_name) {
+            PyRef validated(PyObject_CallOneArg(spec.model_validate, json_body_obj));
+            if (validated) {
+                PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
+                PyDict_SetItem(kwargs.get(), bp_key.get(), validated.get());
+                Py_XDECREF(body_params_local);
+                goto body_done;
+            } else {
+                // Validation error — build 422 from exception
+                PyObject *exc_type, *exc_val, *exc_tb;
+                PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
+                if (exc_val) {
+                    PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
+                    // Try to get .errors() from Pydantic ValidationError
+                    PyRef errors_method(PyObject_GetAttrString(exc_val, "errors"));
+                    if (errors_method) {
+                        PyRef error_list(PyObject_CallNoArgs(errors_method.get()));
+                        if (error_list) {
+                            PyRef err_dict(PyDict_New());
+                            if (err_dict) {
+                                static PyObject* s_detail_key2 = nullptr;
+                                if (!s_detail_key2) s_detail_key2 = PyUnicode_InternFromString("detail");
+                                PyDict_SetItem(err_dict.get(), s_detail_key2, error_list.get());
+                                PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
+                                if (err_json) {
+                                    char* ej_data; Py_ssize_t ej_len;
+                                    PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
+                                    PyRef resp(build_http_response_bytes(422, ej_data, (size_t)ej_len, req.keep_alive,
+                                               has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                                    if (resp) write_to_transport(transport, resp.get());
+                                }
+                            }
+                            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                            if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                            Py_DECREF(endpoint_local);
+                            Py_DECREF(body_params_local);
+                            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                            self->total_errors.fetch_add(1, std::memory_order_relaxed);
+                            return make_consumed_true(req.total_consumed);
+                        }
+                    }
+                }
+                Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                PyErr_Clear();
+                // Fall through to standard validation path
+            }
+        }
+
         // Lazy-load request_body_to_args function (one-time)
         if (!s_request_body_to_args) {
             PyRef deps_mod(PyImport_ImportModule("fastapi.dependencies.utils"));
@@ -2935,6 +3082,7 @@ static PyObject* CoreApp_handle_http(
     // Clean up body_params_local if not used in InlineResult
     Py_XDECREF(body_params_local);
 
+body_done:
     // ── CALL ENDPOINT FROM C++ ───────────────────────────────────────────
     PyRef coro(PyObject_Call(endpoint_local, g_empty_tuple, kwargs.get()));
     Py_DECREF(endpoint_local);  // release our strong ref
@@ -3001,9 +3149,19 @@ static PyObject* CoreApp_handle_http(
     // Clean up json_body_obj if it was allocated
     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
 
-    // Drive the coroutine
+    // ── Sync vs async endpoint dispatch ──────────────────────────────────
+    // For sync endpoints, PyObject_Call returns the result directly (no coroutine).
+    // For async endpoints, it returns a coroutine we must drive via PyIter_Send.
     PyObject* raw_result = nullptr;
-    PySendResult send_status = PyIter_Send(coro.get(), Py_None, &raw_result);
+    PySendResult send_status;
+    if (!is_coro_local) {
+        // Sync endpoint — result is already the return value, no coroutine driving needed
+        raw_result = coro.release();
+        send_status = PYGEN_RETURN;
+    } else {
+        // Async endpoint — drive the coroutine
+        send_status = PyIter_Send(coro.get(), Py_None, &raw_result);
+    }
 
     if (send_status == PYGEN_RETURN) {
         // ── Response model validation ────────────────────────────────────

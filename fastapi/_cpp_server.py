@@ -23,6 +23,12 @@ import sys
 import time
 from typing import Any
 
+# C++ WebSocket unmask (8-byte-at-a-time XOR, ~10x faster than Python loop)
+try:
+    from _fastapi_core import ws_unmask as _ws_unmask
+except ImportError:
+    _ws_unmask = None
+
 # ── Pre-built responses (allocated once, reused forever) ─────────────────────
 
 _500_RESP = (
@@ -216,10 +222,16 @@ class CppHttpProtocol(asyncio.Protocol):
         core = self._core
         IR = _InlineResult
 
-        while buf:
+        # Use offset tracking instead of repeated del buf[:consumed]
+        # This does ONE memmove at the end instead of N memmoves in the loop
+        total_consumed = 0
+        mv = memoryview(buf)
+        buf_len = len(buf)
+
+        while total_consumed < buf_len:
             # ── C++ handle_http: parse + route + dispatch + write ──────
             try:
-                consumed, result = core.handle_http(buf, transport)
+                consumed, result = core.handle_http(mv[total_consumed:], transport)
             except Exception:
                 buf.clear()
                 transport.write(_500_RESP)
@@ -235,7 +247,7 @@ class CppHttpProtocol(asyncio.Protocol):
                 transport.close()
                 return
 
-            del buf[:consumed]
+            total_consumed += consumed
 
             # ── Dispatch based on result type ────────────────────────
             if result is True:
@@ -254,9 +266,10 @@ class CppHttpProtocol(asyncio.Protocol):
                     self._loop.create_task(
                         self._handle_websocket(endpoint, path_params))
                     # Remaining buf data (if any) is WebSocket frames
-                    if buf:
-                        self._handle_ws_frames(bytes(buf))
-                        buf.clear()
+                    remaining = buf[total_consumed:]
+                    buf.clear()
+                    if remaining:
+                        self._handle_ws_frames(bytes(remaining))
                     return  # connection is now WebSocket
 
                 elif tag == "async":
@@ -274,6 +287,11 @@ class CppHttpProtocol(asyncio.Protocol):
             elif IR and isinstance(result, IR):
                 # Pydantic body validation needed
                 self._loop.create_task(self._handle_pydantic(result))
+
+        # Remove all consumed data in one operation (instead of N memmoves)
+        mv.release()
+        if total_consumed > 0:
+            del buf[:total_consumed]
 
         # ── Flush ─────────────────────────────────────────────────────
         if not buf:
@@ -324,8 +342,11 @@ class CppHttpProtocol(asyncio.Protocol):
             # Extract payload
             payload = bytearray(buf[pos:pos + payload_len])
             if mask:
-                for i in range(payload_len):
-                    payload[i] ^= mask[i & 3]
+                if _ws_unmask is not None:
+                    _ws_unmask(payload, bytes(mask))
+                else:
+                    for i in range(payload_len):
+                        payload[i] ^= mask[i & 3]
 
             del buf[:pos + payload_len]
 

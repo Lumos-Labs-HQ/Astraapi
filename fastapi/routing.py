@@ -803,19 +803,34 @@ def _collect_deps(
 def _make_dep_solver(dependant: Dependant):
     """Create a fast dependency solver callable for C++ fast path.
 
-    Returns a callable that takes (kwargs_dict) and returns a coroutine
-    resolving to (values_dict, errors_list).
+    Returns a callable that takes (kwargs_dict) and returns (values_dict, errors_list).
+    If all dependencies are sync, returns a plain function (no coroutine overhead).
+    If any dependency is async, returns an async function (coroutine).
     The solved dependency values get merged into kwargs by C++.
     """
-    from contextlib import asynccontextmanager
-    from fastapi.dependencies.utils import solve_dependencies
-
     # Pre-flatten the dependency callables and their names for fast resolution
     dep_callables = []
+    all_sync = True
     for sub_dep in dependant.dependencies:
         if sub_dep.call is not None and sub_dep.name:
-            dep_callables.append((sub_dep.name, sub_dep.call,
-                                  getattr(sub_dep, 'is_coroutine_callable', False)))
+            is_coro = getattr(sub_dep, 'is_coroutine_callable', False)
+            dep_callables.append((sub_dep.name, sub_dep.call, is_coro))
+            if is_coro:
+                all_sync = False
+
+    if all_sync:
+        # Fast path: all deps are sync — return plain function, no coroutine overhead
+        def _solve_sync(kwargs_dict):
+            values = {}
+            errors = []
+            for name, call, _ in dep_callables:
+                try:
+                    result = call()
+                    values[name] = result
+                except Exception as exc:
+                    errors.append({"loc": ("dependency", name), "msg": str(exc), "type": "dependency_error"})
+            return (values, errors)
+        return _solve_sync
 
     async def _solve(kwargs_dict):
         """Resolve dependencies and return (values_dict, errors_list)."""

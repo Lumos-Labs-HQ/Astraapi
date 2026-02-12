@@ -58,6 +58,14 @@ target_include_directories(_fastapi_core PRIVATE
     ${Python3_INCLUDE_DIRS}
 )
 
+# ── PGO (Profile-Guided Optimization) ────────────────────────────────────────
+# Usage:
+#   Step 1: cmake -DENABLE_PGO_GENERATE=ON .. && make -j$(nproc)
+#   Step 2: Run benchmarks to generate profile data
+#   Step 3: cmake -DENABLE_PGO_USE=ON .. && make -j$(nproc)
+option(ENABLE_PGO_GENERATE "Build with PGO instrumentation" OFF)
+option(ENABLE_PGO_USE "Build with PGO data" OFF)
+
 # ── Compiler flags: maximum optimization ─────────────────────────────────────
 # Common flags for both C and C++
 target_compile_options(_fastapi_core PRIVATE
@@ -73,6 +81,17 @@ target_compile_options(_fastapi_core PRIVATE
 
 # C++-only flags (don't pass to C files)
 target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
+
+# PGO instrumentation / optimization flags
+if(ENABLE_PGO_GENERATE)
+    target_compile_options(_fastapi_core PRIVATE -fprofile-generate)
+    target_link_options(_fastapi_core PRIVATE -fprofile-generate)
+    message(STATUS "PGO: Instrumentation enabled — run benchmarks to generate profile data")
+elseif(ENABLE_PGO_USE)
+    target_compile_options(_fastapi_core PRIVATE -fprofile-use -fprofile-correction)
+    target_link_options(_fastapi_core PRIVATE -fprofile-use)
+    message(STATUS "PGO: Using profile data for optimization")
+endif()
 
 # -Wno-free-nonheap-object: suppress GCC 14 false positive in LTO-inlined vector::push_back
 target_link_options(_fastapi_core PRIVATE -flto -Wno-free-nonheap-object)
@@ -90,6 +109,11 @@ if(BROTLI_ENC AND BROTLI_DEC)
 else()
     message(STATUS "Brotli not found — compression will fall back to gzip only")
 endif()
+
+# ── yyjson optimization: strict JSON mode + SIMD (implied by -march=native) ──
+target_compile_definitions(_fastapi_core PRIVATE
+    YYJSON_DISABLE_NON_STANDARD=1
+)
 
 # ── Output name: match Python's expected .so name ────────────────────────────
 # Python expects: _fastapi_core.cpython-311-x86_64-linux-gnu.so
