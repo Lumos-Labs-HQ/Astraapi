@@ -1193,7 +1193,7 @@ class FastAPI(Starlette):
         self._routes_synced = True
 
         import asyncio
-        from fastapi.routing import APIRoute
+        from fastapi.routing import APIRoute, APIWebSocketRoute
 
         for route in self.routes:
             if not isinstance(route, APIRoute):
@@ -1242,6 +1242,26 @@ class FastAPI(Starlette):
                         dep_solver,
                     )
                     self._core_asgi._fast_routes_registered = True
+            except Exception:
+                pass  # Non-fatal: Starlette still handles this route
+
+        # Register WebSocket routes in C++ core for app.run() fast-path
+        for route in self.routes:
+            if not isinstance(route, APIWebSocketRoute):
+                continue
+            try:
+                self._core_app.add_route(
+                    route.path,
+                    ["GET"],  # WS upgrade is always GET
+                    route.endpoint,
+                    True,  # WS endpoints are always async
+                    status_code=0,
+                    tags=[],
+                    has_body=False,
+                    exclude_unset=False,
+                    exclude_defaults=False,
+                    exclude_none=False,
+                )
             except Exception:
                 pass  # Non-fatal: Starlette still handles this route
 

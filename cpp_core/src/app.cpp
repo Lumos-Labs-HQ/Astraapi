@@ -2450,7 +2450,7 @@ static PyObject* CoreApp_handle_http(
             PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
 
             if (ws_endpoint) {
-                // Return (consumed, ("ws", endpoint, path_params_dict)) for Python to handle
+                // Return (consumed, ("ws", endpoint, path_params_dict, path)) for Python to handle
                 PyRef ws_tag(PyUnicode_InternFromString("ws"));
                 PyRef path_params(PyDict_New());
                 if (ws_match && ws_match->param_count > 0) {
@@ -2462,7 +2462,8 @@ static PyObject* CoreApp_handle_http(
                         if (pk && pv) PyDict_SetItem(path_params.get(), pk.get(), pv.get());
                     }
                 }
-                PyRef ws_info(PyTuple_Pack(3, ws_tag.get(), ws_endpoint, path_params.get()));
+                PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
+                PyRef ws_info(PyTuple_Pack(4, ws_tag.get(), ws_endpoint, path_params.get(), path_str.get()));
                 Py_DECREF(ws_endpoint);
                 return PyTuple_Pack(2, consumed.get(), ws_info.get());
             }

@@ -209,7 +209,7 @@ std::vector<uint8_t> ws_build_close_frame(uint16_t status_code) {
 
 // ── WebSocket upgrade handshake (RFC 6455 §4.2.2) ──────────────────────────
 
-static const char WS_MAGIC_GUID[] = "258EAFA5-E914-47DA-95CA-5AB611DC65B7";
+static const char WS_MAGIC_GUID[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 std::vector<char> ws_build_upgrade_response(const char* sec_key, size_t key_len) {
     // Compute Sec-WebSocket-Accept = base64(SHA1(key + magic_guid))

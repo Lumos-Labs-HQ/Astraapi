@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import signal
 import socket
 import struct
 import sys
 import time
 from typing import Any
+
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 # C++ WebSocket unmask (8-byte-at-a-time XOR, ~10x faster than Python loop)
 try:
@@ -64,18 +67,55 @@ class CppWebSocket:
     Frame parsing and building done via C++ ws_frame_parser (RFC 6455).
     """
 
-    __slots__ = ("_transport", "_loop", "_recv_queue", "_closed", "_close_code")
+    __slots__ = (
+        "_transport", "_loop", "_recv_queue", "_closed", "_close_code",
+        "client_state", "application_state", "scope", "path_params",
+    )
 
-    def __init__(self, transport: asyncio.Transport, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(
+        self,
+        transport: asyncio.Transport,
+        loop: asyncio.AbstractEventLoop,
+        path: str = "/",
+        path_params: dict | None = None,
+    ) -> None:
         self._transport = transport
         self._loop = loop
         self._recv_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
         self._closed = False
         self._close_code = 1000
+        # Starlette-compatible state tracking
+        self.client_state = WebSocketState.CONNECTED   # 101 already sent by C++
+        self.application_state = WebSocketState.CONNECTING
+        self.path_params = path_params or {}
+        self.scope = {
+            "type": "websocket",
+            "path": path,
+            "path_params": self.path_params,
+            "headers": [],
+            "query_string": b"",
+        }
 
-    async def accept(self) -> None:
+    # ── Lifecycle ─────────────────────────────────────────────────────
+
+    async def accept(self, subprotocol: str | None = None, headers: list | None = None) -> None:
         """Accept the WebSocket connection (upgrade already sent by C++)."""
-        pass  # 101 already sent by C++ handle_http
+        self.application_state = WebSocketState.CONNECTED
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        """Send close frame and close connection."""
+        if not self._closed:
+            self._closed = True
+            self._close_code = code
+            self.application_state = WebSocketState.DISCONNECTED
+            payload = struct.pack("!H", code)
+            frame = self._build_frame(0x8, payload)
+            try:
+                self._transport.write(frame)
+            except Exception:
+                pass
+
+    # ── Send methods ──────────────────────────────────────────────────
 
     async def send_text(self, data: str) -> None:
         """Send a text message."""
@@ -92,17 +132,30 @@ class CppWebSocket:
         frame = self._build_frame(0x2, data)
         self._transport.write(frame)
 
-    async def send_json(self, data: Any) -> None:
+    async def send_json(self, data: Any, mode: str = "text") -> None:
         """Send JSON data as text."""
         import json
-        await self.send_text(json.dumps(data))
+        text = json.dumps(data)
+        if mode == "text":
+            await self.send_text(text)
+        else:
+            await self.send_bytes(text.encode("utf-8"))
+
+    # ── Receive methods ───────────────────────────────────────────────
+
+    def _parse_close_code(self, payload: bytes) -> int:
+        """Extract close code from close frame payload (RFC 6455 §5.5.1)."""
+        if len(payload) >= 2:
+            return int.from_bytes(payload[:2], "big")
+        return 1000
 
     async def receive_text(self) -> str:
         """Receive a text message."""
         opcode, payload = await self._recv_queue.get()
         if opcode == 0x8:  # close
             self._closed = True
-            raise RuntimeError("WebSocket closed by client")
+            self.client_state = WebSocketState.DISCONNECTED
+            raise WebSocketDisconnect(code=self._parse_close_code(payload))
         return payload.decode("utf-8")
 
     async def receive_bytes(self) -> bytes:
@@ -110,27 +163,77 @@ class CppWebSocket:
         opcode, payload = await self._recv_queue.get()
         if opcode == 0x8:
             self._closed = True
-            raise RuntimeError("WebSocket closed by client")
+            self.client_state = WebSocketState.DISCONNECTED
+            raise WebSocketDisconnect(code=self._parse_close_code(payload))
         return payload
 
-    async def receive_json(self) -> Any:
+    async def receive_json(self, mode: str = "text") -> Any:
         """Receive and parse JSON data."""
         import json
-        text = await self.receive_text()
-        return json.loads(text)
+        if mode == "text":
+            text = await self.receive_text()
+            return json.loads(text)
+        else:
+            data = await self.receive_bytes()
+            return json.loads(data)
 
-    async def close(self, code: int = 1000) -> None:
-        """Send close frame and close connection."""
-        if not self._closed:
+    # ── Dict-based ASGI protocol methods ──────────────────────────────
+
+    async def receive(self) -> dict:
+        """Receive an ASGI-style WebSocket message dict."""
+        opcode, payload = await self._recv_queue.get()
+        if opcode == 0x8:
             self._closed = True
-            self._close_code = code
-            # Build close frame: code as 2 bytes
-            payload = struct.pack("!H", code)
-            frame = self._build_frame(0x8, payload)
-            try:
-                self._transport.write(frame)
-            except Exception:
-                pass
+            self.client_state = WebSocketState.DISCONNECTED
+            return {"type": "websocket.disconnect", "code": self._parse_close_code(payload)}
+        elif opcode == 0x1:
+            return {"type": "websocket.receive", "text": payload.decode("utf-8")}
+        else:
+            return {"type": "websocket.receive", "bytes": payload}
+
+    async def send(self, message: dict) -> None:
+        """Send an ASGI-style WebSocket message dict."""
+        msg_type = message.get("type", "")
+        if msg_type == "websocket.accept":
+            await self.accept(
+                subprotocol=message.get("subprotocol"),
+                headers=message.get("headers"),
+            )
+        elif msg_type == "websocket.send":
+            if "text" in message:
+                await self.send_text(message["text"])
+            elif "bytes" in message:
+                await self.send_bytes(message["bytes"])
+        elif msg_type == "websocket.close":
+            await self.close(code=message.get("code", 1000))
+
+    # ── Async iterators ───────────────────────────────────────────────
+
+    async def iter_text(self):
+        """Async iterator yielding text messages until disconnect."""
+        try:
+            while True:
+                yield await self.receive_text()
+        except WebSocketDisconnect:
+            pass
+
+    async def iter_bytes(self):
+        """Async iterator yielding binary messages until disconnect."""
+        try:
+            while True:
+                yield await self.receive_bytes()
+        except WebSocketDisconnect:
+            pass
+
+    async def iter_json(self):
+        """Async iterator yielding parsed JSON messages until disconnect."""
+        try:
+            while True:
+                yield await self.receive_json()
+        except WebSocketDisconnect:
+            pass
+
+    # ── Internal ──────────────────────────────────────────────────────
 
     def feed_frame(self, opcode: int, payload: bytes) -> None:
         """Feed a parsed frame from the protocol handler."""
@@ -198,7 +301,10 @@ class CppHttpProtocol(asyncio.Protocol):
         if self._ws and not self._ws._closed:
             self._ws._closed = True
             self._ws.feed_frame(0x8, b"")  # signal close to waiting receives
-        self._buf.clear()
+        try:
+            self._buf.clear()
+        except BufferError:
+            self._buf = bytearray()  # memoryview still held from crashed data_received
         self._transport = None
 
     # ── Data handling — the hot path ─────────────────────────────────────
@@ -233,6 +339,7 @@ class CppHttpProtocol(asyncio.Protocol):
             try:
                 consumed, result = core.handle_http(mv[total_consumed:], transport)
             except Exception:
+                mv.release()
                 buf.clear()
                 transport.write(_500_RESP)
                 transport.close()
@@ -243,6 +350,7 @@ class CppHttpProtocol(asyncio.Protocol):
 
             if consumed < 0:
                 # Parse error — 400 already sent by C++
+                mv.release()
                 buf.clear()
                 transport.close()
                 return
@@ -260,13 +368,32 @@ class CppHttpProtocol(asyncio.Protocol):
             if isinstance(result, tuple):
                 tag = result[0]
                 if tag == "ws":
-                    # WebSocket upgrade: ("ws", endpoint, path_params)
-                    _, endpoint, path_params = result
-                    self._ws = CppWebSocket(transport, self._loop)
+                    # WebSocket upgrade: ("ws", endpoint, path_params[, path])
+                    if len(result) >= 4:
+                        _, endpoint, path_params, ws_path = result
+                    else:
+                        _, endpoint, path_params = result
+                        ws_path = "/"
+                    print(f"[WS-DEBUG] upgrade detected: path={ws_path} params={path_params} endpoint={endpoint}", file=sys.stderr)
+                    if endpoint is None:
+                        # No matching WS route — 101 already sent, just close
+                        print("[WS-DEBUG] endpoint is None — closing", file=sys.stderr)
+                        if transport and not transport.is_closing():
+                            transport.close()
+                        mv.release()
+                        buf.clear()
+                        return
+                    self._ws = CppWebSocket(
+                        transport, self._loop,
+                        path=ws_path, path_params=path_params,
+                    )
+                    self._ka_cancel()  # WS connections are long-lived
+                    print(f"[WS-DEBUG] launching _handle_websocket task", file=sys.stderr)
                     self._loop.create_task(
                         self._handle_websocket(endpoint, path_params))
                     # Remaining buf data (if any) is WebSocket frames
-                    remaining = buf[total_consumed:]
+                    remaining = bytes(mv[total_consumed:])
+                    mv.release()
                     buf.clear()
                     if remaining:
                         self._handle_ws_frames(bytes(remaining))
@@ -384,6 +511,28 @@ class CppHttpProtocol(asyncio.Protocol):
             return
         self.data_received(b"")
 
+    # ── Starlette Response helper ─────────────────────────────────────────
+
+    def _write_response_obj(self, resp_obj: Any, keep_alive: bool) -> None:
+        """Write a Starlette Response object (HTMLResponse, etc.) to transport."""
+        body = resp_obj.body
+        if not isinstance(body, bytes):
+            body = body.encode("utf-8")
+        sc = resp_obj.status_code
+        parts = [f"HTTP/1.1 {sc} OK\r\n".encode()]
+        seen = set()
+        for k, v in resp_obj.headers.items():
+            kl = k.lower()
+            seen.add(kl)
+            parts.append(f"{k}: {v}\r\n".encode())
+        if "content-length" not in seen:
+            parts.append(f"content-length: {len(body)}\r\n".encode())
+        conn = b"connection: keep-alive\r\n" if keep_alive else b"connection: close\r\n"
+        parts.append(conn)
+        parts.append(b"\r\n")
+        parts.append(body)
+        self._transport.write(b"".join(parts))
+
     # ── Async endpoint dispatch ──────────────────────────────────────────
 
     async def _handle_async(self, coro: Any, status_code: int, keep_alive: bool) -> None:
@@ -391,11 +540,15 @@ class CppHttpProtocol(asyncio.Protocol):
         try:
             raw = await coro
             if self._transport and not self._transport.is_closing():
-                resp = self._core.build_response(raw, status_code, keep_alive)
-                if resp:
-                    self._transport.write(resp)
+                # Handle Starlette Response objects (HTMLResponse, etc.)
+                if hasattr(raw, "body") and hasattr(raw, "status_code"):
+                    self._write_response_obj(raw, keep_alive)
                 else:
-                    self._transport.write(_500_RESP)
+                    resp = self._core.build_response(raw, status_code, keep_alive)
+                    if resp:
+                        self._transport.write(resp)
+                    else:
+                        self._transport.write(_500_RESP)
         except Exception:
             if self._transport and not self._transport.is_closing():
                 self._transport.write(_500_RESP)
@@ -470,13 +623,32 @@ class CppHttpProtocol(asyncio.Protocol):
         """Run WebSocket endpoint with CppWebSocket wrapper."""
         ws = self._ws
         if not ws:
+            print("[WS-DEBUG] _handle_websocket: ws is None!", file=sys.stderr)
             return
         try:
             kwargs = dict(path_params) if path_params else {}
-            kwargs["websocket"] = ws
+            # Inject WebSocket by matching parameter name or type annotation
+            sig = inspect.signature(endpoint)
+            injected = False
+            for param_name, param in sig.parameters.items():
+                ann = param.annotation
+                if param_name == "websocket" or (
+                    ann is not inspect.Parameter.empty
+                    and getattr(ann, "__name__", "") == "WebSocket"
+                ):
+                    kwargs[param_name] = ws
+                    injected = True
+                    break
+            if not injected:
+                kwargs["websocket"] = ws
+            print(f"[WS-DEBUG] calling endpoint with kwargs={list(kwargs.keys())}", file=sys.stderr)
             await endpoint(**kwargs)
-        except Exception:
-            pass
+            print("[WS-DEBUG] endpoint returned normally", file=sys.stderr)
+        except WebSocketDisconnect:
+            print("[WS-DEBUG] WebSocketDisconnect (normal)", file=sys.stderr)
+        except Exception as exc:
+            print(f"[WS-DEBUG] WebSocket endpoint error: {exc}", file=sys.stderr)
+            import traceback; traceback.print_exc(file=sys.stderr)
         finally:
             if not ws._closed:
                 await ws.close(1000)

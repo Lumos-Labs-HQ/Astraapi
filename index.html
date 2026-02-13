@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FastAPI WebSocket Chat</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f0f0f;
+    color: #e0e0e0;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  /* ── Login screen ─────────────────────────────────────── */
+  #login-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    width: 100vw;
+    gap: 16px;
+    position: fixed;
+    top: 0;
+    left: 0;
+  }
+  #login-screen h1 { font-size: 28px; color: #7c5cff; }
+  #login-screen p { color: #888; font-size: 14px; }
+  #login-screen input {
+    padding: 12px 20px;
+    font-size: 16px;
+    border: 1px solid #333;
+    border-radius: 8px;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    width: 300px;
+    outline: none;
+  }
+  #login-screen input:focus { border-color: #7c5cff; }
+  #login-screen button {
+    padding: 12px 40px;
+    font-size: 16px;
+    border: none;
+    border-radius: 8px;
+    background: #7c5cff;
+    color: #fff;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  #login-screen button:hover { background: #6a4de0; }
+  #login-error { color: #ff5555; font-size: 13px; min-height: 18px; }
+
+  /* ── Chat screen ──────────────────────────────────────── */
+  #chat-screen { 
+    display: none; 
+    flex-direction: column; 
+    height: 100vh; 
+    width: 100vw;
+    position: fixed;
+    top: 0;
+    left: 0;
+  }
+
+  /* Header */
+  #header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: #1a1a1a;
+    border-bottom: 1px solid #2a2a2a;
+  }
+  #header h2 { font-size: 18px; color: #7c5cff; }
+  #connection-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #888;
+  }
+  #status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #555;
+  }
+  #status-dot.connected { background: #44cc44; }
+  #status-dot.disconnected { background: #ff5555; }
+
+  /* Layout: sidebar + messages */
+  #chat-body { display: flex; flex: 1; overflow: hidden; }
+
+  /* Sidebar */
+  #sidebar {
+    width: 200px;
+    background: #141414;
+    border-right: 1px solid #2a2a2a;
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+  }
+  #sidebar h3 { font-size: 13px; color: #888; text-transform: uppercase; margin-bottom: 10px; }
+  #user-list { list-style: none; flex: 1; overflow-y: auto; }
+  #user-list li {
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 2px;
+  }
+  #user-list li:hover { background: #1e1e1e; }
+  #user-list li .dot { width: 8px; height: 8px; border-radius: 50%; background: #44cc44; flex-shrink: 0; }
+  #user-list li.is-me { color: #7c5cff; font-weight: 600; }
+
+  /* Messages area */
+  #messages-area { flex: 1; display: flex; flex-direction: column; }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  /* Message bubbles */
+  .msg { max-width: 70%; padding: 8px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-wrap: break-word; }
+  .msg .meta { font-size: 11px; color: #777; margin-bottom: 2px; }
+  .msg .meta .name { font-weight: 600; }
+  .msg.mine { align-self: flex-end; background: #7c5cff; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.mine .meta { color: rgba(255,255,255,0.6); }
+  .msg.theirs { align-self: flex-start; background: #1e1e1e; border-bottom-left-radius: 4px; }
+  .msg.system {
+    align-self: center;
+    background: transparent;
+    color: #666;
+    font-size: 12px;
+    padding: 4px 0;
+  }
+  .msg.pm { border-left: 3px solid #ff9f43; }
+  .msg.pm .meta .name::after { content: " (PM)"; color: #ff9f43; font-weight: normal; }
+
+  /* Typing indicator */
+  #typing-indicator {
+    padding: 4px 20px;
+    font-size: 12px;
+    color: #666;
+    min-height: 22px;
+  }
+
+  /* Input bar */
+  #input-bar {
+    display: flex;
+    gap: 8px;
+    padding: 12px 20px;
+    background: #1a1a1a;
+    border-top: 1px solid #2a2a2a;
+  }
+  #msg-input {
+    flex: 1;
+    padding: 10px 16px;
+    font-size: 14px;
+    border: 1px solid #333;
+    border-radius: 8px;
+    background: #0f0f0f;
+    color: #e0e0e0;
+    outline: none;
+  }
+  #msg-input:focus { border-color: #7c5cff; }
+  #input-bar button {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    background: #7c5cff;
+    color: #fff;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  #input-bar button:hover { background: #6a4de0; }
+
+  /* Stats bar */
+  #stats-bar {
+    display: flex;
+    gap: 20px;
+    padding: 6px 20px;
+    background: #111;
+    border-top: 1px solid #2a2a2a;
+    font-size: 11px;
+    color: #555;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  @media (max-width: 600px) {
+    #sidebar { display: none; }
+    .msg { max-width: 90%; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Login ──────────────────────────────────────────────── -->
+<div id="login-screen">
+  <h1>WebSocket Chat</h1>
+  <p>FastAPI + C++ Core</p>
+  <input id="username-input" type="text" placeholder="Pick a username..." maxlength="20" autofocus>
+  <button id="join-btn" onclick="joinChat()">Join Chat</button>
+  <div id="login-error"></div>
+</div>
+
+<!-- ── Chat ───────────────────────────────────────────────── -->
+<div id="chat-screen">
+  <div id="header">
+    <h2>WebSocket Chat</h2>
+    <div id="connection-status">
+      <div id="status-dot"></div>
+      <span id="status-text">Connecting...</span>
+    </div>
+  </div>
+
+  <div id="chat-body">
+    <div id="sidebar">
+      <h3>Online (<span id="user-count">0</span>)</h3>
+      <ul id="user-list"></ul>
+    </div>
+
+    <div id="messages-area">
+      <div id="messages"></div>
+      <div id="typing-indicator"></div>
+      <div id="input-bar">
+        <input id="msg-input" type="text" placeholder="Type a message... (/pm user msg for DM)" maxlength="2000">
+        <button onclick="sendMessage()">Send</button>
+      </div>
+      <div id="stats-bar">
+        <span>Messages: <span id="stat-msgs">0</span></span>
+        <span>Latency: <span id="stat-latency">-</span></span>
+        <span>Connected: <span id="stat-uptime">0s</span></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let ws = null;
+let myUsername = "";
+let msgCount = 0;
+let connectTime = 0;
+let typingTimer = null;
+let isTyping = false;
+let typingUsers = new Set();
+let pingInterval = null;
+let lastPingSent = 0;
+
+// ── Login ──────────────────────────────────────────────────
+$("username-input").addEventListener("keydown", e => { if (e.key === "Enter") joinChat(); });
+
+function joinChat() {
+  const name = $("username-input").value.trim();
+  if (!name) { $("login-error").textContent = "Username cannot be empty"; return; }
+  if (name.length > 20) { $("login-error").textContent = "Max 20 characters"; return; }
+  if (!/^[a-zA-Z0-9_]+$/.test(name)) { $("login-error").textContent = "Letters, numbers, underscore only"; return; }
+
+  myUsername = name;
+  $("login-error").textContent = "";
+  connectWebSocket();
+}
+
+// ── WebSocket connection ───────────────────────────────────
+function connectWebSocket() {
+  const host = location.host || "127.0.0.1:8000";
+  const proto = (location.protocol === "https:") ? "wss:" : "ws:";
+  const url = `${proto}//${host}/ws/${myUsername}`;
+  console.log("Connecting to:", url);
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    $("login-error").textContent = `Connection failed: ${e.message}`;
+    return;
+  }
+
+  let wasOpened = false;
+
+  ws.onopen = () => {
+    console.log("[WS] onopen fired");
+    wasOpened = true;
+    $("login-screen").style.display = "none";
+    $("chat-screen").style.display = "flex";
+    setStatus("connected", "Connected");
+    connectTime = Date.now();
+    updateUptime();
+
+    // Ping every 10s to measure latency
+    pingInterval = setInterval(() => {
+      lastPingSent = Date.now();
+      ws.send(JSON.stringify({ type: "ping" }));
+    }, 10000);
+  };
+
+  ws.onmessage = (event) => {
+    console.log("[WS] onmessage:", event.data.substring(0, 100));
+    const data = JSON.parse(event.data);
+    handleMessage(data);
+  };
+
+  ws.onclose = (event) => {
+    console.log("[WS] onclose: code=" + event.code + " reason=" + event.reason + " wasClean=" + event.wasClean + " wasOpened=" + wasOpened);
+    setStatus("disconnected", `Disconnected (${event.code})`);
+    clearInterval(pingInterval);
+    // Show feedback on login screen if connection never opened
+    if (!wasOpened) {
+      $("login-error").textContent = `Connection failed (code ${event.code}). Is the server running on ${host}?`;
+      $("login-screen").style.display = "flex";
+      $("chat-screen").style.display = "none";
+    }
+  };
+
+  ws.onerror = (event) => {
+    console.log("[WS] onerror:", event);
+    $("login-error").textContent = "Connection failed. Is the server running?";
+    setStatus("disconnected", "Error");
+  };
+}
+
+// ── Handle incoming messages ───────────────────────────────
+function handleMessage(data) {
+  switch (data.type) {
+    case "message":
+      addChatMessage(data.username, data.message, data.timestamp, false);
+      break;
+    case "pm":
+      addPM(data.from, data.message, data.timestamp);
+      break;
+    case "join":
+      addSystemMessage(data.message);
+      break;
+    case "leave":
+      addSystemMessage(data.message);
+      break;
+    case "system":
+      addSystemMessage(data.message);
+      break;
+    case "users":
+      updateUserList(data.users, data.count);
+      break;
+    case "typing":
+      typingUsers.add(data.username);
+      updateTypingIndicator();
+      break;
+    case "stop_typing":
+      typingUsers.delete(data.username);
+      updateTypingIndicator();
+      break;
+    case "pong":
+      const latency = Date.now() - lastPingSent;
+      $("stat-latency").textContent = latency + "ms";
+      break;
+    case "error":
+      $("login-error").textContent = data.message;
+      break;
+  }
+}
+
+// ── Send message ───────────────────────────────────────────
+$("msg-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") { sendMessage(); return; }
+  // Typing indicator
+  if (!isTyping && ws && ws.readyState === 1) {
+    isTyping = true;
+    ws.send(JSON.stringify({ type: "typing" }));
+  }
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(() => {
+    isTyping = false;
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "stop_typing" }));
+  }, 1500);
+});
+
+function sendMessage() {
+  const input = $("msg-input");
+  const text = input.value.trim();
+  if (!text || !ws || ws.readyState !== 1) return;
+
+  // Stop typing indicator
+  isTyping = false;
+  clearTimeout(typingTimer);
+  ws.send(JSON.stringify({ type: "stop_typing" }));
+
+  // Check for /pm command
+  const pmMatch = text.match(/^\/pm\s+(\S+)\s+(.+)$/);
+  if (pmMatch) {
+    ws.send(JSON.stringify({ type: "pm", to: pmMatch[1], message: pmMatch[2] }));
+  } else {
+    ws.send(JSON.stringify({ type: "message", message: text }));
+  }
+  input.value = "";
+}
+
+// ── UI helpers ─────────────────────────────────────────────
+function addChatMessage(username, message, timestamp, isPM) {
+  const isMine = username === myUsername;
+  const div = document.createElement("div");
+  div.className = `msg ${isMine ? "mine" : "theirs"}`;
+  const time = formatTime(timestamp);
+  div.innerHTML = `<div class="meta"><span class="name">${esc(username)}</span> ${time}</div>${esc(message)}`;
+  appendAndScroll(div);
+  msgCount++;
+  $("stat-msgs").textContent = msgCount;
+}
+
+function addPM(from, message, timestamp) {
+  const isMine = from === myUsername;
+  const div = document.createElement("div");
+  div.className = `msg ${isMine ? "mine" : "theirs"} pm`;
+  const time = formatTime(timestamp);
+  const label = isMine ? "You (PM)" : `${esc(from)}`;
+  div.innerHTML = `<div class="meta"><span class="name">${label}</span> ${time}</div>${esc(message)}`;
+  appendAndScroll(div);
+  msgCount++;
+  $("stat-msgs").textContent = msgCount;
+}
+
+function addSystemMessage(message) {
+  const div = document.createElement("div");
+  div.className = "msg system";
+  div.textContent = message;
+  appendAndScroll(div);
+}
+
+function appendAndScroll(el) {
+  const msgs = $("messages");
+  const wasAtBottom = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 50;
+  msgs.appendChild(el);
+  if (wasAtBottom) msgs.scrollTop = msgs.scrollHeight;
+}
+
+function updateUserList(users, count) {
+  $("user-count").textContent = count;
+  const ul = $("user-list");
+  ul.innerHTML = "";
+  for (const u of users) {
+    const li = document.createElement("li");
+    li.className = u === myUsername ? "is-me" : "";
+    li.innerHTML = `<span class="dot"></span>${esc(u)}${u === myUsername ? " (you)" : ""}`;
+    li.onclick = () => {
+      if (u !== myUsername) {
+        $("msg-input").value = `/pm ${u} `;
+        $("msg-input").focus();
+      }
+    };
+    ul.appendChild(li);
+  }
+}
+
+function updateTypingIndicator() {
+  const el = $("typing-indicator");
+  const arr = [...typingUsers];
+  if (arr.length === 0) { el.textContent = ""; return; }
+  if (arr.length === 1) { el.textContent = `${arr[0]} is typing...`; return; }
+  if (arr.length === 2) { el.textContent = `${arr[0]} and ${arr[1]} are typing...`; return; }
+  el.textContent = `${arr.length} people are typing...`;
+}
+
+function setStatus(state, text) {
+  $("status-dot").className = state;
+  $("status-text").textContent = text;
+}
+
+function formatTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function updateUptime() {
+  setInterval(() => {
+    if (!connectTime) return;
+    const sec = Math.floor((Date.now() - connectTime) / 1000);
+    if (sec < 60) $("stat-uptime").textContent = sec + "s";
+    else if (sec < 3600) $("stat-uptime").textContent = Math.floor(sec/60) + "m " + (sec%60) + "s";
+    else $("stat-uptime").textContent = Math.floor(sec/3600) + "h " + Math.floor((sec%3600)/60) + "m";
+  }, 1000);
+}
+</script>
+</body>
+</html>
