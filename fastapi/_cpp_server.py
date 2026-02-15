@@ -82,6 +82,12 @@ try:
         ws_build_frames_batch as _ws_build_frames_batch,
         ws_parse_json as _ws_parse_json,
         ws_serialize_json as _ws_serialize_json,
+        ws_ring_buffer_create as _ws_ring_buffer_create,
+        ws_ring_buffer_append as _ws_ring_buffer_append,
+        ws_ring_buffer_readable_region as _ws_ring_buffer_readable_region,
+        ws_ring_buffer_consume as _ws_ring_buffer_consume,
+        ws_ring_buffer_readable as _ws_ring_buffer_readable,
+        ws_ring_buffer_reset as _ws_ring_buffer_reset,
     )
 except ImportError:
     _ws_unmask = None
@@ -94,6 +100,12 @@ except ImportError:
     _ws_build_frames_batch = None
     _ws_parse_json = None
     _ws_serialize_json = None
+    _ws_ring_buffer_create = None
+    _ws_ring_buffer_append = None
+    _ws_ring_buffer_readable_region = None
+    _ws_ring_buffer_consume = None
+    _ws_ring_buffer_readable = None
+    _ws_ring_buffer_reset = None
 
 # ── WebSocket endpoint signature cache ────────────────────────────────────────
 _ws_sig_cache: dict[int, str] = {}
@@ -457,12 +469,13 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_buf", "_ka", "_ka_deadline", "_loop", "_wr_paused", "_ws", "_ws_buf_offset", "_ws_handler")
+    __slots__ = ("_core", "_transport", "_buf", "_ka", "_ka_deadline", "_loop", "_wr_paused", "_ws", "_ws_buf_offset", "_ws_handler", "_ws_ring_buf")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop) -> None:
         self._core = core_app
         self._loop = loop
         self._transport: asyncio.Transport | None = None
+        # Use ring buffer for WebSocket if available, bytearray otherwise (HTTP fallback)
         self._buf = bytearray()
         self._ka: asyncio.TimerHandle | None = None
         self._ka_deadline: float = 0.0
@@ -470,6 +483,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_buf_offset = 0
         self._ws_handler = None  # Will be set to echo/json/normal handler after upgrade
         self._ws: CppWebSocket | None = None
+        self._ws_ring_buf = None  # C++ ring buffer capsule (created on WebSocket upgrade)
 
     # ── Connection lifecycle ─────────────────────────────────────────────
 
@@ -495,6 +509,10 @@ class CppHttpProtocol(asyncio.Protocol):
         except BufferError:
             self._buf = bytearray()  # memoryview still held from crashed data_received
         self._ws_buf_offset = 0
+        # Reset ring buffer if in use
+        if self._ws_ring_buf is not None and _ws_ring_buffer_reset is not None:
+            _ws_ring_buffer_reset(self._ws_ring_buf)
+            self._ws_ring_buf = None
         self._transport = None
 
     # ── Data handling — the hot path ─────────────────────────────────────
@@ -580,6 +598,16 @@ class CppHttpProtocol(asyncio.Protocol):
                     ws._protocol = self  # back-ref for echo mode switching
                     self._ws = ws
                     self._ka_cancel()  # WS connections are long-lived
+                    # TCP_NODELAY: disable Nagle's algorithm for low-latency WS
+                    try:
+                        sock = transport.get_extra_info("socket")
+                        if sock is not None:
+                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except (OSError, AttributeError):
+                        pass
+                    # Initialize ring buffer for WebSocket frame accumulation
+                    if _ws_ring_buffer_create is not None:
+                        self._ws_ring_buf = _ws_ring_buffer_create()
                     # Select optimal frame handler based on endpoint path
                     self._ws_handler = self._handle_ws_frames  # default
                     # print(f"[WS-DEBUG] launching _handle_websocket task", file=sys.stderr)
@@ -624,140 +652,262 @@ class CppHttpProtocol(asyncio.Protocol):
         """Parse incoming WebSocket frames and feed to CppWebSocket.
         Uses C++ batch parser for all frame parsing, unmasking, and pong generation.
         Inlines channel feed to avoid method-call overhead per frame.
-        Uses offset tracking to eliminate memmove on every call.
+        Uses ring buffer for zero-copy O(1) frame accumulation (vs O(N) memmove).
         """
-        buf = self._buf
-        buf += data
         ws = self._ws
         if not ws:
             return
 
-        # Choose parser: prefer text-decoding variant (returns str for TEXT frames)
-        _parser = _ws_parse_frames_text if _ws_parse_frames_text is not None else _ws_parse_frames
-        if _parser is not None:
-            # ── C++ fast path: parse all frames in one call ──────────
-            offset = self._ws_buf_offset
-            if offset > 0:
-                view = memoryview(buf)[offset:]
-            else:
-                view = buf
-            result = _parser(view)
-            if result is None:
+        # Use ring buffer if available (C++ path), otherwise fallback to bytearray
+        if (self._ws_ring_buf is not None and _ws_ring_buffer_append is not None
+            and _ws_ring_buffer_readable_region is not None and _ws_ring_buffer_consume is not None):
+            # ── Ring Buffer Path (FAST) ──────────────────────────────
+            # Append data to ring buffer
+            if not _ws_ring_buffer_append(self._ws_ring_buf, data):
+                # Ring buffer full - apply backpressure
+                if self._transport and not self._wr_paused:
+                    self._transport.pause_reading()
+                    self._wr_paused = True
                 return
 
-            consumed, frames, pong_data = result
+            # Choose parser: prefer text-decoding variant (returns str for TEXT frames)
+            _parser = _ws_parse_frames_text if _ws_parse_frames_text is not None else _ws_parse_frames
+            if _parser is None:
+                return
 
-            # Send any auto-generated pong responses
-            if pong_data and self._transport and not self._transport.is_closing():
-                self._transport.write(pong_data)
+            # Get readable region from ring buffer (may need multiple iterations for wrap-around)
+            while True:
+                view = _ws_ring_buffer_readable_region(self._ws_ring_buf)
+                if view is None:
+                    break  # No data to parse
 
-            # Inline channel feed — avoid ws.feed_frame() method call overhead
-            channel = ws._channel
-            waiter = channel._waiter
-            channel_buf = channel._buffer
-
-            for opcode, payload in frames:
-                if opcode == 0x8:  # Close
-                    # Feed close to channel
-                    if waiter is not None and not waiter.done():
-                        channel._waiter = None
-                        waiter.set_result((0x8, payload))
-                    else:
-                        channel_buf.append((0x8, payload))
-                    close_code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else 1000
-                    if _ws_build_close_frame_bytes is not None:
-                        close_resp = _ws_build_close_frame_bytes(close_code)
-                    else:
-                        close_resp = CppWebSocket._build_frame_py(0x8, payload[:2] if len(payload) >= 2 else b"\x03\xe8")
-                    if self._transport and not self._transport.is_closing():
-                        self._transport.write(close_resp)
-                    # Reset buffer
-                    self._ws_buf_offset = 0
-                    buf.clear()
-                    return
-                # Feed data frame to channel directly
-                if waiter is not None and not waiter.done():
-                    channel._waiter = None
-                    waiter.set_result((opcode, payload))
-                    waiter = None  # only first frame resolves waiter
-                else:
-                    channel_buf.append((opcode, payload))
-
-            # Offset tracking: avoid memmove
-            if consumed > 0:
-                offset += consumed
-                if offset >= len(buf):
-                    # Fully consumed — reset
-                    buf.clear()
-                    self._ws_buf_offset = 0
-                elif offset > 65536:
-                    # Compact when offset too large (prevent unbounded growth)
-                    del buf[:offset]
-                    self._ws_buf_offset = 0
-                else:
-                    self._ws_buf_offset = offset
-        else:
-            # ── Python fallback ─────────────────────────────────────
-            while len(buf) >= 2:
-                byte0 = buf[0]
-                byte1 = buf[1]
-                opcode = byte0 & 0x0F
-                masked = bool(byte1 & 0x80)
-                payload_len = byte1 & 0x7F
-                pos = 2
-
-                if payload_len == 126:
-                    if len(buf) < 4:
-                        break
-                    payload_len = struct.unpack("!H", buf[2:4])[0]
-                    pos = 4
-                elif payload_len == 127:
-                    if len(buf) < 10:
-                        break
-                    payload_len = struct.unpack("!Q", buf[2:10])[0]
-                    pos = 10
-
-                if masked:
-                    if len(buf) < pos + 4:
-                        break
-                    mask = buf[pos:pos + 4]
-                    pos += 4
-                else:
-                    mask = None
-
-                if len(buf) < pos + payload_len:
+                result = _parser(view)
+                if result is None:
                     break
 
-                payload = bytearray(buf[pos:pos + payload_len])
-                if mask:
-                    if _ws_unmask is not None:
-                        _ws_unmask(payload, bytes(mask))
+                consumed, frames, pong_data = result
+
+                if consumed == 0:
+                    break  # Need more data
+
+                # Send any auto-generated pong responses
+                if pong_data and self._transport and not self._transport.is_closing():
+                    self._transport.write(pong_data)
+
+                # Inline channel feed — avoid ws.feed_frame() method call overhead
+                channel = ws._channel
+                waiter = channel._waiter
+                channel_buf = channel._buffer
+
+                for opcode, payload in frames:
+                    if opcode == 0x8:  # Close
+                        # Feed close to channel
+                        if waiter is not None and not waiter.done():
+                            channel._waiter = None
+                            waiter.set_result((0x8, payload))
+                        else:
+                            channel_buf.append((0x8, payload))
+                        close_code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else 1000
+                        if _ws_build_close_frame_bytes is not None:
+                            close_resp = _ws_build_close_frame_bytes(close_code)
+                        else:
+                            close_resp = CppWebSocket._build_frame_py(0x8, payload[:2] if len(payload) >= 2 else b"\x03\xe8")
+                        if self._transport and not self._transport.is_closing():
+                            self._transport.write(close_resp)
+                        # Reset ring buffer
+                        if _ws_ring_buffer_reset is not None:
+                            _ws_ring_buffer_reset(self._ws_ring_buf)
+                        return
+                    # Feed data frame to channel directly
+                    if waiter is not None and not waiter.done():
+                        channel._waiter = None
+                        waiter.set_result((opcode, payload))
+                        waiter = None  # only first frame resolves waiter
                     else:
-                        for i in range(payload_len):
-                            payload[i] ^= mask[i & 3]
+                        channel_buf.append((opcode, payload))
 
-                del buf[:pos + payload_len]
+                # Consume parsed bytes from ring buffer (O(1) operation)
+                _ws_ring_buffer_consume(self._ws_ring_buf, consumed)
 
-                if opcode == 0x8:
-                    ws.feed_frame(0x8, bytes(payload))
-                    close_frame = CppWebSocket._build_frame(0x8, bytes(payload[:2]) if len(payload) >= 2 else b"\x03\xe8")
-                    if self._transport and not self._transport.is_closing():
-                        self._transport.write(close_frame)
+        else:
+            # ── Bytearray Fallback Path (for compatibility) ─────────
+            buf = self._buf
+            buf += data
+
+            # Choose parser: prefer text-decoding variant (returns str for TEXT frames)
+            _parser = _ws_parse_frames_text if _ws_parse_frames_text is not None else _ws_parse_frames
+            if _parser is not None:
+                # ── C++ fast path: parse all frames in one call ──────────
+                offset = self._ws_buf_offset
+                if offset > 0:
+                    view = memoryview(buf)[offset:]
+                else:
+                    view = buf
+                result = _parser(view)
+                if result is None:
                     return
-                elif opcode == 0x9:
-                    pong = CppWebSocket._build_frame(0xA, bytes(payload))
-                    if self._transport and not self._transport.is_closing():
-                        self._transport.write(pong)
-                    continue
-                elif opcode == 0xA:
-                    continue
 
-                ws.feed_frame(opcode, bytes(payload))
+                consumed, frames, pong_data = result
+
+                # Send any auto-generated pong responses
+                if pong_data and self._transport and not self._transport.is_closing():
+                    self._transport.write(pong_data)
+
+                # Inline channel feed — avoid ws.feed_frame() method call overhead
+                channel = ws._channel
+                waiter = channel._waiter
+                channel_buf = channel._buffer
+
+                for opcode, payload in frames:
+                    if opcode == 0x8:  # Close
+                        # Feed close to channel
+                        if waiter is not None and not waiter.done():
+                            channel._waiter = None
+                            waiter.set_result((0x8, payload))
+                        else:
+                            channel_buf.append((0x8, payload))
+                        close_code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else 1000
+                        if _ws_build_close_frame_bytes is not None:
+                            close_resp = _ws_build_close_frame_bytes(close_code)
+                        else:
+                            close_resp = CppWebSocket._build_frame_py(0x8, payload[:2] if len(payload) >= 2 else b"\x03\xe8")
+                        if self._transport and not self._transport.is_closing():
+                            self._transport.write(close_resp)
+                        # Reset buffer
+                        self._ws_buf_offset = 0
+                        buf.clear()
+                        return
+                    # Feed data frame to channel directly
+                    if waiter is not None and not waiter.done():
+                        channel._waiter = None
+                        waiter.set_result((opcode, payload))
+                        waiter = None  # only first frame resolves waiter
+                    else:
+                        channel_buf.append((opcode, payload))
+
+                # Offset tracking: avoid memmove
+                if consumed > 0:
+                    offset += consumed
+                    if offset >= len(buf):
+                        # Fully consumed — reset
+                        buf.clear()
+                        self._ws_buf_offset = 0
+                    elif offset > 65536:
+                        # Compact when offset too large (prevent unbounded growth)
+                        del buf[:offset]
+                        self._ws_buf_offset = 0
+                    else:
+                        self._ws_buf_offset = offset
+            else:
+                # ── Python fallback ─────────────────────────────────────
+                while len(buf) >= 2:
+                    byte0 = buf[0]
+                    byte1 = buf[1]
+                    opcode = byte0 & 0x0F
+                    masked = bool(byte1 & 0x80)
+                    payload_len = byte1 & 0x7F
+                    pos = 2
+
+                    if payload_len == 126:
+                        if len(buf) < 4:
+                            break
+                        payload_len = struct.unpack("!H", buf[2:4])[0]
+                        pos = 4
+                    elif payload_len == 127:
+                        if len(buf) < 10:
+                            break
+                        payload_len = struct.unpack("!Q", buf[2:10])[0]
+                        pos = 10
+
+                    if masked:
+                        if len(buf) < pos + 4:
+                            break
+                        mask = buf[pos:pos + 4]
+                        pos += 4
+                    else:
+                        mask = None
+
+                    if len(buf) < pos + payload_len:
+                        break
+
+                    payload = bytearray(buf[pos:pos + payload_len])
+                    if mask:
+                        if _ws_unmask is not None:
+                            _ws_unmask(payload, bytes(mask))
+                        else:
+                            for i in range(payload_len):
+                                payload[i] ^= mask[i & 3]
+
+                    del buf[:pos + payload_len]
+
+                    if opcode == 0x8:
+                        ws.feed_frame(0x8, bytes(payload))
+                        close_frame = CppWebSocket._build_frame(0x8, bytes(payload[:2]) if len(payload) >= 2 else b"\x03\xe8")
+                        if self._transport and not self._transport.is_closing():
+                            self._transport.write(close_frame)
+                        return
+                    elif opcode == 0x9:
+                        pong = CppWebSocket._build_frame(0xA, bytes(payload))
+                        if self._transport and not self._transport.is_closing():
+                            self._transport.write(pong)
+                        continue
+                    elif opcode == 0xA:
+                        continue
+
+                    ws.feed_frame(opcode, bytes(payload))
 
     def _handle_ws_frames_echo(self, data: bytes) -> None:
         """Ultra-fast echo path: C++ parses frames AND builds echo responses in one call.
-        No per-message Python overhead — entire parse+echo done in C++.
+        Uses ring buffer for O(1) frame accumulation (no bytearray concat or memmove).
+        Single-pass C++ echo: parse + unmask + build response in one pass.
         """
+        transport = self._transport
+
+        # ── Ring Buffer Path (FAST) ──────────────────────────────────
+        if (self._ws_ring_buf is not None and _ws_ring_buffer_append is not None
+            and _ws_ring_buffer_readable_region is not None
+            and _ws_ring_buffer_consume is not None):
+            # Append incoming data to ring buffer (O(1) — no bytearray concat)
+            if not _ws_ring_buffer_append(self._ws_ring_buf, data):
+                return  # Ring buffer full — backpressure
+
+            # Parse frames from ring buffer (handles wrap-around via multiple iterations)
+            while True:
+                view = _ws_ring_buffer_readable_region(self._ws_ring_buf)
+                if view is None:
+                    break
+
+                result = _ws_echo_frames(view)
+                if result is None:
+                    break
+
+                consumed, echo_bytes, close_payload = result
+                if consumed == 0:
+                    break
+
+                # Write echo response
+                if echo_bytes is not None and transport and not transport.is_closing():
+                    transport.write(echo_bytes)
+
+                # Consume processed bytes from ring buffer
+                _ws_ring_buffer_consume(self._ws_ring_buf, consumed)
+
+                # Handle close frame
+                if close_payload is not None:
+                    ws = self._ws
+                    if ws:
+                        ws.feed_frame(0x8, close_payload)
+                        close_code = int.from_bytes(close_payload[:2], "big") if len(close_payload) >= 2 else 1000
+                        if _ws_build_close_frame_bytes is not None:
+                            close_resp = _ws_build_close_frame_bytes(close_code)
+                        else:
+                            close_resp = CppWebSocket._build_frame_py(0x8, close_payload[:2] if len(close_payload) >= 2 else b"\x03\xe8")
+                        if transport and not transport.is_closing():
+                            transport.write(close_resp)
+                    return
+            return
+
+        # ── Bytearray Fallback ───────────────────────────────────────
         buf = self._buf
         buf += data
 
@@ -771,7 +921,6 @@ class CppHttpProtocol(asyncio.Protocol):
             return
 
         consumed, echo_bytes, close_payload = result
-        transport = self._transport
 
         # Write all echo response frames in one call
         if echo_bytes is not None and transport and not transport.is_closing():

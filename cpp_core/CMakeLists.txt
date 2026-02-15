@@ -35,6 +35,7 @@ set(SOURCES
     src/dependency_resolver.cpp
     src/json_parser.cpp
     src/ws_frame_parser.cpp
+    src/ws_ring_buffer.cpp
 )
 
 # ── Third-party C libraries (yyjson, ryu, llhttp) ─────────────────────────

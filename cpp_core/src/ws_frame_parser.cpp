@@ -4,6 +4,7 @@
 #include "pyref.hpp"
 #include <cstring>
 #include <string>
+#include <vector>
 
 // ── SIMD headers ─────────────────────────────────────────────────────────────
 #if defined(__SSE2__)
@@ -285,8 +286,74 @@ std::vector<char> ws_build_upgrade_response(const char* sec_key, size_t key_len)
 // Python-callable high-performance WebSocket functions
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ── GIL-released frame parse helper ──────────────────────────────────────────
+// Parses and unmasks frames into C++ structs. No Python API calls.
+
+namespace {
+
+struct ParsedFrameRef {
+    uint8_t opcode;
+    size_t payload_offset;  // offset into input buffer (already unmasked in-place)
+    size_t payload_len;
+};
+
+struct ParseResult {
+    std::vector<ParsedFrameRef> frames;
+    std::vector<uint8_t> pong_buf;
+    size_t total_consumed = 0;
+};
+
+void ws_parse_frames_nogil(uint8_t* data, size_t data_len, ParseResult& result) {
+    size_t total_consumed = 0;
+
+    while (total_consumed < data_len) {
+        WsFrame frame;
+        int consumed = ws_parse_frame(data + total_consumed, data_len - total_consumed, &frame);
+        if (consumed <= 0) break;
+
+        // Unmask in-place
+        if (frame.masked && frame.payload_len > 0) {
+            ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
+        }
+
+        uint8_t opcode = (uint8_t)frame.opcode;
+
+        if (opcode == WS_PING) {
+            size_t pong_hdr = ws_frame_header_size((size_t)frame.payload_len);
+            size_t old_size = result.pong_buf.size();
+            result.pong_buf.resize(old_size + pong_hdr + (size_t)frame.payload_len);
+            ws_write_frame_header(result.pong_buf.data() + old_size, WS_PONG, (size_t)frame.payload_len);
+            if (frame.payload_len > 0) {
+                memcpy(result.pong_buf.data() + old_size + pong_hdr, frame.payload, (size_t)frame.payload_len);
+            }
+            total_consumed += (size_t)consumed;
+            continue;
+        }
+
+        if (opcode == WS_PONG) {
+            total_consumed += (size_t)consumed;
+            continue;
+        }
+
+        // Store frame reference (payload offset into input buffer)
+        result.frames.push_back({
+            opcode,
+            (size_t)(frame.payload - data),
+            (size_t)frame.payload_len
+        });
+
+        total_consumed += (size_t)consumed;
+
+        if (opcode == WS_CLOSE) break;
+    }
+
+    result.total_consumed = total_consumed;
+}
+
+} // anonymous namespace
+
 // ── ws_parse_frames(buffer: bytearray) -> (consumed, [(opcode, payload), ...], pong_bytes|None)
-// Parses all complete frames from buffer in one C call.
+// Parses all complete frames from buffer in one C call with GIL release.
 // Unmaskes payloads, auto-generates pong for ping frames.
 
 PyObject* py_ws_parse_frames(PyObject* /*self*/, PyObject* arg) {
@@ -297,77 +364,43 @@ PyObject* py_ws_parse_frames(PyObject* /*self*/, PyObject* arg) {
 
     uint8_t* data = (uint8_t*)buf.buf;
     size_t data_len = (size_t)buf.len;
-    size_t total_consumed = 0;
 
-    // Pre-allocate list (most common: 1-4 frames per call)
-    PyRef frames(PyList_New(0));
+    // ── GIL released: parse + unmask all frames ──────────────────────────
+    ParseResult pres;
+
+    Py_BEGIN_ALLOW_THREADS
+    ws_parse_frames_nogil(data, data_len, pres);
+    Py_END_ALLOW_THREADS
+
+    // ── GIL held: build Python objects from parsed frame refs ─────────────
+    PyRef frames(PyList_New((Py_ssize_t)pres.frames.size()));
     if (!frames) { PyBuffer_Release(&buf); return nullptr; }
 
-    // Accumulate pong responses (rare — usually 0)
-    std::vector<uint8_t> pong_buf;
-
-    while (total_consumed < data_len) {
-        WsFrame frame;
-        int consumed = ws_parse_frame(data + total_consumed, data_len - total_consumed, &frame);
-
-        if (consumed <= 0) break;  // need more data or error
-
-        // Unmask in-place
-        if (frame.masked && frame.payload_len > 0) {
-            ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
-        }
-
-        uint8_t opcode = (uint8_t)frame.opcode;
-
-        if (opcode == WS_PING) {
-            // Auto-build pong response, append to pong_buf
-            size_t pong_hdr = ws_frame_header_size((size_t)frame.payload_len);
-            size_t old_size = pong_buf.size();
-            pong_buf.resize(old_size + pong_hdr + (size_t)frame.payload_len);
-            ws_write_frame_header(pong_buf.data() + old_size, WS_PONG, (size_t)frame.payload_len);
-            if (frame.payload_len > 0) {
-                memcpy(pong_buf.data() + old_size + pong_hdr, frame.payload, (size_t)frame.payload_len);
-            }
-            total_consumed += (size_t)consumed;
-            continue;
-        }
-
-        if (opcode == WS_PONG) {
-            // Ignore pong frames
-            total_consumed += (size_t)consumed;
-            continue;
-        }
-
-        // Data frame or close — create (opcode, payload) tuple
-        PyRef payload_bytes(PyBytes_FromStringAndSize((const char*)frame.payload, (Py_ssize_t)frame.payload_len));
+    for (size_t i = 0; i < pres.frames.size(); i++) {
+        const auto& fr = pres.frames[i];
+        PyObject* payload_bytes = PyBytes_FromStringAndSize(
+            (const char*)(data + fr.payload_offset), (Py_ssize_t)fr.payload_len);
         if (!payload_bytes) { PyBuffer_Release(&buf); return nullptr; }
 
-        PyRef tuple(PyTuple_Pack(2, PyLong_FromLong(opcode), payload_bytes.get()));
+        PyObject* opcode_obj = PyLong_FromLong(fr.opcode);
+        if (!opcode_obj) { Py_DECREF(payload_bytes); PyBuffer_Release(&buf); return nullptr; }
+
+        PyObject* tuple = PyTuple_Pack(2, opcode_obj, payload_bytes);
+        Py_DECREF(opcode_obj);
+        Py_DECREF(payload_bytes);
         if (!tuple) { PyBuffer_Release(&buf); return nullptr; }
-        // Fix refcount: PyTuple_Pack increfs, but PyLong_FromLong returns new ref
-        // We need to decref the opcode long since PyTuple_Pack stole our ref
-        Py_DECREF(PyTuple_GET_ITEM(tuple.get(), 0));  // balance the PyLong_FromLong
 
-        if (PyList_Append(frames.get(), tuple.get()) < 0) {
-            PyBuffer_Release(&buf);
-            return nullptr;
-        }
-
-        total_consumed += (size_t)consumed;
-
-        if (opcode == WS_CLOSE) {
-            break;  // stop processing after close
-        }
+        PyList_SET_ITEM(frames.get(), (Py_ssize_t)i, tuple);  // steals ref
     }
 
     PyBuffer_Release(&buf);
 
     // Build result: (consumed, frames_list, pong_bytes_or_none)
-    PyRef py_consumed(PyLong_FromSize_t(total_consumed));
+    PyRef py_consumed(PyLong_FromSize_t(pres.total_consumed));
 
     PyObject* py_pong;
-    if (!pong_buf.empty()) {
-        py_pong = PyBytes_FromStringAndSize((const char*)pong_buf.data(), (Py_ssize_t)pong_buf.size());
+    if (!pres.pong_buf.empty()) {
+        py_pong = PyBytes_FromStringAndSize((const char*)pres.pong_buf.data(), (Py_ssize_t)pres.pong_buf.size());
         if (!py_pong) return nullptr;
     } else {
         Py_INCREF(Py_None);
@@ -427,8 +460,8 @@ PyObject* py_ws_build_close_frame_bytes(PyObject* /*self*/, PyObject* arg) {
 }
 
 // ── ws_parse_frames_text(buffer: bytearray) -> (consumed, [(opcode, str|bytes), ...], pong_bytes|None)
-// Like ws_parse_frames but decodes TEXT frame payloads as UTF-8 str in C++,
-// avoiding a separate .decode("utf-8") call in Python.
+// Like ws_parse_frames but decodes TEXT frame payloads as UTF-8 str in C++.
+// GIL released during parse + unmask, reacquired for Python object creation.
 
 PyObject* py_ws_parse_frames_text(PyObject* /*self*/, PyObject* arg) {
     Py_buffer buf;
@@ -438,77 +471,53 @@ PyObject* py_ws_parse_frames_text(PyObject* /*self*/, PyObject* arg) {
 
     uint8_t* data = (uint8_t*)buf.buf;
     size_t data_len = (size_t)buf.len;
-    size_t total_consumed = 0;
 
-    PyRef frames(PyList_New(0));
+    // ── GIL released: parse + unmask all frames ──────────────────────────
+    ParseResult pres;
+
+    Py_BEGIN_ALLOW_THREADS
+    ws_parse_frames_nogil(data, data_len, pres);
+    Py_END_ALLOW_THREADS
+
+    // ── GIL held: build Python objects with UTF-8 decode for TEXT frames ──
+    PyRef frames(PyList_New((Py_ssize_t)pres.frames.size()));
     if (!frames) { PyBuffer_Release(&buf); return nullptr; }
 
-    std::vector<uint8_t> pong_buf;
+    for (size_t i = 0; i < pres.frames.size(); i++) {
+        const auto& fr = pres.frames[i];
+        const char* payload_ptr = (const char*)(data + fr.payload_offset);
 
-    while (total_consumed < data_len) {
-        WsFrame frame;
-        int consumed = ws_parse_frame(data + total_consumed, data_len - total_consumed, &frame);
-        if (consumed <= 0) break;
-
-        if (frame.masked && frame.payload_len > 0) {
-            ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
-        }
-
-        uint8_t opcode = (uint8_t)frame.opcode;
-
-        if (opcode == WS_PING) {
-            size_t pong_hdr = ws_frame_header_size((size_t)frame.payload_len);
-            size_t old_size = pong_buf.size();
-            pong_buf.resize(old_size + pong_hdr + (size_t)frame.payload_len);
-            ws_write_frame_header(pong_buf.data() + old_size, WS_PONG, (size_t)frame.payload_len);
-            if (frame.payload_len > 0) {
-                memcpy(pong_buf.data() + old_size + pong_hdr, frame.payload, (size_t)frame.payload_len);
-            }
-            total_consumed += (size_t)consumed;
-            continue;
-        }
-
-        if (opcode == WS_PONG) {
-            total_consumed += (size_t)consumed;
-            continue;
-        }
-
-        // For TEXT frames, decode payload as UTF-8 str directly
         PyObject* payload_obj;
-        if (opcode == WS_TEXT) {
+        if (fr.opcode == WS_TEXT) {
             payload_obj = PyUnicode_DecodeUTF8(
-                (const char*)frame.payload, (Py_ssize_t)frame.payload_len, "surrogateescape");
+                payload_ptr, (Py_ssize_t)fr.payload_len, "surrogateescape");
             if (!payload_obj) {
                 // Fallback to bytes on decode error
-                payload_obj = PyBytes_FromStringAndSize(
-                    (const char*)frame.payload, (Py_ssize_t)frame.payload_len);
+                PyErr_Clear();
+                payload_obj = PyBytes_FromStringAndSize(payload_ptr, (Py_ssize_t)fr.payload_len);
             }
         } else {
-            payload_obj = PyBytes_FromStringAndSize(
-                (const char*)frame.payload, (Py_ssize_t)frame.payload_len);
+            payload_obj = PyBytes_FromStringAndSize(payload_ptr, (Py_ssize_t)fr.payload_len);
         }
         if (!payload_obj) { PyBuffer_Release(&buf); return nullptr; }
 
-        PyRef payload_ref(payload_obj);
-        PyRef tuple(PyTuple_Pack(2, PyLong_FromLong(opcode), payload_ref.get()));
+        PyObject* opcode_obj = PyLong_FromLong(fr.opcode);
+        if (!opcode_obj) { Py_DECREF(payload_obj); PyBuffer_Release(&buf); return nullptr; }
+
+        PyObject* tuple = PyTuple_Pack(2, opcode_obj, payload_obj);
+        Py_DECREF(opcode_obj);
+        Py_DECREF(payload_obj);
         if (!tuple) { PyBuffer_Release(&buf); return nullptr; }
-        Py_DECREF(PyTuple_GET_ITEM(tuple.get(), 0));  // balance PyLong_FromLong
 
-        if (PyList_Append(frames.get(), tuple.get()) < 0) {
-            PyBuffer_Release(&buf);
-            return nullptr;
-        }
-
-        total_consumed += (size_t)consumed;
-        if (opcode == WS_CLOSE) break;
+        PyList_SET_ITEM(frames.get(), (Py_ssize_t)i, tuple);  // steals ref
     }
 
     PyBuffer_Release(&buf);
 
-    PyRef py_consumed(PyLong_FromSize_t(total_consumed));
+    PyRef py_consumed(PyLong_FromSize_t(pres.total_consumed));
     PyObject* py_pong;
-    if (!pong_buf.empty()) {
-        py_pong = PyBytes_FromStringAndSize((const char*)pong_buf.data(), (Py_ssize_t)pong_buf.size());
+    if (!pres.pong_buf.empty()) {
+        py_pong = PyBytes_FromStringAndSize((const char*)pres.pong_buf.data(), (Py_ssize_t)pres.pong_buf.size());
         if (!py_pong) return nullptr;
     } else {
         Py_INCREF(Py_None);
@@ -518,13 +527,83 @@ PyObject* py_ws_parse_frames_text(PyObject* /*self*/, PyObject* arg) {
     return PyTuple_Pack(3, py_consumed.get(), frames.get(), py_pong);
 }
 
+// ── GIL-released echo helper ─────────────────────────────────────────────────
+// Pure C++ work: parse frames, unmask, build echo output. No Python API calls.
+
+namespace {
+
+struct EchoResult {
+    size_t total_consumed = 0;
+    bool has_close = false;
+    size_t close_payload_offset = 0;  // offset into input buffer
+    size_t close_payload_len = 0;
+};
+
+void ws_echo_frames_nogil(
+    uint8_t* data, size_t data_len,
+    std::vector<uint8_t>& out, EchoResult& result)
+{
+    size_t total_consumed = 0;
+
+    while (total_consumed < data_len) {
+        WsFrame frame;
+        int consumed = ws_parse_frame(data + total_consumed, data_len - total_consumed, &frame);
+        if (consumed <= 0) break;
+
+        uint8_t opcode = (uint8_t)frame.opcode;
+
+        if (opcode == WS_CLOSE) {
+            result.has_close = true;
+            if (frame.masked && frame.payload_len > 0) {
+                ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
+            }
+            // Store offset+len for Python object creation after GIL reacquire
+            result.close_payload_offset = (size_t)(frame.payload - data);
+            result.close_payload_len = (size_t)frame.payload_len;
+            total_consumed += (size_t)consumed;
+            break;
+        }
+
+        if (opcode == WS_PONG) {
+            total_consumed += (size_t)consumed;
+            continue;
+        }
+
+        // Unmask payload in-place (SIMD-accelerated for large payloads)
+        if (frame.masked && frame.payload_len > 0) {
+            ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
+        }
+
+        // Response opcode: PING → PONG, else echo same opcode
+        WsOpcode resp_opcode = (opcode == WS_PING) ? WS_PONG : (WsOpcode)opcode;
+
+        // Write response frame header
+        uint8_t hdr[10];
+        size_t hdr_len = ws_write_frame_header(hdr, resp_opcode, (size_t)frame.payload_len);
+
+        // Append header + payload to output buffer
+        size_t pos = out.size();
+        out.resize(pos + hdr_len + (size_t)frame.payload_len);
+        memcpy(out.data() + pos, hdr, hdr_len);
+        if (frame.payload_len > 0) {
+            memcpy(out.data() + pos + hdr_len, frame.payload, (size_t)frame.payload_len);
+        }
+
+        total_consumed += (size_t)consumed;
+    }
+
+    result.total_consumed = total_consumed;
+}
+
+} // anonymous namespace
+
 // ── ws_echo_frames(buffer: bytearray) -> (consumed, echo_bytes, close_payload|None)
-// Parse all incoming frames, unmask, and build echo response frames in one C++ call.
-// Returns all echo responses as a single contiguous bytes buffer.
-// For PING: auto-generates PONG (included in echo_bytes).
-// For CLOSE: stops and returns close payload separately.
+// SINGLE-PASS with GIL release: Parse, unmask, and build echo response.
+// Uses thread-local output buffer to avoid per-message heap allocation.
+// Releases GIL during pure C++ work (parsing, SIMD unmasking, memcpy).
 
 PyObject* py_ws_echo_frames(PyObject* /*self*/, PyObject* arg) {
+    // ── GIL held: extract buffer ──────────────────────────────────────────
     Py_buffer buf;
     if (PyObject_GetBuffer(arg, &buf, PyBUF_WRITABLE) < 0) {
         return nullptr;
@@ -532,121 +611,55 @@ PyObject* py_ws_echo_frames(PyObject* /*self*/, PyObject* arg) {
 
     uint8_t* data = (uint8_t*)buf.buf;
     size_t data_len = (size_t)buf.len;
-    size_t total_consumed = 0;
 
-    // First pass: compute total echo output size
-    size_t echo_size = 0;
-    size_t saved_consumed = 0;
-    bool has_close = false;
-    size_t close_offset = 0;
-
-    {
-        size_t scan = 0;
-        while (scan < data_len) {
-            WsFrame frame;
-            int consumed = ws_parse_frame(data + scan, data_len - scan, &frame);
-            if (consumed <= 0) break;
-
-            uint8_t opcode = (uint8_t)frame.opcode;
-            if (opcode == WS_CLOSE) {
-                has_close = true;
-                close_offset = scan;
-                saved_consumed = scan + (size_t)consumed;
-                break;
-            } else if (opcode == WS_PING) {
-                // PONG response
-                echo_size += ws_frame_header_size((size_t)frame.payload_len) + (size_t)frame.payload_len;
-            } else if (opcode == WS_PONG) {
-                // ignore
-            } else {
-                // Echo: same opcode, unmasked payload
-                echo_size += ws_frame_header_size((size_t)frame.payload_len) + (size_t)frame.payload_len;
-            }
-            scan += (size_t)consumed;
-        }
-        if (!has_close) {
-            saved_consumed = scan;
-        }
+    // Thread-local output buffer — grows once during warmup, reused across calls
+    static thread_local std::vector<uint8_t> out;
+    out.clear();
+    if (out.capacity() < data_len + 64) {
+        out.reserve((data_len + 64) * 2);
     }
 
-    total_consumed = saved_consumed;
+    EchoResult eres;
 
-    // Allocate echo output buffer
+    // ── GIL released: pure C++ work (parsing + SIMD unmasking + memcpy) ──
+    Py_BEGIN_ALLOW_THREADS
+    ws_echo_frames_nogil(data, data_len, out, eres);
+    Py_END_ALLOW_THREADS
+
+    // ── GIL held: build Python objects ────────────────────────────────────
+
+    // Build echo_bytes from thread-local buffer (single PyBytes allocation)
     PyObject* echo_bytes;
-    if (echo_size > 0) {
-        echo_bytes = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)echo_size);
-        if (!echo_bytes) { PyBuffer_Release(&buf); return nullptr; }
+    if (!out.empty()) {
+        echo_bytes = PyBytes_FromStringAndSize((const char*)out.data(), (Py_ssize_t)out.size());
+        if (!echo_bytes) {
+            PyBuffer_Release(&buf);
+            return nullptr;
+        }
     } else {
         Py_INCREF(Py_None);
         echo_bytes = Py_None;
     }
 
-    // Second pass: unmask + write echo frames
-    if (echo_size > 0) {
-        uint8_t* out = (uint8_t*)PyBytes_AS_STRING(echo_bytes);
-        size_t out_offset = 0;
-        size_t scan = 0;
-
-        while (scan < total_consumed) {
-            WsFrame frame;
-            int consumed = ws_parse_frame(data + scan, data_len - scan, &frame);
-            if (consumed <= 0) break;
-
-            // Unmask in-place
-            if (frame.masked && frame.payload_len > 0) {
-                ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
-            }
-
-            uint8_t opcode = (uint8_t)frame.opcode;
-            if (opcode == WS_PING) {
-                size_t hdr = ws_write_frame_header(out + out_offset, WS_PONG, (size_t)frame.payload_len);
-                out_offset += hdr;
-                if (frame.payload_len > 0) {
-                    memcpy(out + out_offset, frame.payload, (size_t)frame.payload_len);
-                    out_offset += (size_t)frame.payload_len;
-                }
-            } else if (opcode == WS_PONG) {
-                // skip
-            } else if (opcode == WS_CLOSE) {
-                break;
-            } else {
-                // Echo frame
-                size_t hdr = ws_write_frame_header(out + out_offset, (WsOpcode)opcode, (size_t)frame.payload_len);
-                out_offset += hdr;
-                if (frame.payload_len > 0) {
-                    memcpy(out + out_offset, frame.payload, (size_t)frame.payload_len);
-                    out_offset += (size_t)frame.payload_len;
-                }
-            }
-            scan += (size_t)consumed;
-        }
-    } else if (has_close) {
-        // Need to unmask close frame payload
-        WsFrame frame;
-        int consumed = ws_parse_frame(data + close_offset, data_len - close_offset, &frame);
-        if (consumed > 0 && frame.masked && frame.payload_len > 0) {
-            ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
-        }
-    }
-
-    PyBuffer_Release(&buf);
-
-    // Build close payload
+    // Build close payload (data still valid — Py_buffer not yet released)
     PyObject* close_obj;
-    if (has_close) {
-        // Re-parse close frame to get unmasked payload
-        // (already unmasked in second pass above or else-if)
-        WsFrame frame;
-        ws_parse_frame(data + close_offset, data_len - close_offset, &frame);
+    if (eres.has_close) {
         close_obj = PyBytes_FromStringAndSize(
-            (const char*)frame.payload, (Py_ssize_t)frame.payload_len);
-        if (!close_obj) { Py_DECREF(echo_bytes); return nullptr; }
+            (const char*)(data + eres.close_payload_offset),
+            (Py_ssize_t)eres.close_payload_len);
+        if (!close_obj) {
+            PyBuffer_Release(&buf);
+            Py_DECREF(echo_bytes);
+            return nullptr;
+        }
     } else {
         Py_INCREF(Py_None);
         close_obj = Py_None;
     }
 
-    PyRef py_consumed(PyLong_FromSize_t(total_consumed));
+    PyBuffer_Release(&buf);
+
+    PyRef py_consumed(PyLong_FromSize_t(eres.total_consumed));
     PyObject* result = PyTuple_Pack(3, py_consumed.get(), echo_bytes, close_obj);
     Py_DECREF(echo_bytes);
     Py_DECREF(close_obj);

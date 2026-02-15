@@ -43,6 +43,14 @@ extern PyObject* py_ws_build_frame_bytes(PyObject* self, PyObject* args);
 extern PyObject* py_ws_build_close_frame_bytes(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_build_frames_batch(PyObject* self, PyObject* arg);
 
+// ws_ring_buffer.cpp
+extern PyObject* py_ws_ring_buffer_create(PyObject* self, PyObject* args);
+extern PyObject* py_ws_ring_buffer_append(PyObject* self, PyObject* args);
+extern PyObject* py_ws_ring_buffer_readable_region(PyObject* self, PyObject* args);
+extern PyObject* py_ws_ring_buffer_consume(PyObject* self, PyObject* args);
+extern PyObject* py_ws_ring_buffer_readable(PyObject* self, PyObject* args);
+extern PyObject* py_ws_ring_buffer_reset(PyObject* self, PyObject* args);
+
 // dep_engine.cpp
 extern PyObject* py_compile_dep_plan(PyObject* self, PyObject* args, PyObject* kwargs);
 extern PyObject* py_unregister_dep_plan(PyObject* self, PyObject* arg);
@@ -243,6 +251,14 @@ static PyMethodDef module_methods[] = {
     {"ws_build_frame_bytes", (PyCFunction)py_ws_build_frame_bytes, METH_VARARGS, nullptr},
     {"ws_build_close_frame_bytes", (PyCFunction)py_ws_build_close_frame_bytes, METH_O, nullptr},
     {"ws_build_frames_batch", (PyCFunction)py_ws_build_frames_batch, METH_O, nullptr},
+
+    // v2.0: WebSocket Ring Buffer
+    {"ws_ring_buffer_create", (PyCFunction)py_ws_ring_buffer_create, METH_NOARGS, nullptr},
+    {"ws_ring_buffer_append", (PyCFunction)py_ws_ring_buffer_append, METH_VARARGS, nullptr},
+    {"ws_ring_buffer_readable_region", (PyCFunction)py_ws_ring_buffer_readable_region, METH_VARARGS, nullptr},
+    {"ws_ring_buffer_consume", (PyCFunction)py_ws_ring_buffer_consume, METH_VARARGS, nullptr},
+    {"ws_ring_buffer_readable", (PyCFunction)py_ws_ring_buffer_readable, METH_VARARGS, nullptr},
+    {"ws_ring_buffer_reset", (PyCFunction)py_ws_ring_buffer_reset, METH_VARARGS, nullptr},
 
     // v2.0: Dependency engine
     {"compile_dep_plan", (PyCFunction)py_compile_dep_plan, METH_VARARGS | METH_KEYWORDS, nullptr},
