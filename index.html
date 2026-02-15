@@ -280,8 +280,8 @@ function joinChat() {
 
 // ── WebSocket connection ───────────────────────────────────
 function connectWebSocket() {
-  const host = location.host || "127.0.0.1:8000";
-  const proto = (location.protocol === "https:") ? "wss:" : "ws:";
+  const host = "127.0.0.1:8000";
+  const proto = "ws:";
   const url = `${proto}//${host}/ws/${myUsername}`;
   console.log("Connecting to:", url);
   try {

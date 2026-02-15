@@ -45,3 +45,16 @@ std::vector<char> ws_build_upgrade_response(const char* sec_key, size_t key_len)
 
 // Build a close frame with optional status code
 std::vector<uint8_t> ws_build_close_frame(uint16_t status_code = 1000);
+
+// ── High-performance helpers (write directly into caller buffer) ────────────
+
+// Compute frame header size for a given payload length (2, 4, or 10 bytes)
+inline size_t ws_frame_header_size(size_t payload_len) {
+    if (payload_len < 126) return 2;
+    if (payload_len <= 0xFFFF) return 4;
+    return 10;
+}
+
+// Write frame header into buf (must have at least ws_frame_header_size() bytes).
+// Returns number of bytes written.
+size_t ws_write_frame_header(uint8_t* buf, WsOpcode opcode, size_t payload_len, bool fin = true);

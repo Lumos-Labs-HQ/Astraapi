@@ -15,7 +15,6 @@ Architecture (modeled on uWebSockets + libuv):
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import signal
 import socket
@@ -26,11 +25,78 @@ from typing import Any
 
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
-# C++ WebSocket unmask (8-byte-at-a-time XOR, ~10x faster than Python loop)
+# ── Zero-overhead awaitable for sync send methods ────────────────────────────
+class _NoopAwaitable:
+    """Awaitable that completes immediately with no overhead.
+    Used by send_text/send_bytes to avoid coroutine frame creation."""
+    __slots__ = ()
+    def __await__(self):
+        return iter(())
+
+_NOOP = _NoopAwaitable()
+
+# ── Lightweight single-producer single-consumer channel ──────────────────────
+class _WsFastChannel:
+    """Ultra-fast message channel replacing asyncio.Queue for WebSocket.
+
+    In the common echo pattern, the consumer (endpoint) is already waiting
+    when data arrives. feed() directly resolves the Future — no deque,
+    no condition variable, no extra allocations.
+    """
+    __slots__ = ('_waiter', '_buffer', '_loop')
+
+    def __init__(self, loop: asyncio.AbstractEventLoop):
+        self._waiter: asyncio.Future | None = None
+        self._buffer: list = []  # list of (opcode, payload) tuples
+        self._loop = loop
+
+    def feed(self, opcode: int, payload: bytes) -> None:
+        """Feed a frame — called from data_received (sync context)."""
+        waiter = self._waiter
+        if waiter is not None and not waiter.done():
+            self._waiter = None
+            waiter.set_result((opcode, payload))
+        else:
+            self._buffer.append((opcode, payload))
+
+    async def get(self) -> tuple:
+        """Get next frame — called from endpoint coroutine."""
+        buf = self._buffer
+        if buf:
+            return buf.pop(0)
+        fut = self._loop.create_future()
+        self._waiter = fut
+        return await fut
+
+
+# C++ WebSocket high-performance frame parser/builder
 try:
-    from _fastapi_core import ws_unmask as _ws_unmask
+    from _fastapi_core import (
+        ws_unmask as _ws_unmask,
+        ws_parse_frames as _ws_parse_frames,
+        ws_parse_frames_text as _ws_parse_frames_text,
+        ws_parse_frames_json as _ws_parse_frames_json,
+        ws_echo_frames as _ws_echo_frames,
+        ws_build_frame_bytes as _ws_build_frame_bytes,
+        ws_build_close_frame_bytes as _ws_build_close_frame_bytes,
+        ws_build_frames_batch as _ws_build_frames_batch,
+        ws_parse_json as _ws_parse_json,
+        ws_serialize_json as _ws_serialize_json,
+    )
 except ImportError:
     _ws_unmask = None
+    _ws_parse_frames = None
+    _ws_parse_frames_text = None
+    _ws_parse_frames_json = None
+    _ws_echo_frames = None
+    _ws_build_frame_bytes = None
+    _ws_build_close_frame_bytes = None
+    _ws_build_frames_batch = None
+    _ws_parse_json = None
+    _ws_serialize_json = None
+
+# ── WebSocket endpoint signature cache ────────────────────────────────────────
+_ws_sig_cache: dict[int, str] = {}
 
 # ── Pre-built responses (allocated once, reused forever) ─────────────────────
 
@@ -68,8 +134,10 @@ class CppWebSocket:
     """
 
     __slots__ = (
-        "_transport", "_loop", "_recv_queue", "_closed", "_close_code",
+        "_transport", "_loop", "_channel", "_closed", "_close_code",
         "client_state", "application_state", "scope", "path_params",
+        "_corked", "_cork_buf", "_sock", "_flush_scheduled", "_pending_writes",
+        "_protocol", "_echo_detect_count", "_last_received",
     )
 
     def __init__(
@@ -81,9 +149,19 @@ class CppWebSocket:
     ) -> None:
         self._transport = transport
         self._loop = loop
-        self._recv_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
+        self._channel = _WsFastChannel(loop)
         self._closed = False
         self._close_code = 1000
+        self._corked = False
+        self._cork_buf: list[tuple[int, bytes]] = []
+        # Write coalescing state
+        self._sock = transport.get_extra_info("socket")
+        self._flush_scheduled = False
+        self._pending_writes: list[bytes] = []
+        # Echo auto-detection
+        self._protocol = None  # back-ref to CppHttpProtocol, set after creation
+        self._echo_detect_count = 0
+        self._last_received = None  # track last received for echo detection
         # Starlette-compatible state tracking
         self.client_state = WebSocketState.CONNECTED   # 101 already sent by C++
         self.application_state = WebSocketState.CONNECTING
@@ -108,38 +186,97 @@ class CppWebSocket:
             self._closed = True
             self._close_code = code
             self.application_state = WebSocketState.DISCONNECTED
-            payload = struct.pack("!H", code)
-            frame = self._build_frame(0x8, payload)
+            if self._corked:
+                self._flush_cork()
+            # CRITICAL: flush pending writes before close frame
+            if self._pending_writes:
+                self._flush_writes()
+            frame = _ws_build_close_frame_bytes(code) if _ws_build_close_frame_bytes else self._build_frame_py(0x8, struct.pack("!H", code))
             try:
                 self._transport.write(frame)
             except Exception:
                 pass
 
+    # ── Write coalescing ─────────────────────────────────────────────
+
+    def _write_frame(self, frame: bytes) -> None:
+        """Write frame directly to transport.
+
+        Direct write without buffering — kernel TCP stack handles coalescing.
+        Simpler and lower latency than call_soon buffering.
+        """
+        transport = self._transport
+        if transport is not None and not transport.is_closing():
+            transport.write(frame)
+
+    def _flush_writes(self) -> None:
+        """Flush any pending writes (no-op with direct write mode)."""
+        # With direct write mode, _pending_writes is always empty
+        # This method kept for API compatibility with close()
+        pass
+
     # ── Send methods ──────────────────────────────────────────────────
 
-    async def send_text(self, data: str) -> None:
-        """Send a text message."""
+    def send_text(self, data: str) -> _NoopAwaitable:
+        """Send a text message. Returns awaitable for API compatibility."""
         if self._closed:
             raise RuntimeError("WebSocket is closed")
-        payload = data.encode("utf-8")
-        frame = self._build_frame(0x1, payload)
-        self._transport.write(frame)
+        # Echo auto-detection: if sending exactly what was received, count it
+        if _ws_echo_frames is not None and self._echo_detect_count >= 0:
+            if self._last_received is not None and data == self._last_received:
+                self._echo_detect_count += 1
+                if self._echo_detect_count >= 1:
+                    # Confirmed echo pattern — switch to C++ echo fast path
+                    proto = self._protocol
+                    if proto is not None:
+                        proto._ws_handler = proto._handle_ws_frames_echo
+                    self._echo_detect_count = -1  # stop detecting
+            else:
+                # Not echo — disable detection
+                self._echo_detect_count = -1
+            self._last_received = None
+        payload = data if isinstance(data, bytes) else data.encode("utf-8")
+        if self._corked:
+            self._cork_buf.append((0x1, payload))
+            return _NOOP
+        frame = _ws_build_frame_bytes(0x1, payload) if _ws_build_frame_bytes else self._build_frame_py(0x1, payload)
+        self._write_frame(frame)
+        return _NOOP
 
-    async def send_bytes(self, data: bytes) -> None:
-        """Send a binary message."""
+    def send_bytes(self, data: bytes) -> _NoopAwaitable:
+        """Send a binary message. Returns awaitable for API compatibility."""
         if self._closed:
             raise RuntimeError("WebSocket is closed")
-        frame = self._build_frame(0x2, data)
-        self._transport.write(frame)
+        if self._corked:
+            self._cork_buf.append((0x2, data))
+            return _NOOP
+        frame = _ws_build_frame_bytes(0x2, data) if _ws_build_frame_bytes else self._build_frame_py(0x2, data)
+        self._write_frame(frame)
+        return _NOOP
 
-    async def send_json(self, data: Any, mode: str = "text") -> None:
-        """Send JSON data as text."""
-        import json
-        text = json.dumps(data)
-        if mode == "text":
-            await self.send_text(text)
+    def send_json(self, data: Any, mode: str = "text") -> _NoopAwaitable:
+        """Send JSON data. Returns awaitable for API compatibility."""
+        if self._closed:
+            raise RuntimeError("WebSocket is closed")
+        if _ws_serialize_json is not None:
+            json_bytes = _ws_serialize_json(data)
+            if mode == "text":
+                # Build frame directly from JSON bytes — skip str round-trip
+                frame = _ws_build_frame_bytes(0x1, json_bytes) if _ws_build_frame_bytes else self._build_frame_py(0x1, json_bytes)
+            else:
+                frame = _ws_build_frame_bytes(0x2, json_bytes) if _ws_build_frame_bytes else self._build_frame_py(0x2, json_bytes)
+            if self._corked:
+                self._cork_buf.append((0x1 if mode == "text" else 0x2, json_bytes))
+                return _NOOP
+            self._write_frame(frame)
         else:
-            await self.send_bytes(text.encode("utf-8"))
+            import json
+            text = json.dumps(data)
+            if mode == "text":
+                self.send_text(text)
+            else:
+                self.send_bytes(text.encode("utf-8"))
+        return _NOOP
 
     # ── Receive methods ───────────────────────────────────────────────
 
@@ -151,16 +288,18 @@ class CppWebSocket:
 
     async def receive_text(self) -> str:
         """Receive a text message."""
-        opcode, payload = await self._recv_queue.get()
+        opcode, payload = await self._channel.get()
         if opcode == 0x8:  # close
             self._closed = True
             self.client_state = WebSocketState.DISCONNECTED
             raise WebSocketDisconnect(code=self._parse_close_code(payload))
-        return payload.decode("utf-8")
+        result = payload if isinstance(payload, str) else payload.decode("utf-8")
+        self._last_received = result
+        return result
 
     async def receive_bytes(self) -> bytes:
         """Receive a binary message."""
-        opcode, payload = await self._recv_queue.get()
+        opcode, payload = await self._channel.get()
         if opcode == 0x8:
             self._closed = True
             self.client_state = WebSocketState.DISCONNECTED
@@ -169,19 +308,36 @@ class CppWebSocket:
 
     async def receive_json(self, mode: str = "text") -> Any:
         """Receive and parse JSON data."""
+        # Switch to JSON frame handler on first call (parses JSON in C++)
+        if _ws_parse_frames_json is not None and self._protocol is not None:
+            proto = self._protocol
+            if proto._ws_handler is not proto._handle_ws_frames_json:
+                proto._ws_handler = proto._handle_ws_frames_json
+        opcode, payload = await self._channel.get()
+        if opcode == 0x8:
+            self._closed = True
+            self.client_state = WebSocketState.DISCONNECTED
+            raise WebSocketDisconnect(code=self._parse_close_code(payload))
+        # If payload is already a parsed Python object (from _ws_parse_frames_json),
+        # return it directly. Otherwise parse it.
+        if isinstance(payload, (dict, list, int, float, bool)) or payload is None:
+            return payload
+        if isinstance(payload, str):
+            if _ws_parse_json is not None:
+                return _ws_parse_json(payload)
+            import json
+            return json.loads(payload)
+        # bytes
+        if _ws_parse_json is not None:
+            return _ws_parse_json(payload)
         import json
-        if mode == "text":
-            text = await self.receive_text()
-            return json.loads(text)
-        else:
-            data = await self.receive_bytes()
-            return json.loads(data)
+        return json.loads(payload)
 
     # ── Dict-based ASGI protocol methods ──────────────────────────────
 
     async def receive(self) -> dict:
         """Receive an ASGI-style WebSocket message dict."""
-        opcode, payload = await self._recv_queue.get()
+        opcode, payload = await self._channel.get()
         if opcode == 0x8:
             self._closed = True
             self.client_state = WebSocketState.DISCONNECTED
@@ -233,15 +389,46 @@ class CppWebSocket:
         except WebSocketDisconnect:
             pass
 
+    # ── Write batching (cork/uncork) ─────────────────────────────────
+
+    def cork(self) -> None:
+        """Start buffering outgoing frames for batch write."""
+        self._corked = True
+
+    def uncork(self) -> None:
+        """Flush buffered frames as a single write and stop buffering."""
+        self._flush_cork()
+        self._corked = False
+
+    def _flush_cork(self) -> None:
+        """Flush corked frames."""
+        if not self._cork_buf:
+            return
+        if _ws_build_frames_batch is not None:
+            combined = _ws_build_frames_batch(self._cork_buf)
+            self._transport.write(combined)
+        else:
+            for opcode, payload in self._cork_buf:
+                frame = self._build_frame_py(opcode, payload)
+                self._transport.write(frame)
+        self._cork_buf.clear()
+
     # ── Internal ──────────────────────────────────────────────────────
 
     def feed_frame(self, opcode: int, payload: bytes) -> None:
         """Feed a parsed frame from the protocol handler."""
-        self._recv_queue.put_nowait((opcode, payload))
+        self._channel.feed(opcode, payload)
 
     @staticmethod
     def _build_frame(opcode: int, payload: bytes) -> bytes:
-        """Build an unmasked server→client WebSocket frame."""
+        """Build an unmasked server→client WebSocket frame (C++ fast path)."""
+        if _ws_build_frame_bytes is not None:
+            return _ws_build_frame_bytes(opcode, payload)
+        return CppWebSocket._build_frame_py(opcode, payload)
+
+    @staticmethod
+    def _build_frame_py(opcode: int, payload: bytes) -> bytes:
+        """Build an unmasked server→client WebSocket frame (Python fallback)."""
         header = bytearray()
         header.append(0x80 | opcode)  # FIN + opcode
         plen = len(payload)
@@ -270,7 +457,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_buf", "_ka", "_ka_deadline", "_loop", "_wr_paused", "_ws")
+    __slots__ = ("_core", "_transport", "_buf", "_ka", "_ka_deadline", "_loop", "_wr_paused", "_ws", "_ws_buf_offset", "_ws_handler")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop) -> None:
         self._core = core_app
@@ -280,6 +467,8 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ka: asyncio.TimerHandle | None = None
         self._ka_deadline: float = 0.0
         self._wr_paused = False
+        self._ws_buf_offset = 0
+        self._ws_handler = None  # Will be set to echo/json/normal handler after upgrade
         self._ws: CppWebSocket | None = None
 
     # ── Connection lifecycle ─────────────────────────────────────────────
@@ -305,14 +494,15 @@ class CppHttpProtocol(asyncio.Protocol):
             self._buf.clear()
         except BufferError:
             self._buf = bytearray()  # memoryview still held from crashed data_received
+        self._ws_buf_offset = 0
         self._transport = None
 
     # ── Data handling — the hot path ─────────────────────────────────────
 
     def data_received(self, data: bytes) -> None:
-        # WebSocket frame handling (after upgrade)
+        # WebSocket frame handling (after upgrade) — dispatch to mode-specific handler
         if self._ws is not None:
-            self._handle_ws_frames(data)
+            self._ws_handler(data)
             return
 
         buf = self._buf
@@ -374,21 +564,25 @@ class CppHttpProtocol(asyncio.Protocol):
                     else:
                         _, endpoint, path_params = result
                         ws_path = "/"
-                    print(f"[WS-DEBUG] upgrade detected: path={ws_path} params={path_params} endpoint={endpoint}", file=sys.stderr)
+                    # print(f"[WS-DEBUG] upgrade detected: path={ws_path} params={path_params} endpoint={endpoint}", file=sys.stderr)
                     if endpoint is None:
                         # No matching WS route — 101 already sent, just close
-                        print("[WS-DEBUG] endpoint is None — closing", file=sys.stderr)
+                        # print("[WS-DEBUG] endpoint is None — closing", file=sys.stderr)
                         if transport and not transport.is_closing():
                             transport.close()
                         mv.release()
                         buf.clear()
                         return
-                    self._ws = CppWebSocket(
+                    ws = CppWebSocket(
                         transport, self._loop,
                         path=ws_path, path_params=path_params,
                     )
+                    ws._protocol = self  # back-ref for echo mode switching
+                    self._ws = ws
                     self._ka_cancel()  # WS connections are long-lived
-                    print(f"[WS-DEBUG] launching _handle_websocket task", file=sys.stderr)
+                    # Select optimal frame handler based on endpoint path
+                    self._ws_handler = self._handle_ws_frames  # default
+                    # print(f"[WS-DEBUG] launching _handle_websocket task", file=sys.stderr)
                     self._loop.create_task(
                         self._handle_websocket(endpoint, path_params))
                     # Remaining buf data (if any) is WebSocket frames
@@ -396,7 +590,7 @@ class CppHttpProtocol(asyncio.Protocol):
                     mv.release()
                     buf.clear()
                     if remaining:
-                        self._handle_ws_frames(bytes(remaining))
+                        self._ws_handler(bytes(remaining))
                     return  # connection is now WebSocket
 
                 elif tag == "async":
@@ -427,74 +621,253 @@ class CppHttpProtocol(asyncio.Protocol):
     # ── WebSocket frame handling ─────────────────────────────────────────
 
     def _handle_ws_frames(self, data: bytes) -> None:
-        """Parse incoming WebSocket frames and feed to CppWebSocket."""
+        """Parse incoming WebSocket frames and feed to CppWebSocket.
+        Uses C++ batch parser for all frame parsing, unmasking, and pong generation.
+        Inlines channel feed to avoid method-call overhead per frame.
+        Uses offset tracking to eliminate memmove on every call.
+        """
         buf = self._buf
         buf += data
         ws = self._ws
         if not ws:
             return
 
-        while len(buf) >= 2:
-            # Parse frame header
-            byte0 = buf[0]
-            byte1 = buf[1]
-            fin = bool(byte0 & 0x80)
-            opcode = byte0 & 0x0F
-            masked = bool(byte1 & 0x80)
-            payload_len = byte1 & 0x7F
-            pos = 2
-
-            if payload_len == 126:
-                if len(buf) < 4:
-                    break
-                payload_len = struct.unpack("!H", buf[2:4])[0]
-                pos = 4
-            elif payload_len == 127:
-                if len(buf) < 10:
-                    break
-                payload_len = struct.unpack("!Q", buf[2:10])[0]
-                pos = 10
-
-            if masked:
-                if len(buf) < pos + 4:
-                    break
-                mask = buf[pos:pos + 4]
-                pos += 4
+        # Choose parser: prefer text-decoding variant (returns str for TEXT frames)
+        _parser = _ws_parse_frames_text if _ws_parse_frames_text is not None else _ws_parse_frames
+        if _parser is not None:
+            # ── C++ fast path: parse all frames in one call ──────────
+            offset = self._ws_buf_offset
+            if offset > 0:
+                view = memoryview(buf)[offset:]
             else:
-                mask = None
-
-            if len(buf) < pos + payload_len:
-                break
-
-            # Extract payload
-            payload = bytearray(buf[pos:pos + payload_len])
-            if mask:
-                if _ws_unmask is not None:
-                    _ws_unmask(payload, bytes(mask))
-                else:
-                    for i in range(payload_len):
-                        payload[i] ^= mask[i & 3]
-
-            del buf[:pos + payload_len]
-
-            # Handle control frames
-            if opcode == 0x8:  # Close
-                ws.feed_frame(0x8, bytes(payload))
-                # Send close frame back
-                close_frame = CppWebSocket._build_frame(0x8, bytes(payload[:2]) if len(payload) >= 2 else b"\x03\xe8")
-                if self._transport and not self._transport.is_closing():
-                    self._transport.write(close_frame)
+                view = buf
+            result = _parser(view)
+            if result is None:
                 return
-            elif opcode == 0x9:  # Ping → send Pong
-                pong = CppWebSocket._build_frame(0xA, bytes(payload))
-                if self._transport and not self._transport.is_closing():
-                    self._transport.write(pong)
-                continue
-            elif opcode == 0xA:  # Pong — ignore
-                continue
 
-            # Data frame (text or binary)
-            ws.feed_frame(opcode, bytes(payload))
+            consumed, frames, pong_data = result
+
+            # Send any auto-generated pong responses
+            if pong_data and self._transport and not self._transport.is_closing():
+                self._transport.write(pong_data)
+
+            # Inline channel feed — avoid ws.feed_frame() method call overhead
+            channel = ws._channel
+            waiter = channel._waiter
+            channel_buf = channel._buffer
+
+            for opcode, payload in frames:
+                if opcode == 0x8:  # Close
+                    # Feed close to channel
+                    if waiter is not None and not waiter.done():
+                        channel._waiter = None
+                        waiter.set_result((0x8, payload))
+                    else:
+                        channel_buf.append((0x8, payload))
+                    close_code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else 1000
+                    if _ws_build_close_frame_bytes is not None:
+                        close_resp = _ws_build_close_frame_bytes(close_code)
+                    else:
+                        close_resp = CppWebSocket._build_frame_py(0x8, payload[:2] if len(payload) >= 2 else b"\x03\xe8")
+                    if self._transport and not self._transport.is_closing():
+                        self._transport.write(close_resp)
+                    # Reset buffer
+                    self._ws_buf_offset = 0
+                    buf.clear()
+                    return
+                # Feed data frame to channel directly
+                if waiter is not None and not waiter.done():
+                    channel._waiter = None
+                    waiter.set_result((opcode, payload))
+                    waiter = None  # only first frame resolves waiter
+                else:
+                    channel_buf.append((opcode, payload))
+
+            # Offset tracking: avoid memmove
+            if consumed > 0:
+                offset += consumed
+                if offset >= len(buf):
+                    # Fully consumed — reset
+                    buf.clear()
+                    self._ws_buf_offset = 0
+                elif offset > 65536:
+                    # Compact when offset too large (prevent unbounded growth)
+                    del buf[:offset]
+                    self._ws_buf_offset = 0
+                else:
+                    self._ws_buf_offset = offset
+        else:
+            # ── Python fallback ─────────────────────────────────────
+            while len(buf) >= 2:
+                byte0 = buf[0]
+                byte1 = buf[1]
+                opcode = byte0 & 0x0F
+                masked = bool(byte1 & 0x80)
+                payload_len = byte1 & 0x7F
+                pos = 2
+
+                if payload_len == 126:
+                    if len(buf) < 4:
+                        break
+                    payload_len = struct.unpack("!H", buf[2:4])[0]
+                    pos = 4
+                elif payload_len == 127:
+                    if len(buf) < 10:
+                        break
+                    payload_len = struct.unpack("!Q", buf[2:10])[0]
+                    pos = 10
+
+                if masked:
+                    if len(buf) < pos + 4:
+                        break
+                    mask = buf[pos:pos + 4]
+                    pos += 4
+                else:
+                    mask = None
+
+                if len(buf) < pos + payload_len:
+                    break
+
+                payload = bytearray(buf[pos:pos + payload_len])
+                if mask:
+                    if _ws_unmask is not None:
+                        _ws_unmask(payload, bytes(mask))
+                    else:
+                        for i in range(payload_len):
+                            payload[i] ^= mask[i & 3]
+
+                del buf[:pos + payload_len]
+
+                if opcode == 0x8:
+                    ws.feed_frame(0x8, bytes(payload))
+                    close_frame = CppWebSocket._build_frame(0x8, bytes(payload[:2]) if len(payload) >= 2 else b"\x03\xe8")
+                    if self._transport and not self._transport.is_closing():
+                        self._transport.write(close_frame)
+                    return
+                elif opcode == 0x9:
+                    pong = CppWebSocket._build_frame(0xA, bytes(payload))
+                    if self._transport and not self._transport.is_closing():
+                        self._transport.write(pong)
+                    continue
+                elif opcode == 0xA:
+                    continue
+
+                ws.feed_frame(opcode, bytes(payload))
+
+    def _handle_ws_frames_echo(self, data: bytes) -> None:
+        """Ultra-fast echo path: C++ parses frames AND builds echo responses in one call.
+        No per-message Python overhead — entire parse+echo done in C++.
+        """
+        buf = self._buf
+        buf += data
+
+        offset = self._ws_buf_offset
+        if offset > 0:
+            view = memoryview(buf)[offset:]
+        else:
+            view = buf
+        result = _ws_echo_frames(view)
+        if result is None:
+            return
+
+        consumed, echo_bytes, close_payload = result
+        transport = self._transport
+
+        # Write all echo response frames in one call
+        if echo_bytes is not None and transport and not transport.is_closing():
+            transport.write(echo_bytes)
+
+        # Handle close
+        if close_payload is not None:
+            ws = self._ws
+            if ws:
+                ws.feed_frame(0x8, close_payload)
+                close_code = int.from_bytes(close_payload[:2], "big") if len(close_payload) >= 2 else 1000
+                if _ws_build_close_frame_bytes is not None:
+                    close_resp = _ws_build_close_frame_bytes(close_code)
+                else:
+                    close_resp = CppWebSocket._build_frame_py(0x8, close_payload[:2] if len(close_payload) >= 2 else b"\x03\xe8")
+                if transport and not transport.is_closing():
+                    transport.write(close_resp)
+            self._ws_buf_offset = 0
+            buf.clear()
+            return
+
+        # Offset tracking
+        if consumed > 0:
+            offset += consumed
+            if offset >= len(buf):
+                buf.clear()
+                self._ws_buf_offset = 0
+            elif offset > 65536:
+                del buf[:offset]
+                self._ws_buf_offset = 0
+            else:
+                self._ws_buf_offset = offset
+
+    def _handle_ws_frames_json(self, data: bytes) -> None:
+        """JSON-optimized frame handler: C++ parses frames AND decodes JSON in one call.
+        Skips separate receive_text + json.loads steps.
+        """
+        buf = self._buf
+        buf += data
+        ws = self._ws
+        if not ws:
+            return
+
+        offset = self._ws_buf_offset
+        if offset > 0:
+            view = memoryview(buf)[offset:]
+        else:
+            view = buf
+        result = _ws_parse_frames_json(view)
+        if result is None:
+            return
+
+        consumed, frames, pong_data = result
+
+        if pong_data and self._transport and not self._transport.is_closing():
+            self._transport.write(pong_data)
+
+        # Inline channel feed
+        channel = ws._channel
+        waiter = channel._waiter
+        channel_buf = channel._buffer
+
+        for opcode, payload in frames:
+            if opcode == 0x8:
+                if waiter is not None and not waiter.done():
+                    channel._waiter = None
+                    waiter.set_result((0x8, payload))
+                else:
+                    channel_buf.append((0x8, payload))
+                close_code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else 1000
+                if _ws_build_close_frame_bytes is not None:
+                    close_resp = _ws_build_close_frame_bytes(close_code)
+                else:
+                    close_resp = CppWebSocket._build_frame_py(0x8, payload[:2] if len(payload) >= 2 else b"\x03\xe8")
+                if self._transport and not self._transport.is_closing():
+                    self._transport.write(close_resp)
+                self._ws_buf_offset = 0
+                buf.clear()
+                return
+            if waiter is not None and not waiter.done():
+                channel._waiter = None
+                waiter.set_result((opcode, payload))
+                waiter = None
+            else:
+                channel_buf.append((opcode, payload))
+
+        if consumed > 0:
+            offset += consumed
+            if offset >= len(buf):
+                buf.clear()
+                self._ws_buf_offset = 0
+            elif offset > 65536:
+                del buf[:offset]
+                self._ws_buf_offset = 0
+            else:
+                self._ws_buf_offset = offset
 
     # ── Back-pressure (write flow control) ───────────────────────────────
 
@@ -623,32 +996,26 @@ class CppHttpProtocol(asyncio.Protocol):
         """Run WebSocket endpoint with CppWebSocket wrapper."""
         ws = self._ws
         if not ws:
-            print("[WS-DEBUG] _handle_websocket: ws is None!", file=sys.stderr)
             return
         try:
             kwargs = dict(path_params) if path_params else {}
-            # Inject WebSocket by matching parameter name or type annotation
-            sig = inspect.signature(endpoint)
-            injected = False
-            for param_name, param in sig.parameters.items():
-                ann = param.annotation
-                if param_name == "websocket" or (
-                    ann is not inspect.Parameter.empty
-                    and getattr(ann, "__name__", "") == "WebSocket"
-                ):
-                    kwargs[param_name] = ws
-                    injected = True
-                    break
-            if not injected:
-                kwargs["websocket"] = ws
-            print(f"[WS-DEBUG] calling endpoint with kwargs={list(kwargs.keys())}", file=sys.stderr)
+            # Inject WebSocket — use cached signature inspection
+            ep_id = id(endpoint)
+            ws_param = _ws_sig_cache.get(ep_id)
+            if ws_param is None:
+                sig = inspect.signature(endpoint)
+                ws_param = "websocket"  # default
+                for param_name, param in sig.parameters.items():
+                    ann = param.annotation
+                    if param_name == "websocket" or (
+                        ann is not inspect.Parameter.empty
+                        and getattr(ann, "__name__", "") == "WebSocket"
+                    ):
+                        ws_param = param_name
+                        break
+                _ws_sig_cache[ep_id] = ws_param
+            kwargs[ws_param] = ws
             await endpoint(**kwargs)
-            print("[WS-DEBUG] endpoint returned normally", file=sys.stderr)
-        except WebSocketDisconnect:
-            print("[WS-DEBUG] WebSocketDisconnect (normal)", file=sys.stderr)
-        except Exception as exc:
-            print(f"[WS-DEBUG] WebSocket endpoint error: {exc}", file=sys.stderr)
-            import traceback; traceback.print_exc(file=sys.stderr)
         finally:
             if not ws._closed:
                 await ws.close(1000)

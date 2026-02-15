@@ -2,7 +2,9 @@
 #include <Python.h>
 #include "json_parser.hpp"
 #include "json_writer.hpp"
+#include "ws_frame_parser.hpp"
 #include "pyref.hpp"
+#include <vector>
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ws_parse_json(data: bytes|str) → PyAny  (yyjson — zero Python calls)
@@ -80,4 +82,99 @@ PyObject* py_ws_batch_parse(PyObject* self, PyObject* arg) {
     }
 
     return result.release();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ws_parse_frames_json(buffer: bytearray) -> (consumed, [(opcode, parsed_obj|bytes), ...], pong_bytes|None)
+// Parses WS frames and for TEXT frames, directly parses JSON payload via yyjson.
+// For BINARY frames, returns raw bytes. For close, returns close payload as bytes.
+// ══════════════════════════════════════════════════════════════════════════════
+
+PyObject* py_ws_parse_frames_json(PyObject* /*self*/, PyObject* arg) {
+    Py_buffer buf;
+    if (PyObject_GetBuffer(arg, &buf, PyBUF_WRITABLE) < 0) {
+        return nullptr;
+    }
+
+    uint8_t* data = (uint8_t*)buf.buf;
+    size_t data_len = (size_t)buf.len;
+    size_t total_consumed = 0;
+
+    PyRef frames(PyList_New(0));
+    if (!frames) { PyBuffer_Release(&buf); return nullptr; }
+
+    std::vector<uint8_t> pong_buf;
+
+    while (total_consumed < data_len) {
+        WsFrame frame;
+        int consumed = ws_parse_frame(data + total_consumed, data_len - total_consumed, &frame);
+        if (consumed <= 0) break;
+
+        if (frame.masked && frame.payload_len > 0) {
+            ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
+        }
+
+        uint8_t opcode = (uint8_t)frame.opcode;
+
+        if (opcode == WS_PING) {
+            size_t pong_hdr = ws_frame_header_size((size_t)frame.payload_len);
+            size_t old_size = pong_buf.size();
+            pong_buf.resize(old_size + pong_hdr + (size_t)frame.payload_len);
+            ws_write_frame_header(pong_buf.data() + old_size, WS_PONG, (size_t)frame.payload_len);
+            if (frame.payload_len > 0) {
+                memcpy(pong_buf.data() + old_size + pong_hdr, frame.payload, (size_t)frame.payload_len);
+            }
+            total_consumed += (size_t)consumed;
+            continue;
+        }
+
+        if (opcode == WS_PONG) {
+            total_consumed += (size_t)consumed;
+            continue;
+        }
+
+        // For TEXT frames, try to parse JSON directly
+        PyObject* payload_obj;
+        if (opcode == WS_TEXT && frame.payload_len > 0) {
+            payload_obj = yyjson_parse_to_pyobject(
+                (const char*)frame.payload, (size_t)frame.payload_len);
+            if (!payload_obj) {
+                // JSON parse failed — fallback to str
+                PyErr_Clear();
+                payload_obj = PyUnicode_DecodeUTF8(
+                    (const char*)frame.payload, (Py_ssize_t)frame.payload_len, "surrogateescape");
+            }
+        } else {
+            payload_obj = PyBytes_FromStringAndSize(
+                (const char*)frame.payload, (Py_ssize_t)frame.payload_len);
+        }
+        if (!payload_obj) { PyBuffer_Release(&buf); return nullptr; }
+
+        PyRef payload_ref(payload_obj);
+        PyRef tuple(PyTuple_Pack(2, PyLong_FromLong(opcode), payload_ref.get()));
+        if (!tuple) { PyBuffer_Release(&buf); return nullptr; }
+        Py_DECREF(PyTuple_GET_ITEM(tuple.get(), 0));
+
+        if (PyList_Append(frames.get(), tuple.get()) < 0) {
+            PyBuffer_Release(&buf);
+            return nullptr;
+        }
+
+        total_consumed += (size_t)consumed;
+        if (opcode == WS_CLOSE) break;
+    }
+
+    PyBuffer_Release(&buf);
+
+    PyRef py_consumed(PyLong_FromSize_t(total_consumed));
+    PyObject* py_pong;
+    if (!pong_buf.empty()) {
+        py_pong = PyBytes_FromStringAndSize((const char*)pong_buf.data(), (Py_ssize_t)pong_buf.size());
+        if (!py_pong) return nullptr;
+    } else {
+        Py_INCREF(Py_None);
+        py_pong = Py_None;
+    }
+
+    return PyTuple_Pack(3, py_consumed.get(), frames.get(), py_pong);
 }

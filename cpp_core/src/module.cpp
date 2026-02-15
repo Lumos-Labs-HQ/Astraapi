@@ -32,9 +32,16 @@ extern PyObject* py_extract_all_security_credentials(PyObject* self, PyObject* a
 extern PyObject* py_ws_parse_json(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_serialize_json(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_batch_parse(PyObject* self, PyObject* arg);
+extern PyObject* py_ws_parse_frames_json(PyObject* self, PyObject* arg);
 
 // ws_frame_parser.cpp
 extern void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]);
+extern PyObject* py_ws_parse_frames(PyObject* self, PyObject* arg);
+extern PyObject* py_ws_parse_frames_text(PyObject* self, PyObject* arg);
+extern PyObject* py_ws_echo_frames(PyObject* self, PyObject* arg);
+extern PyObject* py_ws_build_frame_bytes(PyObject* self, PyObject* args);
+extern PyObject* py_ws_build_close_frame_bytes(PyObject* self, PyObject* arg);
+extern PyObject* py_ws_build_frames_batch(PyObject* self, PyObject* arg);
 
 // dep_engine.cpp
 extern PyObject* py_compile_dep_plan(PyObject* self, PyObject* args, PyObject* kwargs);
@@ -229,6 +236,13 @@ static PyMethodDef module_methods[] = {
     {"ws_serialize_json", (PyCFunction)py_ws_serialize_json, METH_O, nullptr},
     {"ws_batch_parse", (PyCFunction)py_ws_batch_parse, METH_O, nullptr},
     {"ws_unmask", (PyCFunction)py_ws_unmask, METH_VARARGS, nullptr},
+    {"ws_parse_frames", (PyCFunction)py_ws_parse_frames, METH_O, nullptr},
+    {"ws_parse_frames_text", (PyCFunction)py_ws_parse_frames_text, METH_O, nullptr},
+    {"ws_parse_frames_json", (PyCFunction)py_ws_parse_frames_json, METH_O, nullptr},
+    {"ws_echo_frames", (PyCFunction)py_ws_echo_frames, METH_O, nullptr},
+    {"ws_build_frame_bytes", (PyCFunction)py_ws_build_frame_bytes, METH_VARARGS, nullptr},
+    {"ws_build_close_frame_bytes", (PyCFunction)py_ws_build_close_frame_bytes, METH_O, nullptr},
+    {"ws_build_frames_batch", (PyCFunction)py_ws_build_frames_batch, METH_O, nullptr},
 
     // v2.0: Dependency engine
     {"compile_dep_plan", (PyCFunction)py_compile_dep_plan, METH_VARARGS | METH_KEYWORDS, nullptr},
