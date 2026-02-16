@@ -123,12 +123,25 @@ std::string base64_encode(const uint8_t* data, size_t len) {
 
 // ── Frame parser ────────────────────────────────────────────────────────────
 
-int ws_parse_frame(const uint8_t* data, size_t len, WsFrame* out) {
+int ws_parse_frame(const uint8_t* data, size_t len, WsFrame* out,
+                   bool require_mask, bool allow_rsv) {
     if (len < 2) return 0;  // need more data
 
     out->fin = (data[0] & 0x80) != 0;
+    out->rsv = (data[0] >> 4) & 0x07;  // RSV1-3 bits
     out->opcode = (WsOpcode)(data[0] & 0x0F);
     out->masked = (data[1] & 0x80) != 0;
+
+    // Validate RSV bits — must be 0 unless extensions are negotiated (RFC 6455 §5.2)
+    if (out->rsv != 0 && !allow_rsv) {
+        return -4;
+    }
+
+    // Validate opcode — reject reserved opcodes (RFC 6455 §5.2)
+    uint8_t op = (uint8_t)out->opcode;
+    if ((op >= 3 && op <= 7) || (op >= 0xB)) {
+        return -3;
+    }
 
     uint64_t payload_len = data[1] & 0x7F;
     size_t pos = 2;
@@ -148,6 +161,11 @@ int ws_parse_frame(const uint8_t* data, size_t len, WsFrame* out) {
 
     // Limit payload to 64MB to prevent abuse
     if (payload_len > 64 * 1024 * 1024) return -1;
+
+    // Reject unmasked client frames (RFC 6455 §5.1)
+    if (require_mask && !out->masked) {
+        return -2;
+    }
 
     if (out->masked) {
         if (len < pos + 4) return 0;
@@ -288,28 +306,64 @@ std::vector<char> ws_build_upgrade_response(const char* sec_key, size_t key_len)
 
 // ── GIL-released frame parse helper ──────────────────────────────────────────
 // Parses and unmasks frames into C++ structs. No Python API calls.
+// ParsedFrameRef and ParseResult declared in ws_frame_parser.hpp
 
-namespace {
+// ── Fragment assembler implementation ──────────────────────────────────────
 
-struct ParsedFrameRef {
-    uint8_t opcode;
-    size_t payload_offset;  // offset into input buffer (already unmasked in-place)
-    size_t payload_len;
-};
+int WsFragmentAssembler::feed(const WsFrame& frame, const uint8_t* unmasked_payload) {
+    uint8_t opcode = (uint8_t)frame.opcode;
 
-struct ParseResult {
-    std::vector<ParsedFrameRef> frames;
-    std::vector<uint8_t> pong_buf;
-    size_t total_consumed = 0;
-};
+    if (opcode == WS_CONTINUATION) {
+        if (!in_progress) {
+            return -1;  // Protocol error: continuation without initial fragment
+        }
+        accumulated.insert(accumulated.end(),
+            unmasked_payload, unmasked_payload + frame.payload_len);
+        if (accumulated.size() > max_message_size) {
+            reset();
+            return -1;  // Message too large
+        }
+        if (frame.fin) {
+            return 1;  // Complete message ready
+        }
+        return 0;  // Need more fragments
+    }
 
-void ws_parse_frames_nogil(uint8_t* data, size_t data_len, ParseResult& result) {
+    // Non-continuation data frame (TEXT or BINARY)
+    if (opcode == WS_TEXT || opcode == WS_BINARY) {
+        if (in_progress) {
+            return -1;  // Protocol error: new data frame while assembling
+        }
+        if (!frame.fin) {
+            // Start of fragmented message
+            in_progress = true;
+            original_opcode = opcode;
+            accumulated.assign(unmasked_payload, unmasked_payload + frame.payload_len);
+            return 0;  // Need more fragments
+        }
+        // Single complete frame — don't need assembler
+        return 1;
+    }
+
+    // Control frames (PING/PONG/CLOSE) pass through — caller handles them
+    return 1;
+}
+
+// ── GIL-released frame parser with optional fragment assembly ─────────────
+
+void ws_parse_frames_nogil(uint8_t* data, size_t data_len, ParseResult& result,
+                           WsFragmentAssembler* assembler) {
     size_t total_consumed = 0;
 
     while (total_consumed < data_len) {
         WsFrame frame;
         int consumed = ws_parse_frame(data + total_consumed, data_len - total_consumed, &frame);
-        if (consumed <= 0) break;
+        if (consumed == 0) break;  // need more data
+        if (consumed < 0) {
+            // Protocol error (unmasked, reserved opcode, reserved RSV bits)
+            result.protocol_error = consumed;
+            break;
+        }
 
         // Unmask in-place
         if (frame.masked && frame.payload_len > 0) {
@@ -318,6 +372,7 @@ void ws_parse_frames_nogil(uint8_t* data, size_t data_len, ParseResult& result) 
 
         uint8_t opcode = (uint8_t)frame.opcode;
 
+        // Control frames can be interleaved between fragments (RFC 6455 §5.4)
         if (opcode == WS_PING) {
             size_t pong_hdr = ws_frame_header_size((size_t)frame.payload_len);
             size_t old_size = result.pong_buf.size();
@@ -331,26 +386,58 @@ void ws_parse_frames_nogil(uint8_t* data, size_t data_len, ParseResult& result) 
         }
 
         if (opcode == WS_PONG) {
+            result.pong_received = true;
             total_consumed += (size_t)consumed;
             continue;
         }
 
-        // Store frame reference (payload offset into input buffer)
+        if (opcode == WS_CLOSE) {
+            result.frames.push_back({
+                opcode,
+                (size_t)(frame.payload - data),
+                (size_t)frame.payload_len,
+                false
+            });
+            total_consumed += (size_t)consumed;
+            break;
+        }
+
+        // Data frames: handle fragmentation if assembler is provided
+        if (assembler && (opcode == WS_CONTINUATION || !frame.fin)) {
+            int asm_result = assembler->feed(frame, frame.payload);
+            if (asm_result < 0) {
+                result.protocol_error = -1;
+                break;
+            }
+            if (asm_result == 1 && opcode == WS_CONTINUATION) {
+                // Fragment reassembly complete — store as assembled message
+                result.assembled.push_back({
+                    assembler->original_opcode,
+                    std::move(assembler->accumulated)
+                });
+                assembler->reset();
+            }
+            // asm_result == 0: need more fragments, or
+            // asm_result == 1 && !CONTINUATION: single complete frame handled below
+            if (asm_result == 0) {
+                total_consumed += (size_t)consumed;
+                continue;
+            }
+        }
+
+        // Single complete frame — store reference
         result.frames.push_back({
             opcode,
             (size_t)(frame.payload - data),
-            (size_t)frame.payload_len
+            (size_t)frame.payload_len,
+            false
         });
 
         total_consumed += (size_t)consumed;
-
-        if (opcode == WS_CLOSE) break;
     }
 
     result.total_consumed = total_consumed;
 }
-
-} // anonymous namespace
 
 // ── ws_parse_frames(buffer: bytearray) -> (consumed, [(opcode, payload), ...], pong_bytes|None)
 // Parses all complete frames from buffer in one C call with GIL release.
@@ -425,7 +512,27 @@ PyObject* py_ws_build_frame_bytes(PyObject* /*self*/, PyObject* args) {
     size_t hdr_size = ws_frame_header_size(payload_len);
     size_t total = hdr_size + payload_len;
 
-    // Allocate PyBytes directly — zero copy
+    // For large payloads (>1KB), release GIL during memcpy to avoid blocking event loop
+    if (payload_len > 1024) {
+        uint8_t* tmp = (uint8_t*)PyMem_Malloc(total);
+        if (!tmp) {
+            PyBuffer_Release(&payload_buf);
+            return PyErr_NoMemory();
+        }
+        const uint8_t* src = (const uint8_t*)payload_buf.buf;
+
+        Py_BEGIN_ALLOW_THREADS
+        ws_write_frame_header(tmp, (WsOpcode)opcode, payload_len);
+        memcpy(tmp + hdr_size, src, payload_len);
+        Py_END_ALLOW_THREADS
+
+        PyBuffer_Release(&payload_buf);
+        PyObject* result = PyBytes_FromStringAndSize((const char*)tmp, (Py_ssize_t)total);
+        PyMem_Free(tmp);
+        return result;
+    }
+
+    // Small payloads: allocate PyBytes directly — zero copy (GIL overhead not worth it)
     PyObject* result = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)total);
     if (!result) {
         PyBuffer_Release(&payload_buf);
@@ -437,6 +544,42 @@ PyObject* py_ws_build_frame_bytes(PyObject* /*self*/, PyObject* args) {
     memcpy(out + hdr_size, payload_buf.buf, payload_len);
 
     PyBuffer_Release(&payload_buf);
+    return result;
+}
+
+// ── ws_build_ping_frame(payload: bytes|None) -> bytes
+
+PyObject* py_ws_build_ping_frame(PyObject* /*self*/, PyObject* arg) {
+    size_t plen = 0;
+    const uint8_t* pdata = nullptr;
+    Py_buffer payload_buf = {nullptr};
+
+    if (arg != Py_None) {
+        if (PyObject_GetBuffer(arg, &payload_buf, PyBUF_SIMPLE) < 0)
+            return nullptr;
+        if (payload_buf.len > 125) {
+            PyBuffer_Release(&payload_buf);
+            PyErr_SetString(PyExc_ValueError, "PING payload must be <= 125 bytes");
+            return nullptr;
+        }
+        plen = (size_t)payload_buf.len;
+        pdata = (const uint8_t*)payload_buf.buf;
+    }
+
+    size_t hdr_size = ws_frame_header_size(plen);
+    size_t total = hdr_size + plen;
+
+    PyObject* result = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)total);
+    if (!result) {
+        if (payload_buf.buf) PyBuffer_Release(&payload_buf);
+        return nullptr;
+    }
+
+    uint8_t* out = (uint8_t*)PyBytes_AS_STRING(result);
+    ws_write_frame_header(out, WS_PING, plen);
+    if (plen > 0) memcpy(out + hdr_size, pdata, plen);
+
+    if (payload_buf.buf) PyBuffer_Release(&payload_buf);
     return result;
 }
 
@@ -530,14 +673,7 @@ PyObject* py_ws_parse_frames_text(PyObject* /*self*/, PyObject* arg) {
 // ── GIL-released echo helper ─────────────────────────────────────────────────
 // Pure C++ work: parse frames, unmask, build echo output. No Python API calls.
 
-namespace {
-
-struct EchoResult {
-    size_t total_consumed = 0;
-    bool has_close = false;
-    size_t close_payload_offset = 0;  // offset into input buffer
-    size_t close_payload_len = 0;
-};
+// EchoResult struct declared in ws_frame_parser.hpp
 
 void ws_echo_frames_nogil(
     uint8_t* data, size_t data_len,
@@ -548,7 +684,8 @@ void ws_echo_frames_nogil(
     while (total_consumed < data_len) {
         WsFrame frame;
         int consumed = ws_parse_frame(data + total_consumed, data_len - total_consumed, &frame);
-        if (consumed <= 0) break;
+        if (consumed == 0) break;   // need more data
+        if (consumed < 0) break;    // protocol error — stop processing
 
         uint8_t opcode = (uint8_t)frame.opcode;
 
@@ -594,8 +731,6 @@ void ws_echo_frames_nogil(
 
     result.total_consumed = total_consumed;
 }
-
-} // anonymous namespace
 
 // ── ws_echo_frames(buffer: bytearray) -> (consumed, echo_bytes, close_payload|None)
 // SINGLE-PASS with GIL release: Parse, unmask, and build echo response.
@@ -727,4 +862,182 @@ PyObject* py_ws_build_frames_batch(PyObject* /*self*/, PyObject* arg) {
     }
 
     return result;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Per-message compression (RFC 7692 permessage-deflate)
+// ══════════════════════════════════════════════════════════════════════════════
+
+#include <zlib.h>
+
+bool WsDeflateContext::init() {
+    auto* inf = new z_stream{};
+    inf->zalloc = Z_NULL;
+    inf->zfree = Z_NULL;
+    inf->opaque = Z_NULL;
+    if (inflateInit2(inf, -client_max_window_bits) != Z_OK) {
+        delete inf;
+        return false;
+    }
+    inflate_ctx = inf;
+
+    auto* def = new z_stream{};
+    def->zalloc = Z_NULL;
+    def->zfree = Z_NULL;
+    def->opaque = Z_NULL;
+    if (deflateInit2(def, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+                     -server_max_window_bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        inflateEnd(inf);
+        delete inf;
+        inflate_ctx = nullptr;
+        delete def;
+        return false;
+    }
+    deflate_ctx = def;
+    enabled = true;
+    return true;
+}
+
+void WsDeflateContext::destroy() {
+    if (inflate_ctx) {
+        inflateEnd(static_cast<z_stream*>(inflate_ctx));
+        delete static_cast<z_stream*>(inflate_ctx);
+        inflate_ctx = nullptr;
+    }
+    if (deflate_ctx) {
+        deflateEnd(static_cast<z_stream*>(deflate_ctx));
+        delete static_cast<z_stream*>(deflate_ctx);
+        deflate_ctx = nullptr;
+    }
+    enabled = false;
+}
+
+bool WsDeflateContext::decompress(const uint8_t* in, size_t in_len,
+                                  std::vector<uint8_t>& out) {
+    if (!inflate_ctx) return false;
+    auto* strm = static_cast<z_stream*>(inflate_ctx);
+
+    // Per RFC 7692: append 0x00 0x00 0xFF 0xFF trailer before decompression
+    std::vector<uint8_t> input(in, in + in_len);
+    static const uint8_t trailer[] = {0x00, 0x00, 0xFF, 0xFF};
+    input.insert(input.end(), trailer, trailer + 4);
+
+    strm->next_in = input.data();
+    strm->avail_in = (uInt)input.size();
+
+    out.clear();
+    uint8_t buf[8192];
+    int ret;
+    do {
+        strm->next_out = buf;
+        strm->avail_out = sizeof(buf);
+        ret = inflate(strm, Z_SYNC_FLUSH);
+        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+            return false;
+        }
+        size_t have = sizeof(buf) - strm->avail_out;
+        out.insert(out.end(), buf, buf + have);
+    } while (strm->avail_out == 0);
+
+    if (client_no_context_takeover) {
+        inflateReset(strm);
+    }
+    return true;
+}
+
+bool WsDeflateContext::compress(const uint8_t* in, size_t in_len,
+                                std::vector<uint8_t>& out) {
+    if (!deflate_ctx) return false;
+    auto* strm = static_cast<z_stream*>(deflate_ctx);
+
+    strm->next_in = const_cast<uint8_t*>(in);
+    strm->avail_in = (uInt)in_len;
+
+    out.clear();
+    uint8_t buf[8192];
+    int ret;
+    do {
+        strm->next_out = buf;
+        strm->avail_out = sizeof(buf);
+        ret = deflate(strm, Z_SYNC_FLUSH);
+        if (ret == Z_STREAM_ERROR) {
+            return false;
+        }
+        size_t have = sizeof(buf) - strm->avail_out;
+        out.insert(out.end(), buf, buf + have);
+    } while (strm->avail_out == 0);
+
+    // Per RFC 7692: remove trailing 0x00 0x00 0xFF 0xFF
+    if (out.size() >= 4 &&
+        out[out.size()-4] == 0x00 && out[out.size()-3] == 0x00 &&
+        out[out.size()-2] == 0xFF && out[out.size()-1] == 0xFF) {
+        out.resize(out.size() - 4);
+    }
+
+    if (server_no_context_takeover) {
+        deflateReset(strm);
+    }
+    return true;
+}
+
+// ── Upgrade response with extension negotiation ──────────────────────────
+
+std::vector<char> ws_build_upgrade_response_ext(
+    const char* sec_key, size_t key_len,
+    const char* extensions, size_t ext_len,
+    const char* subprotocol, size_t sub_len,
+    WsDeflateContext* deflate_out)
+{
+    // Compute Sec-WebSocket-Accept
+    SHA1 sha;
+    sha.update((const uint8_t*)sec_key, key_len);
+    sha.update((const uint8_t*)WS_MAGIC_GUID, sizeof(WS_MAGIC_GUID) - 1);
+    uint8_t digest[20];
+    sha.finalize(digest);
+    std::string accept = base64_encode(digest, 20);
+
+    // Check for permessage-deflate in extensions
+    bool negotiate_deflate = false;
+    if (extensions && ext_len > 0 && deflate_out) {
+        std::string ext(extensions, ext_len);
+        if (ext.find("permessage-deflate") != std::string::npos) {
+            negotiate_deflate = true;
+            // Parse parameters
+            if (ext.find("server_no_context_takeover") != std::string::npos)
+                deflate_out->server_no_context_takeover = true;
+            if (ext.find("client_no_context_takeover") != std::string::npos)
+                deflate_out->client_no_context_takeover = true;
+            if (!deflate_out->init()) {
+                negotiate_deflate = false;
+            }
+        }
+    }
+
+    // Build HTTP 101 response
+    std::string resp;
+    resp.reserve(512);
+    resp += "HTTP/1.1 101 Switching Protocols\r\n";
+    resp += "Upgrade: websocket\r\n";
+    resp += "Connection: Upgrade\r\n";
+    resp += "Sec-WebSocket-Accept: ";
+    resp += accept;
+    resp += "\r\n";
+
+    if (negotiate_deflate) {
+        resp += "Sec-WebSocket-Extensions: permessage-deflate";
+        if (deflate_out->server_no_context_takeover)
+            resp += "; server_no_context_takeover";
+        if (deflate_out->client_no_context_takeover)
+            resp += "; client_no_context_takeover";
+        resp += "\r\n";
+    }
+
+    if (subprotocol && sub_len > 0) {
+        resp += "Sec-WebSocket-Protocol: ";
+        resp.append(subprotocol, sub_len);
+        resp += "\r\n";
+    }
+
+    resp += "\r\n";
+    return std::vector<char>(resp.begin(), resp.end());
 }

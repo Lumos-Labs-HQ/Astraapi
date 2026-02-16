@@ -40,6 +40,7 @@ extern PyObject* py_ws_parse_frames(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_parse_frames_text(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_echo_frames(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_build_frame_bytes(PyObject* self, PyObject* args);
+extern PyObject* py_ws_build_ping_frame(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_build_close_frame_bytes(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_build_frames_batch(PyObject* self, PyObject* arg);
 
@@ -50,6 +51,9 @@ extern PyObject* py_ws_ring_buffer_readable_region(PyObject* self, PyObject* arg
 extern PyObject* py_ws_ring_buffer_consume(PyObject* self, PyObject* args);
 extern PyObject* py_ws_ring_buffer_readable(PyObject* self, PyObject* args);
 extern PyObject* py_ws_ring_buffer_reset(PyObject* self, PyObject* args);
+extern PyObject* py_ws_echo_direct(PyObject* self, PyObject* args);
+extern PyObject* py_ws_handle_direct(PyObject* self, PyObject* args);
+extern PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
 
 // dep_engine.cpp
 extern PyObject* py_compile_dep_plan(PyObject* self, PyObject* args, PyObject* kwargs);
@@ -249,6 +253,7 @@ static PyMethodDef module_methods[] = {
     {"ws_parse_frames_json", (PyCFunction)py_ws_parse_frames_json, METH_O, nullptr},
     {"ws_echo_frames", (PyCFunction)py_ws_echo_frames, METH_O, nullptr},
     {"ws_build_frame_bytes", (PyCFunction)py_ws_build_frame_bytes, METH_VARARGS, nullptr},
+    {"ws_build_ping_frame", (PyCFunction)py_ws_build_ping_frame, METH_O, nullptr},
     {"ws_build_close_frame_bytes", (PyCFunction)py_ws_build_close_frame_bytes, METH_O, nullptr},
     {"ws_build_frames_batch", (PyCFunction)py_ws_build_frames_batch, METH_O, nullptr},
 
@@ -259,6 +264,10 @@ static PyMethodDef module_methods[] = {
     {"ws_ring_buffer_consume", (PyCFunction)py_ws_ring_buffer_consume, METH_VARARGS, nullptr},
     {"ws_ring_buffer_readable", (PyCFunction)py_ws_ring_buffer_readable, METH_VARARGS, nullptr},
     {"ws_ring_buffer_reset", (PyCFunction)py_ws_ring_buffer_reset, METH_VARARGS, nullptr},
+    {"ws_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
+    {"ws_handle_direct", (PyCFunction)py_ws_handle_direct, METH_VARARGS, nullptr},
+    {"ws_handle_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
+    {"ws_handle_json_direct", (PyCFunction)py_ws_handle_json_direct, METH_VARARGS, nullptr},
 
     // v2.0: Dependency engine
     {"compile_dep_plan", (PyCFunction)py_compile_dep_plan, METH_VARARGS | METH_KEYWORDS, nullptr},

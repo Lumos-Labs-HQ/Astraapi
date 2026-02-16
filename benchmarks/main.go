@@ -325,6 +325,7 @@ func wsEchoBench(wsURL string, payload string, msgCount, concurrency int,
 
 				for m := 0; m < msgCount && time.Now().Before(testEnd); m++ {
 					t0 := time.Now()
+					conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 					err := conn.WriteMessage(websocket.TextMessage, []byte(payload))
 					if err != nil {
 						if time.Now().After(warmupEnd) {
@@ -332,6 +333,7 @@ func wsEchoBench(wsURL string, payload string, msgCount, concurrency int,
 						}
 						break
 					}
+					conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 					_, _, err = conn.ReadMessage()
 					if err != nil {
 						if time.Now().After(warmupEnd) {
@@ -397,6 +399,7 @@ func wsJSONEchoBench(wsURL string, jsonPayload string, msgCount, concurrency int
 
 				for m := 0; m < msgCount && time.Now().Before(testEnd); m++ {
 					t0 := time.Now()
+					conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 					err := conn.WriteMessage(websocket.TextMessage, []byte(jsonPayload))
 					if err != nil {
 						if time.Now().After(warmupEnd) {
@@ -404,6 +407,7 @@ func wsJSONEchoBench(wsURL string, jsonPayload string, msgCount, concurrency int
 						}
 						break
 					}
+					conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 					_, _, err = conn.ReadMessage()
 					if err != nil {
 						if time.Now().After(warmupEnd) {
@@ -470,6 +474,7 @@ func wsThroughputBench(wsURL string, receiveCount, concurrency int,
 				}
 
 				t0 := time.Now()
+				conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 				err = conn.WriteMessage(websocket.TextMessage, []byte(countStr))
 				if err != nil {
 					if time.Now().After(warmupEnd) {
@@ -480,6 +485,7 @@ func wsThroughputBench(wsURL string, receiveCount, concurrency int,
 				}
 
 				allOK := true
+				conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 				for r := 0; r < receiveCount; r++ {
 					_, _, err = conn.ReadMessage()
 					if err != nil {

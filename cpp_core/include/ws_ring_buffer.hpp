@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstring>
 #include <utility>
+#include "ws_frame_parser.hpp"
 
 // WsRingBuffer — Circular buffer for WebSocket frame accumulation
 //
@@ -18,22 +19,23 @@
 
 class WsRingBuffer {
 public:
-    static constexpr size_t CAPACITY = 128 * 1024;  // 128KB
-    static constexpr size_t MAX_FRAME_SIZE = 64 * 1024;  // Largest non-fragmented frame
+    static constexpr size_t DEFAULT_CAPACITY = 128 * 1024;  // 128KB initial
+    static constexpr size_t MAX_CAPACITY = 16 * 1024 * 1024;  // 16MB hard limit
 
-    WsRingBuffer();
-    ~WsRingBuffer() = default;
+    explicit WsRingBuffer(size_t initial_capacity = DEFAULT_CAPACITY,
+                          size_t max_capacity = MAX_CAPACITY);
+    ~WsRingBuffer();
 
     // Copy/move operations
     WsRingBuffer(const WsRingBuffer&) = delete;
     WsRingBuffer& operator=(const WsRingBuffer&) = delete;
-    WsRingBuffer(WsRingBuffer&&) = default;
-    WsRingBuffer& operator=(WsRingBuffer&&) = default;
+    WsRingBuffer(WsRingBuffer&&) = delete;
+    WsRingBuffer& operator=(WsRingBuffer&&) = delete;
 
     // ── Core Operations ──────────────────────────────────────────────────
 
     // Append data from network receive
-    // Returns true on success, false if buffer full (caller should apply backpressure)
+    // Grows buffer if needed (up to max_capacity). Returns false only if max exceeded.
     bool append(const uint8_t* data, size_t len);
 
     // Get contiguous readable region for frame parsing
@@ -45,6 +47,11 @@ public:
     // O(1) operation - just advances read pointer
     void consume(size_t n);
 
+    // Get contiguous mutable view of ALL readable data.
+    // Zero-copy if data doesn't wrap. If wrapped, copies into scratch buffer.
+    // Used by ws_echo_direct() to avoid memoryview creation overhead.
+    std::pair<uint8_t*, size_t> readable_contiguous();
+
     // ── Capacity & State ─────────────────────────────────────────────────
 
     // Total bytes available for reading
@@ -52,35 +59,58 @@ public:
         return write_pos_ - read_pos_;
     }
 
-    // Total bytes available for writing (for backpressure detection)
+    // Total bytes available for writing before growth is needed
     size_t available() const {
-        return CAPACITY - (write_pos_ - read_pos_);
+        return capacity_ - (write_pos_ - read_pos_);
     }
+
+    // Current capacity
+    size_t capacity() const { return capacity_; }
 
     // Check if buffer is empty
     bool empty() const {
         return read_pos_ == write_pos_;
     }
 
-    // Check if buffer is full
+    // Check if buffer is full (at current capacity, may still grow)
     bool full() const {
-        return (write_pos_ - read_pos_) >= CAPACITY;
+        return (write_pos_ - read_pos_) >= capacity_;
     }
 
-    // Reset buffer to initial state (for connection close)
+    // Reset buffer to initial state (for connection close/reuse)
     void reset() {
         read_pos_ = 0;
         write_pos_ = 0;
+        // Don't shrink — keep allocated capacity for reuse
     }
 
 private:
-    // Circular buffer storage (cache-line aligned for CPU prefetcher)
-    alignas(64) uint8_t buffer_[CAPACITY];
+    // Try to grow buffer. Returns true on success.
+    bool grow(size_t required);
+
+    // Heap-allocated circular buffer (cache-line aligned)
+    uint8_t* buffer_;
+    // Scratch buffer for readable_contiguous() when data wraps around
+    uint8_t* scratch_;
+    size_t capacity_;       // current capacity (always power of 2)
+    size_t max_capacity_;
+    size_t scratch_cap_;    // scratch buffer capacity (tracks buffer growth)
 
     // Read and write positions (monotonically increasing)
-    // Actual index = pos & (CAPACITY - 1)  [fast modulo for power-of-2]
+    // Actual index = pos & (capacity_ - 1)  [fast modulo for power-of-2]
     size_t read_pos_ = 0;
     size_t write_pos_ = 0;
+};
+
+// WsConnectionState — bundles ring buffer + fragment assembler per connection
+struct WsConnectionState {
+    WsRingBuffer ring;
+    WsFragmentAssembler assembler;
+
+    void reset() {
+        ring.reset();
+        assembler.reset();
+    }
 };
 
 // ── Python C API Integration ─────────────────────────────────────────────
@@ -109,3 +139,15 @@ PyObject* py_ws_ring_buffer_readable(PyObject* self, PyObject* args);
 // Reset buffer
 // Args: (capsule,) → Returns: None
 PyObject* py_ws_ring_buffer_reset(PyObject* self, PyObject* args);
+
+// Single-call echo: append data to ring buffer + parse + unmask + build echo + consume
+// Args: (capsule, bytes) → Returns: (echo_bytes|None, close_payload|None) or None (backpressure)
+PyObject* py_ws_echo_direct(PyObject* self, PyObject* args);
+
+// Single-call text/binary handler: append + parse + unmask (GIL released) + UTF-8 decode + consume
+// Args: (capsule, bytes) → Returns: ([(opcode, str|bytes), ...], pong_bytes|None) or None
+PyObject* py_ws_handle_direct(PyObject* self, PyObject* args);
+
+// Single-call JSON handler: append + parse + unmask (GIL released) + JSON decode + consume
+// Args: (capsule, bytes) → Returns: ([(opcode, parsed_obj|bytes), ...], pong_bytes|None) or None
+PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
