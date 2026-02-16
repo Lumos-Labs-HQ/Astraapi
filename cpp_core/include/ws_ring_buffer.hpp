@@ -48,7 +48,7 @@ public:
     void consume(size_t n);
 
     // Get contiguous mutable view of ALL readable data.
-    // Zero-copy if data doesn't wrap. If wrapped, copies into scratch buffer.
+    // Zero-copy if data doesn't wrap. If wrapped, linearizes in-place.
     // Used by ws_echo_direct() to avoid memoryview creation overhead.
     std::pair<uint8_t*, size_t> readable_contiguous();
 
@@ -90,11 +90,8 @@ private:
 
     // Heap-allocated circular buffer (cache-line aligned)
     uint8_t* buffer_;
-    // Scratch buffer for readable_contiguous() when data wraps around
-    uint8_t* scratch_;
     size_t capacity_;       // current capacity (always power of 2)
     size_t max_capacity_;
-    size_t scratch_cap_;    // scratch buffer capacity (tracks buffer growth)
 
     // Read and write positions (monotonically increasing)
     // Actual index = pos & (capacity_ - 1)  [fast modulo for power-of-2]
@@ -143,6 +140,10 @@ PyObject* py_ws_ring_buffer_reset(PyObject* self, PyObject* args);
 // Single-call echo: append data to ring buffer + parse + unmask + build echo + consume
 // Args: (capsule, bytes) → Returns: (echo_bytes|None, close_payload|None) or None (backpressure)
 PyObject* py_ws_echo_direct(PyObject* self, PyObject* args);
+
+// Ultra-fast echo: parses + builds echo + writes directly to socket FD (bypasses asyncio)
+// Args: (capsule, bytes, fd) → Returns: None | close_payload bytes
+PyObject* py_ws_echo_direct_fd(PyObject* self, PyObject* args);
 
 // Single-call text/binary handler: append + parse + unmask (GIL released) + UTF-8 decode + consume
 // Args: (capsule, bytes) → Returns: ([(opcode, str|bytes), ...], pong_bytes|None) or None

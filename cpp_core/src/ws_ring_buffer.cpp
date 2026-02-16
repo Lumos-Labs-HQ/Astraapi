@@ -2,10 +2,10 @@
 #include "ws_frame_parser.hpp"
 #include "json_parser.hpp"
 #include "pyref.hpp"
-#include <algorithm>
 #include <cassert>
 #include <cstdlib>
 #include <vector>
+#include <unistd.h>   // write(), ssize_t for direct socket I/O
 
 // ── Platform-specific aligned allocation ─────────────────────────────────
 namespace {
@@ -39,13 +39,10 @@ WsRingBuffer::WsRingBuffer(size_t initial_capacity, size_t max_capacity)
     if (capacity_ > max_capacity_) capacity_ = max_capacity_;
 
     buffer_ = alloc_aligned(64, capacity_);
-    scratch_ = alloc_aligned(64, capacity_);
-    scratch_cap_ = capacity_;
 }
 
 WsRingBuffer::~WsRingBuffer() {
     free_aligned(buffer_);
-    free_aligned(scratch_);
 }
 
 bool WsRingBuffer::grow(size_t required) {
@@ -78,13 +75,6 @@ bool WsRingBuffer::grow(size_t required) {
     capacity_ = new_cap;
     read_pos_ = 0;
     write_pos_ = r;
-
-    // Grow scratch buffer to match
-    if (scratch_cap_ < new_cap) {
-        free_aligned(scratch_);
-        scratch_ = alloc_aligned(64, new_cap);
-        scratch_cap_ = new_cap;
-    }
 
     return true;
 }
@@ -159,11 +149,35 @@ std::pair<uint8_t*, size_t> WsRingBuffer::readable_contiguous() {
         return {buffer_ + read_idx, total};
     }
 
-    // Wrapped — copy both segments into instance-owned scratch buffer
-    size_t first = capacity_ - read_idx;
-    memcpy(scratch_, buffer_ + read_idx, first);
-    memcpy(scratch_ + first, buffer_, write_idx);
-    return {scratch_, total};
+    // Wrapped — linearize in-place: move data to start of buffer.
+    // Data layout: [tail(0..write_idx) | ...gap... | head(read_idx..capacity_)]
+    // Goal:        [head | tail | ...gap...]
+    size_t first = capacity_ - read_idx;  // head segment size
+    if (write_idx <= first) {
+        // Tail is smaller — save tail, move head, append tail
+        uint8_t stack_buf[8192];
+        uint8_t* tmp = (write_idx <= sizeof(stack_buf))
+            ? stack_buf
+            : (uint8_t*)malloc(write_idx);
+        memcpy(tmp, buffer_, write_idx);
+        memmove(buffer_, buffer_ + read_idx, first);
+        memcpy(buffer_ + first, tmp, write_idx);
+        if (tmp != stack_buf) free(tmp);
+    } else {
+        // Head is smaller — save head, move tail, prepend head
+        uint8_t stack_buf[8192];
+        uint8_t* tmp = (first <= sizeof(stack_buf))
+            ? stack_buf
+            : (uint8_t*)malloc(first);
+        memcpy(tmp, buffer_ + read_idx, first);
+        memmove(buffer_ + first, buffer_, write_idx);
+        memcpy(buffer_, tmp, first);
+        if (tmp != stack_buf) free(tmp);
+    }
+
+    read_pos_ = 0;
+    write_pos_ = total;
+    return {buffer_, total};
 }
 
 // ── Python C API Integration ─────────────────────────────────────────────
@@ -342,28 +356,37 @@ PyObject* py_ws_echo_direct(PyObject* /*self*/, PyObject* args) {
         return Py_BuildValue("(OO)", Py_None, Py_None);
     }
 
-    // Step 3: Parse + unmask + build echo (GIL released)
-    static thread_local std::vector<uint8_t> out;
-    out.clear();
-    if (out.capacity() < data_len + 64) {
-        out.reserve((data_len + 64) * 2);
-    }
+    // Step 3: Parse + unmask + build echo
+    // Pre-allocate PyBytes at max possible size, write directly into it.
+    // This eliminates the thread_local vector → PyBytes copy.
+    // Max echo output = data_len + 10 bytes header per frame (worst case: all 1-byte frames)
+    size_t max_echo_size = data_len + 64;
+    PyObject* echo_bytes = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)max_echo_size);
+    if (!echo_bytes) return nullptr;
+    uint8_t* echo_buf = (uint8_t*)PyBytes_AS_STRING(echo_bytes);
 
     EchoResult eres;
+    size_t actual_echo_size = 0;
 
-    Py_BEGIN_ALLOW_THREADS
-    ws_echo_frames_nogil(data, data_len, out, eres);
-    Py_END_ALLOW_THREADS
-
-    // Step 4: Build Python result objects (before consume, data still valid)
-    PyObject* echo_bytes;
-    if (!out.empty()) {
-        echo_bytes = PyBytes_FromStringAndSize(
-            (const char*)out.data(), (Py_ssize_t)out.size());
-        if (!echo_bytes) return nullptr;
+    // Skip GIL release for small messages — transition overhead exceeds benefit
+    if (data_len < 256) {
+        actual_echo_size = ws_echo_frames_into_buffer(
+            echo_buf, max_echo_size, data, data_len, eres);
     } else {
+        Py_BEGIN_ALLOW_THREADS
+        actual_echo_size = ws_echo_frames_into_buffer(
+            echo_buf, max_echo_size, data, data_len, eres);
+        Py_END_ALLOW_THREADS
+    }
+
+    // Shrink PyBytes in-place (no realloc when shrinking)
+    if (actual_echo_size == 0) {
+        Py_DECREF(echo_bytes);
         Py_INCREF(Py_None);
         echo_bytes = Py_None;
+    } else if ((Py_ssize_t)actual_echo_size != PyBytes_GET_SIZE(echo_bytes)) {
+        _PyBytes_Resize(&echo_bytes, (Py_ssize_t)actual_echo_size);
+        if (!echo_bytes) return nullptr;
     }
 
     PyObject* close_obj;
@@ -390,6 +413,103 @@ PyObject* py_ws_echo_direct(PyObject* /*self*/, PyObject* args) {
     Py_DECREF(echo_bytes);
     Py_DECREF(close_obj);
     return result;
+}
+
+// ── ws_echo_direct_fd: Ultra-fast echo — writes directly to socket FD ────────
+// Bypasses asyncio transport entirely. The echo response is written directly
+// to the socket file descriptor from C++ with GIL released.
+// Returns: None (no data) | close_payload bytes (if CLOSE received)
+// On the happy path, ZERO Python objects are allocated.
+
+PyObject* py_ws_echo_direct_fd(PyObject* /*self*/, PyObject* args) {
+    PyObject* capsule;
+    Py_buffer py_buf;
+    int fd;
+
+    if (!PyArg_ParseTuple(args, "Oy*i", &capsule, &py_buf, &fd)) {
+        return nullptr;
+    }
+
+    WsConnectionState* state = get_conn_state(capsule);
+    if (!state) {
+        PyBuffer_Release(&py_buf);
+        PyErr_SetString(PyExc_ValueError, "Invalid ws_connection_state capsule");
+        return nullptr;
+    }
+
+    // Step 1: Append incoming data to ring buffer
+    bool appended = state->ring.append(
+        static_cast<const uint8_t*>(py_buf.buf), py_buf.len);
+    PyBuffer_Release(&py_buf);
+
+    if (!appended) {
+        Py_RETURN_NONE;  // Ring buffer full — backpressure
+    }
+
+    // Step 2: Get contiguous readable data
+    auto [data, data_len] = state->ring.readable_contiguous();
+    if (data == nullptr || data_len == 0) {
+        Py_RETURN_NONE;
+    }
+
+    // Step 3: Parse + unmask + build echo + write to socket — ALL with GIL released
+    // Use thread-local buffer to hold echo frames before write
+    static thread_local std::vector<uint8_t> out;
+    out.clear();
+    if (out.capacity() < data_len + 64) {
+        out.reserve((data_len + 64) * 2);
+    }
+
+    EchoResult eres;
+    bool write_ok = true;
+
+    if (data_len < 256) {
+        // Small message: skip GIL release (transition cost > work)
+        ws_echo_frames_nogil(data, data_len, out, eres);
+        if (!out.empty() && fd >= 0) {
+            const uint8_t* ptr = out.data();
+            size_t remaining = out.size();
+            while (remaining > 0) {
+                ssize_t n = write(fd, ptr, remaining);
+                if (n <= 0) { write_ok = false; break; }
+                ptr += n;
+                remaining -= (size_t)n;
+            }
+        }
+    } else {
+        Py_BEGIN_ALLOW_THREADS
+        ws_echo_frames_nogil(data, data_len, out, eres);
+        if (!out.empty() && fd >= 0) {
+            const uint8_t* ptr = out.data();
+            size_t remaining = out.size();
+            while (remaining > 0) {
+                ssize_t n = write(fd, ptr, remaining);
+                if (n <= 0) { write_ok = false; break; }
+                ptr += n;
+                remaining -= (size_t)n;
+            }
+        }
+        Py_END_ALLOW_THREADS
+    }
+
+    // Step 4: Extract close payload BEFORE consuming (data pointer validity)
+    if (eres.has_close) {
+        PyObject* close_result = PyBytes_FromStringAndSize(
+            (const char*)(data + eres.close_payload_offset),
+            (Py_ssize_t)eres.close_payload_len);
+        if (eres.total_consumed > 0) {
+            state->ring.consume(eres.total_consumed);
+        }
+        return close_result;
+    }
+
+    // Step 5: Consume processed bytes (happy path)
+    if (eres.total_consumed > 0) {
+        state->ring.consume(eres.total_consumed);
+    }
+
+    (void)write_ok;
+    Py_RETURN_NONE;  // Happy path: zero allocations!
 }
 
 // ── ws_handle_direct: Single-call text/binary handler ───────────────────────

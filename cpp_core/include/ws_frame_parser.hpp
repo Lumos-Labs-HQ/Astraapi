@@ -81,6 +81,12 @@ void ws_echo_frames_nogil(
     uint8_t* data, size_t data_len,
     std::vector<uint8_t>& out, EchoResult& result);
 
+// Buffer-target variant: writes echo frames directly into caller-provided buffer.
+// Returns number of bytes written. No heap allocation.
+size_t ws_echo_frames_into_buffer(
+    uint8_t* out_buf, size_t out_cap,
+    uint8_t* data, size_t data_len, EchoResult& result);
+
 // ── GIL-released parse helper (used by ws_handle_direct/json_direct) ─────
 
 struct ParsedFrameRef {

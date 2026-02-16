@@ -52,6 +52,7 @@ extern PyObject* py_ws_ring_buffer_consume(PyObject* self, PyObject* args);
 extern PyObject* py_ws_ring_buffer_readable(PyObject* self, PyObject* args);
 extern PyObject* py_ws_ring_buffer_reset(PyObject* self, PyObject* args);
 extern PyObject* py_ws_echo_direct(PyObject* self, PyObject* args);
+extern PyObject* py_ws_echo_direct_fd(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
 
@@ -265,6 +266,7 @@ static PyMethodDef module_methods[] = {
     {"ws_ring_buffer_readable", (PyCFunction)py_ws_ring_buffer_readable, METH_VARARGS, nullptr},
     {"ws_ring_buffer_reset", (PyCFunction)py_ws_ring_buffer_reset, METH_VARARGS, nullptr},
     {"ws_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
+    {"ws_echo_direct_fd", (PyCFunction)py_ws_echo_direct_fd, METH_VARARGS, nullptr},
     {"ws_handle_direct", (PyCFunction)py_ws_handle_direct, METH_VARARGS, nullptr},
     {"ws_handle_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
     {"ws_handle_json_direct", (PyCFunction)py_ws_handle_json_direct, METH_VARARGS, nullptr},

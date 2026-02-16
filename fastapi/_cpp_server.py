@@ -104,6 +104,8 @@ try:
         ws_handle_direct as _ws_handle_direct,
         ws_handle_echo_direct as _ws_handle_echo_direct,
         ws_handle_json_direct as _ws_handle_json_direct,
+        # Ultra-fast echo: writes directly to socket FD (bypasses asyncio transport)
+        ws_echo_direct_fd as _ws_echo_direct_fd,
         # Frame building (send_text/send_bytes/send_json/close/ping)
         ws_build_frame_bytes as _ws_build_frame_bytes,
         ws_build_ping_frame as _ws_build_ping_frame,
@@ -392,14 +394,18 @@ class CppWebSocket:
         if self._closed:
             raise RuntimeError("WebSocket is closed")
         # Echo auto-detection: if sending exactly what was received, switch handler
-        # Require 3 consecutive echo matches to avoid false positives
+        # Single match triggers — false positive cost is zero (echo handler is correct)
         if _ws_handle_echo_direct is not None and self._echo_detect_count >= 0:
             if self._last_received is not None and data == self._last_received:
                 self._echo_detect_count += 1
-                if self._echo_detect_count >= 3:
+                if self._echo_detect_count >= 1:
                     proto = self._protocol
                     if proto is not None:
-                        proto._ws_handler = proto._handle_ws_frames_echo
+                        # Use direct FD write if socket FD available
+                        if proto._ws_fd >= 0:
+                            proto._ws_handler = proto._handle_ws_frames_echo_fd
+                        else:
+                            proto._ws_handler = proto._handle_ws_frames_echo
                     self._echo_detect_count = -1  # stop detecting
             else:
                 self._echo_detect_count = 0  # non-match resets counter
@@ -685,7 +691,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_buf", "_ka", "_ka_deadline", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_ping_handle", "_ws_pong_received")
+    __slots__ = ("_core", "_transport", "_buf", "_ka", "_ka_deadline", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop) -> None:
         self._core = core_app
@@ -699,6 +705,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_handler = None  # Will be set to echo/json/normal handler after upgrade
         self._ws: CppWebSocket | None = None
         self._ws_ring_buf = None  # C++ connection state capsule (created on WebSocket upgrade)
+        self._ws_fd = -1  # Raw socket FD for direct C++ writes (bypassing asyncio)
         self._ws_ping_handle: asyncio.TimerHandle | None = None
         self._ws_pong_received = True
 
@@ -735,6 +742,7 @@ class CppHttpProtocol(asyncio.Protocol):
             elif _ws_ring_buffer_reset is not None:
                 _ws_ring_buffer_reset(self._ws_ring_buf)
             self._ws_ring_buf = None
+        self._ws_fd = -1
         self._transport = None
 
     # ── Data handling — the hot path ─────────────────────────────────────
@@ -744,7 +752,14 @@ class CppHttpProtocol(asyncio.Protocol):
         if self._ws is not None:
             # Any incoming data means the connection is alive (PONG tracking)
             self._ws_pong_received = True
-            self._ws_handler(data)
+            try:
+                self._ws_handler(data)
+            except Exception as e:
+                import traceback
+                print(f"[WS-ERROR] {self._ws_handler.__name__}: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                if self._transport and not self._transport.is_closing():
+                    self._transport.close()
             return
 
         buf = self._buf
@@ -826,10 +841,12 @@ class CppHttpProtocol(asyncio.Protocol):
                     _server_ws_metrics.total_connections += 1
                     self._ka_cancel()  # WS connections are long-lived
                     # TCP_NODELAY: disable Nagle's algorithm for low-latency WS
+                    self._ws_fd = -1
                     try:
                         sock = transport.get_extra_info("socket")
                         if sock is not None:
                             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                            self._ws_fd = sock.fileno()
                     except (OSError, AttributeError):
                         pass
                     # Initialize ring buffer for WebSocket frame accumulation
@@ -906,6 +923,16 @@ class CppHttpProtocol(asyncio.Protocol):
             if ws:
                 ws.feed_frame(0x8, close_payload)
                 _send_close_response(transport, close_payload)
+
+    def _handle_ws_frames_echo_fd(self, data: bytes) -> None:
+        """Ultra-fast echo — C++ writes directly to socket FD, bypassing asyncio."""
+        result = _ws_echo_direct_fd(self._ws_ring_buf, data, self._ws_fd)
+        if result is not None:
+            # Close frame detected (rare path)
+            ws = self._ws
+            if ws:
+                ws.feed_frame(0x8, result)
+                _send_close_response(self._transport, result)
 
     def _handle_ws_frames_json(self, data: bytes) -> None:
         """JSON mode — single C++ call does ring + parse + unmask + JSON decode."""

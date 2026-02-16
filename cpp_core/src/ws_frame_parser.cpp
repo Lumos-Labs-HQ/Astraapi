@@ -7,7 +7,9 @@
 #include <vector>
 
 // ── SIMD headers ─────────────────────────────────────────────────────────────
-#if defined(__SSE2__)
+#if defined(__AVX2__)
+#include <immintrin.h>   // AVX2 + SSE2
+#elif defined(__SSE2__)
 #include <emmintrin.h>
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
@@ -189,10 +191,32 @@ int ws_parse_frame(const uint8_t* data, size_t len, WsFrame* out,
 void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]) {
     size_t i = 0;
 
-#if defined(__SSE2__)
+#if defined(__AVX2__)
+    // AVX2: unmask 32 bytes at a time (2x SSE2 throughput)
+    if (len >= 32) {
+        uint8_t mask32[32];
+        for (int j = 0; j < 32; j++) mask32[j] = mask[j & 3];
+        __m256i mask_vec = _mm256_loadu_si256((__m256i*)mask32);
+
+        for (; i + 31 < len; i += 32) {
+            __m256i d = _mm256_loadu_si256((__m256i*)(payload + i));
+            _mm256_storeu_si256((__m256i*)(payload + i), _mm256_xor_si256(d, mask_vec));
+        }
+    }
+    // SSE2 for 16-byte remainder (AVX2 implies SSE2)
+    if (i + 15 < len) {
+        uint8_t mask16[16];
+        for (int j = 0; j < 16; j++) mask16[j] = mask[j & 3];
+        __m128i mask_vec = _mm_loadu_si128((__m128i*)mask16);
+
+        for (; i + 15 < len; i += 16) {
+            __m128i data_vec = _mm_loadu_si128((__m128i*)(payload + i));
+            _mm_storeu_si128((__m128i*)(payload + i), _mm_xor_si128(data_vec, mask_vec));
+        }
+    }
+#elif defined(__SSE2__)
     // SSE2: unmask 16 bytes at a time
     if (len >= 16) {
-        // Replicate 4-byte mask to fill 16 bytes
         uint8_t mask16[16];
         for (int j = 0; j < 16; j++) mask16[j] = mask[j & 3];
         __m128i mask_vec = _mm_loadu_si128((__m128i*)mask16);
@@ -730,6 +754,66 @@ void ws_echo_frames_nogil(
     }
 
     result.total_consumed = total_consumed;
+}
+
+// ── Buffer-target echo: writes directly into caller-provided buffer ──────────
+// No std::vector allocation — writes echo frames directly into pre-allocated memory.
+// Returns number of bytes written to out_buf.
+
+size_t ws_echo_frames_into_buffer(
+    uint8_t* out_buf, size_t out_cap,
+    uint8_t* data, size_t data_len, EchoResult& result)
+{
+    size_t total_consumed = 0;
+    size_t out_pos = 0;
+
+    while (total_consumed < data_len) {
+        WsFrame frame;
+        int consumed = ws_parse_frame(data + total_consumed, data_len - total_consumed, &frame);
+        if (consumed == 0) break;
+        if (consumed < 0) break;
+
+        uint8_t opcode = (uint8_t)frame.opcode;
+
+        if (opcode == WS_CLOSE) {
+            result.has_close = true;
+            if (frame.masked && frame.payload_len > 0) {
+                ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
+            }
+            result.close_payload_offset = (size_t)(frame.payload - data);
+            result.close_payload_len = (size_t)frame.payload_len;
+            total_consumed += (size_t)consumed;
+            break;
+        }
+
+        if (opcode == WS_PONG) {
+            total_consumed += (size_t)consumed;
+            continue;
+        }
+
+        if (frame.masked && frame.payload_len > 0) {
+            ws_unmask((uint8_t*)frame.payload, (size_t)frame.payload_len, frame.mask_key);
+        }
+
+        WsOpcode resp_opcode = (opcode == WS_PING) ? WS_PONG : (WsOpcode)opcode;
+
+        uint8_t hdr[10];
+        size_t hdr_len = ws_write_frame_header(hdr, resp_opcode, (size_t)frame.payload_len);
+        size_t frame_total = hdr_len + (size_t)frame.payload_len;
+
+        if (out_pos + frame_total > out_cap) break;  // buffer full
+
+        memcpy(out_buf + out_pos, hdr, hdr_len);
+        if (frame.payload_len > 0) {
+            memcpy(out_buf + out_pos + hdr_len, frame.payload, (size_t)frame.payload_len);
+        }
+        out_pos += frame_total;
+
+        total_consumed += (size_t)consumed;
+    }
+
+    result.total_consumed = total_consumed;
+    return out_pos;
 }
 
 // ── ws_echo_frames(buffer: bytearray) -> (consumed, echo_bytes, close_payload|None)
