@@ -1,1 +1,1 @@
-from starlette.middleware import Middleware as Middleware
+from fastapi._middleware_impl import Middleware as Middleware

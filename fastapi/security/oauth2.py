@@ -7,8 +7,8 @@ from fastapi.openapi.models import OAuthFlows as OAuthFlowsModel
 from fastapi.param_functions import Form
 from fastapi.security.base import SecurityBase
 from fastapi.security.utils import get_authorization_scheme_param
-from starlette.requests import Request
-from starlette.status import HTTP_401_UNAUTHORIZED
+from fastapi._request import Request
+from fastapi._status import HTTP_401_UNAUTHORIZED
 
 
 class OAuth2PasswordRequestForm:

@@ -189,9 +189,10 @@ PyObject* py_ws_parse_frames_json(PyObject* /*self*/, PyObject* arg) {
         if (!payload_obj) { PyBuffer_Release(&buf); return nullptr; }
 
         PyRef payload_ref(payload_obj);
-        PyRef tuple(PyTuple_Pack(2, PyLong_FromLong(opcode), payload_ref.get()));
+        PyRef opcode_obj(PyLong_FromLong(opcode));
+        if (!opcode_obj) { PyBuffer_Release(&buf); return nullptr; }
+        PyRef tuple(PyTuple_Pack(2, opcode_obj.get(), payload_ref.get()));
         if (!tuple) { PyBuffer_Release(&buf); return nullptr; }
-        Py_DECREF(PyTuple_GET_ITEM(tuple.get(), 0));
 
         if (PyList_Append(frames.get(), tuple.get()) < 0) {
             PyBuffer_Release(&buf);

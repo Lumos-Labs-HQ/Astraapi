@@ -293,3 +293,18 @@ PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObjec
 
     return result.release();
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Module shutdown: release all PyObject* refs held in the global registry
+// ══════════════════════════════════════════════════════════════════════════════
+
+void cleanup_param_registry() {
+    std::unique_lock lock(g_registry_mutex);
+    for (auto& [id, reg] : g_registry) {
+        for (auto& ps : reg.specs) {
+            Py_XDECREF(ps.default_value);
+            ps.default_value = nullptr;
+        }
+    }
+    g_registry.clear();
+}

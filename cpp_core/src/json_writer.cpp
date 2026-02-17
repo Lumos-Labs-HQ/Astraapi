@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+#include <mutex>
 
 extern "C" {
 #include "ryu/ryu.h"
@@ -22,8 +23,10 @@ static PyObject* s_enum_type = nullptr;        // enum.Enum
 static PyObject* s_isoformat = nullptr;        // cached "isoformat" string
 static PyObject* s_value = nullptr;            // cached "value" string
 
-static void ensure_special_types() {
-    if (s_datetime_type) return;  // Already initialized
+// TS-1: Thread-safe lazy init for free-threaded Python (PEP 703) readiness
+static std::once_flag s_types_init_flag;
+
+static void _do_ensure_special_types() {
 
     s_isoformat = PyUnicode_InternFromString("isoformat");
     s_value = PyUnicode_InternFromString("value");
@@ -57,6 +60,10 @@ static void ensure_special_types() {
         s_enum_type = PyObject_GetAttrString(enum_mod.get(), "Enum");
     }
     PyErr_Clear();
+}
+
+static void ensure_special_types() {
+    std::call_once(s_types_init_flag, _do_ensure_special_types);
 }
 
 void json_writer_init() {

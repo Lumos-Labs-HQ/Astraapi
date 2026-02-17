@@ -26,19 +26,17 @@ from fastapi.dependencies.utils import (
     get_validation_alias,
 )
 from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import FastAPIDeprecationWarning
 from fastapi.openapi.constants import METHODS_WITH_BODY, REF_PREFIX
 from fastapi.params import Body, ParamTypes
 from fastapi.responses import Response
 from fastapi.types import ModelNameMap
 from fastapi.utils import (
     deep_dict_update,
-    generate_operation_id_for_path,
     is_body_allowed_for_status_code,
 )
 from pydantic import BaseModel
-from starlette.responses import JSONResponse
-from starlette.routing import BaseRoute
+from fastapi._response import JSONResponse
+from fastapi._routing_base import BaseRoute
 from typing_extensions import Literal
 
 validation_error_definition = {
@@ -214,20 +212,6 @@ def get_openapi_operation_request_body(
     return request_body_oai
 
 
-def generate_operation_id(
-    *, route: routing.APIRoute, method: str
-) -> str:  # pragma: nocover
-    warnings.warn(
-        message="fastapi.openapi.utils.generate_operation_id() was deprecated, "
-        "it is not used internally, and will be removed soon",
-        category=FastAPIDeprecationWarning,
-        stacklevel=2,
-    )
-    if route.operation_id:
-        return route.operation_id
-    path: str = route.path_format
-    return generate_operation_id_for_path(name=route.name, path=path, method=method)
-
 
 def generate_operation_summary(*, route: routing.APIRoute, method: str) -> str:
     if route.summary:
@@ -341,6 +325,7 @@ def get_openapi_path(
                         )
                         callbacks[callback.name] = {callback.path: cb_path}
                 operation["callbacks"] = callbacks
+            status_code = "200"  # default fallback
             if route.status_code is not None:
                 status_code = str(route.status_code)
             else:

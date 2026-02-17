@@ -52,18 +52,18 @@ from fastapi.types import DependencyCacheKey
 from fastapi.utils import create_model_field, get_path_param_names
 from pydantic import BaseModel, Json
 from pydantic.fields import FieldInfo
-from starlette.background import BackgroundTasks as StarletteBackgroundTasks
-from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import (
+from fastapi._background import BackgroundTasks as NativeBackgroundTasks
+from fastapi._concurrency import run_in_threadpool
+from fastapi._datastructures_impl import (
     FormData,
     Headers,
     ImmutableMultiDict,
     QueryParams,
     UploadFile,
 )
-from starlette.requests import HTTPConnection, Request
-from starlette.responses import Response
-from starlette.websockets import WebSocket
+from fastapi._request import HTTPConnection, Request
+from fastapi._response import Response
+from fastapi._websocket import WebSocket
 from typing_extensions import Literal, get_args, get_origin
 from typing_inspection.typing_objects import is_typealiastype
 
@@ -351,7 +351,7 @@ def add_non_field_param_to_dependency(
     elif lenient_issubclass(type_annotation, Response):
         dependant.response_param_name = param_name
         return True
-    elif lenient_issubclass(type_annotation, StarletteBackgroundTasks):
+    elif lenient_issubclass(type_annotation, NativeBackgroundTasks):
         dependant.background_tasks_param_name = param_name
         return True
     elif lenient_issubclass(type_annotation, SecurityScopes):
@@ -469,7 +469,7 @@ def analyze_param(
             WebSocket,
             HTTPConnection,
             Response,
-            StarletteBackgroundTasks,
+            NativeBackgroundTasks,
             SecurityScopes,
         ),
     ):
@@ -572,7 +572,7 @@ async def _solve_generator(
 class SolvedDependency:
     values: dict[str, Any]
     errors: list[Any]
-    background_tasks: Optional[StarletteBackgroundTasks]
+    background_tasks: Optional[NativeBackgroundTasks]
     response: Response
     dependency_cache: dict[DependencyCacheKey, Any]
 
@@ -582,7 +582,7 @@ async def solve_dependencies(
     request: Union[Request, WebSocket],
     dependant: Dependant,
     body: Optional[Union[dict[str, Any], FormData]] = None,
-    background_tasks: Optional[StarletteBackgroundTasks] = None,
+    background_tasks: Optional[NativeBackgroundTasks] = None,
     response: Optional[Response] = None,
     dependency_overrides_provider: Optional[Any] = None,
     dependency_cache: Optional[dict[DependencyCacheKey, Any]] = None,

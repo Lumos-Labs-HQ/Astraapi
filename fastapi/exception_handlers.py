@@ -2,13 +2,12 @@ from fastapi._core_bridge import (
     serialize_error_response,
     serialize_error_list,
 )
-from fastapi.exceptions import RequestValidationError, WebSocketRequestValidationError
+from fastapi._request import Request
+from fastapi._response import JSONResponse, Response
+from fastapi._status import WS_1008_POLICY_VIOLATION
+from fastapi.exceptions import HTTPException, RequestValidationError, WebSocketRequestValidationError
 from fastapi.utils import is_body_allowed_for_status_code
 from fastapi.websockets import WebSocket
-from starlette.exceptions import HTTPException
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.status import WS_1008_POLICY_VIOLATION
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> Response:

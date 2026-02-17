@@ -184,7 +184,6 @@ class Path(Param):  # type: ignore[misc]
         **extra: Any,
     ):
         assert default is ..., "Path parameters cannot have a default value"
-        self.in_ = self.in_
         super().__init__(
             default=default,
             default_factory=default_factory,

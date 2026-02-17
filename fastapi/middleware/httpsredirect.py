@@ -1,3 +1,1 @@
-from starlette.middleware.httpsredirect import (  # noqa
-    HTTPSRedirectMiddleware as HTTPSRedirectMiddleware,
-)
+from fastapi._middleware_impl import HTTPSRedirectMiddleware as HTTPSRedirectMiddleware  # noqa

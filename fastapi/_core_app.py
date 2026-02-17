@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from starlette.exceptions import HTTPException
-from starlette.responses import Response
-from starlette.types import Receive, Scope, Send
+from fastapi.exceptions import HTTPException
+from fastapi._response import Response
+from fastapi._types import Receive, Scope, Send
 
 from fastapi._core_bridge import (
     CoreApp,

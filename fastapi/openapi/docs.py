@@ -1,9 +1,10 @@
+import html as html_mod
 import json
 from typing import Annotated, Any, Optional
 
 from annotated_doc import Doc
 from fastapi.encoders import jsonable_encoder
-from starlette.responses import HTMLResponse
+from fastapi._response import HTMLResponse
 
 swagger_ui_default_parameters: Annotated[
     dict[str, Any],
@@ -135,6 +136,10 @@ def get_swagger_ui_html(
     if swagger_ui_parameters:
         current_swagger_ui_parameters.update(swagger_ui_parameters)
 
+    # SEC-1: Escape user-controlled values to prevent XSS
+    safe_title = html_mod.escape(title)
+    safe_openapi_url = html_mod.escape(openapi_url)
+
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -142,7 +147,7 @@ def get_swagger_ui_html(
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link type="text/css" rel="stylesheet" href="{swagger_css_url}">
     <link rel="shortcut icon" href="{swagger_favicon_url}">
-    <title>{title}</title>
+    <title>{safe_title}</title>
     </head>
     <body>
     <div id="swagger-ui">
@@ -151,7 +156,7 @@ def get_swagger_ui_html(
     <!-- `SwaggerUIBundle` is now available on the page -->
     <script>
     const ui = SwaggerUIBundle({{
-        url: '{openapi_url}',
+        url: '{safe_openapi_url}',
     """
 
     for key, value in current_swagger_ui_parameters.items():
@@ -247,11 +252,15 @@ def get_redoc_html(
     Read more about it in the
     [FastAPI docs for Custom Docs UI Static Assets (Self-Hosting)](https://fastapi.tiangolo.com/how-to/custom-docs-ui-assets/).
     """
+    # SEC-1: Escape user-controlled values to prevent XSS
+    safe_title = html_mod.escape(title)
+    safe_openapi_url = html_mod.escape(openapi_url)
+
     html = f"""
     <!DOCTYPE html>
     <html>
     <head>
-    <title>{title}</title>
+    <title>{safe_title}</title>
     <!-- needed for adaptive design -->
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -276,7 +285,7 @@ def get_redoc_html(
     <noscript>
         ReDoc requires Javascript to function. Please enable it to browse the documentation.
     </noscript>
-    <redoc spec-url="{openapi_url}"></redoc>
+    <redoc spec-url="{safe_openapi_url}"></redoc>
     <script src="{redoc_js_url}"> </script>
     </body>
     </html>

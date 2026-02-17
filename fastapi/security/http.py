@@ -9,8 +9,14 @@ from fastapi.openapi.models import HTTPBearer as HTTPBearerModel
 from fastapi.security.base import SecurityBase
 from fastapi.security.utils import get_authorization_scheme_param
 from pydantic import BaseModel
-from starlette.requests import Request
-from starlette.status import HTTP_401_UNAUTHORIZED
+from fastapi._request import Request
+from fastapi._status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
+
+try:
+    from fastapi._core_bridge import extract_bearer_token, extract_basic_credentials
+    _USE_CPP_SECURITY = True
+except ImportError:
+    _USE_CPP_SECURITY = False
 
 
 class HTTPBasicCredentials(BaseModel):
@@ -204,6 +210,17 @@ class HTTPBasic(HTTPBase):
     async def __call__(  # type: ignore
         self, request: Request
     ) -> Optional[HTTPBasicCredentials]:
+        if _USE_CPP_SECURITY:
+            # C++ fast path for basic credentials extraction
+            authorization = request.headers.get("Authorization")
+            if authorization:
+                result = extract_basic_credentials(authorization)
+                if result:
+                    username, password = result
+                    return HTTPBasicCredentials(username=username, password=password)
+            if not self.auto_error:
+                return None
+            raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Not authenticated")
         authorization = request.headers.get("Authorization")
         scheme, param = get_authorization_scheme_param(authorization)
         if not authorization or scheme.lower() != "basic":
@@ -305,6 +322,16 @@ class HTTPBearer(HTTPBase):
     async def __call__(
         self, request: Request
     ) -> Optional[HTTPAuthorizationCredentials]:
+        if _USE_CPP_SECURITY:
+            # C++ fast path for bearer token extraction
+            authorization = request.headers.get("Authorization")
+            if authorization:
+                token = extract_bearer_token(authorization)
+                if token:
+                    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+            if not self.auto_error:
+                return None
+            raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Not authenticated")
         authorization = request.headers.get("Authorization")
         scheme, credentials = get_authorization_scheme_param(authorization)
         if not (authorization and scheme and credentials):

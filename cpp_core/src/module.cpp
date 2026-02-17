@@ -33,12 +33,9 @@ extern PyObject* py_ws_parse_json(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_serialize_json(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_batch_parse(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_build_json_frame(PyObject* self, PyObject* args);
-extern PyObject* py_ws_parse_frames_json(PyObject* self, PyObject* arg);
 
 // ws_frame_parser.cpp
 extern void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]);
-extern PyObject* py_ws_parse_frames(PyObject* self, PyObject* arg);
-extern PyObject* py_ws_parse_frames_text(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_echo_frames(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_build_frame_bytes(PyObject* self, PyObject* args);
 extern PyObject* py_ws_build_ping_frame(PyObject* self, PyObject* arg);
@@ -250,9 +247,6 @@ static PyMethodDef module_methods[] = {
     {"ws_serialize_json", (PyCFunction)py_ws_serialize_json, METH_O, nullptr},
     {"ws_batch_parse", (PyCFunction)py_ws_batch_parse, METH_O, nullptr},
     {"ws_unmask", (PyCFunction)py_ws_unmask, METH_VARARGS, nullptr},
-    {"ws_parse_frames", (PyCFunction)py_ws_parse_frames, METH_O, nullptr},
-    {"ws_parse_frames_text", (PyCFunction)py_ws_parse_frames_text, METH_O, nullptr},
-    {"ws_parse_frames_json", (PyCFunction)py_ws_parse_frames_json, METH_O, nullptr},
     {"ws_echo_frames", (PyCFunction)py_ws_echo_frames, METH_O, nullptr},
     {"ws_build_frame_bytes", (PyCFunction)py_ws_build_frame_bytes, METH_VARARGS, nullptr},
     {"ws_build_ping_frame", (PyCFunction)py_ws_build_ping_frame, METH_O, nullptr},
@@ -336,12 +330,20 @@ static PyMethodDef module_methods[] = {
 // Module cleanup — release all cached static refs at interpreter shutdown
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Extern cleanup functions from other translation units
+extern void cleanup_param_registry();
+extern void cleanup_dep_plans();
+
 static void module_free(void* /*module*/) {
     // Clean up json_writer.cpp cached type objects
     json_writer_cleanup();
 
     // Clean up ASGI constants
     cleanup_asgi_constants();
+
+    // Clean up global registries (LEAK-2 fix)
+    cleanup_param_registry();
+    cleanup_dep_plans();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

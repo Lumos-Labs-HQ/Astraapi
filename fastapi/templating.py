@@ -1,1 +1,1 @@
-from starlette.templating import Jinja2Templates as Jinja2Templates  # noqa
+from fastapi._templating import Jinja2Templates as Jinja2Templates  # noqa

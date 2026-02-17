@@ -64,25 +64,24 @@ from fastapi.utils import (
     get_value_or_default,
     is_body_allowed_for_status_code,
 )
-from starlette import routing
-from starlette._exception_handler import wrap_app_handling_exceptions
-from starlette._utils import is_async_callable
-from starlette.concurrency import run_in_threadpool
-from starlette.exceptions import HTTPException
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.routing import (
+from fastapi import _routing_base as routing
+from fastapi._exception_handler import wrap_app_handling_exceptions
+from fastapi._concurrency import is_async_callable, run_in_threadpool
+from fastapi.exceptions import HTTPException
+from fastapi._request import Request
+from fastapi._response import JSONResponse, Response
+from fastapi._routing_base import (
     BaseRoute,
     Match,
     compile_path,
     get_name,
 )
-from starlette.routing import Mount as Mount  # noqa
-from starlette.types import AppType, ASGIApp, Lifespan, Receive, Scope, Send
-from starlette.websockets import WebSocket
+from fastapi._routing_base import Mount as Mount  # noqa
+from fastapi._types import AppType, ASGIApp, Lifespan, Receive, Scope, Send
+from fastapi._websocket import WebSocket
 from typing_extensions import deprecated
 
-from starlette.datastructures import FormData, Headers, UploadFile
+from fastapi._datastructures_impl import FormData, Headers, UploadFile
 
 from fastapi._core_bridge import (
     CoreRouter,
@@ -1008,14 +1007,21 @@ class APIRoute(routing.Route):
                 register_route_params(route_id, specs)
                 self._core_route_id = route_id
         except Exception:
+            specs = None
             self._core_route_id = None
         # Pre-compute batch specs for solve_dependencies (avoid per-request rebuild)
-        self._batch_specs = _build_field_specs(self.dependant) if (
+        # Reuse specs from above if available, otherwise compute only if needed
+        if specs is not None:
+            self._batch_specs = specs
+        elif (
             self.dependant.path_params
             or self.dependant.query_params
             or self.dependant.header_params
             or self.dependant.cookie_params
-        ) else []
+        ):
+            self._batch_specs = _build_field_specs(self.dependant)
+        else:
+            self._batch_specs = []
         # Determine if route is eligible for the Core ASGI fast path
         actual_rc = self.response_class
         if isinstance(actual_rc, DefaultPlaceholder):

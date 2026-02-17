@@ -1,13 +1,13 @@
 from typing import Annotated, Any, Callable
 
 from annotated_doc import Doc
-from starlette.background import BackgroundTasks as StarletteBackgroundTasks
+from fastapi._background import BackgroundTasks as NativeBackgroundTasks
 from typing_extensions import ParamSpec
 
 P = ParamSpec("P")
 
 
-class BackgroundTasks(StarletteBackgroundTasks):
+class BackgroundTasks(NativeBackgroundTasks):
     """
     A collection of background tasks that will be called after a response has been
     sent to the client.

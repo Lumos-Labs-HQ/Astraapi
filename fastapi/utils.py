@@ -1,5 +1,4 @@
 import re
-import warnings
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -18,7 +17,7 @@ from fastapi._compat import (
     annotation_is_pydantic_v1,
 )
 from fastapi.datastructures import DefaultPlaceholder, DefaultType
-from fastapi.exceptions import FastAPIDeprecationWarning, PydanticV1NotSupportedError
+from fastapi.exceptions import PydanticV1NotSupportedError
 from pydantic.fields import FieldInfo
 from typing_extensions import Literal
 
@@ -70,7 +69,6 @@ def create_model_field(
     field_info: Optional[FieldInfo] = None,
     alias: Optional[str] = None,
     mode: Literal["validation", "serialization"] = "validation",
-    version: Literal["1", "auto"] = "auto",
 ) -> ModelField:
     if annotation_is_pydantic_v1(type_):
         raise PydanticV1NotSupportedError(
@@ -87,21 +85,6 @@ def create_model_field(
         raise fastapi.exceptions.FastAPIError(
             _invalid_args_message.format(type_=type_)
         ) from None
-
-
-def generate_operation_id_for_path(
-    *, name: str, path: str, method: str
-) -> str:  # pragma: nocover
-    warnings.warn(
-        message="fastapi.utils.generate_operation_id_for_path() was deprecated, "
-        "it is not used internally, and will be removed soon",
-        category=FastAPIDeprecationWarning,
-        stacklevel=2,
-    )
-    operation_id = f"{name}{path}"
-    operation_id = re.sub(r"\W", "_", operation_id)
-    operation_id = f"{operation_id}_{method.lower()}"
-    return operation_id
 
 
 def generate_unique_id(route: "APIRoute") -> str:

@@ -11,16 +11,16 @@ from typing import (
 
 from annotated_doc import Doc
 from pydantic import GetJsonSchemaHandler
-from starlette.datastructures import URL as URL  # noqa: F401
-from starlette.datastructures import Address as Address  # noqa: F401
-from starlette.datastructures import FormData as FormData  # noqa: F401
-from starlette.datastructures import Headers as Headers  # noqa: F401
-from starlette.datastructures import QueryParams as QueryParams  # noqa: F401
-from starlette.datastructures import State as State  # noqa: F401
-from starlette.datastructures import UploadFile as StarletteUploadFile
+from fastapi._datastructures_impl import URL as URL  # noqa: F401
+from fastapi._datastructures_impl import Address as Address  # noqa: F401
+from fastapi._datastructures_impl import FormData as FormData  # noqa: F401
+from fastapi._datastructures_impl import Headers as Headers  # noqa: F401
+from fastapi._datastructures_impl import QueryParams as QueryParams  # noqa: F401
+from fastapi._datastructures_impl import State as State  # noqa: F401
+from fastapi._datastructures_impl import UploadFile as NativeUploadFile
 
 
-class UploadFile(StarletteUploadFile):
+class UploadFile(NativeUploadFile):
     """
     A file uploaded in a request.
 
@@ -133,7 +133,7 @@ class UploadFile(StarletteUploadFile):
 
     @classmethod
     def _validate(cls, __input_value: Any, _: Any) -> "UploadFile":
-        if not isinstance(__input_value, StarletteUploadFile):
+        if not isinstance(__input_value, NativeUploadFile):
             raise ValueError(f"Expected UploadFile, received: {type(__input_value)}")
         return cast(UploadFile, __input_value)
 

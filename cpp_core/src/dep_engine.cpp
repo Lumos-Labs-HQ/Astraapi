@@ -241,3 +241,18 @@ PyObject* py_dep_plan_count(PyObject* self, PyObject* args) {
     std::shared_lock lock(g_dep_mutex);
     return PyLong_FromSsize_t((Py_ssize_t)g_dep_plans.size());
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Module shutdown: release all PyObject* refs held in the dep plan registry
+// ══════════════════════════════════════════════════════════════════════════════
+
+void cleanup_dep_plans() {
+    std::unique_lock lock(g_dep_mutex);
+    for (auto& [id, plan] : g_dep_plans) {
+        for (auto& node : plan.nodes) {
+            Py_XDECREF(node.metadata);
+            node.metadata = nullptr;
+        }
+    }
+    g_dep_plans.clear();
+}

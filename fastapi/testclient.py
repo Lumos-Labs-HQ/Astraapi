@@ -1,1 +1,1 @@
-from starlette.testclient import TestClient as TestClient  # noqa
+from fastapi._testclient import TestClient as TestClient  # noqa

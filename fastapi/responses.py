@@ -1,12 +1,12 @@
 from typing import Any
 
-from starlette.responses import FileResponse as FileResponse  # noqa
-from starlette.responses import HTMLResponse as HTMLResponse  # noqa
-from starlette.responses import JSONResponse as JSONResponse  # noqa
-from starlette.responses import PlainTextResponse as PlainTextResponse  # noqa
-from starlette.responses import RedirectResponse as RedirectResponse  # noqa
-from starlette.responses import Response as Response  # noqa
-from starlette.responses import StreamingResponse as StreamingResponse  # noqa
+from fastapi._response import FileResponse as FileResponse  # noqa
+from fastapi._response import HTMLResponse as HTMLResponse  # noqa
+from fastapi._response import JSONResponse as JSONResponse  # noqa
+from fastapi._response import PlainTextResponse as PlainTextResponse  # noqa
+from fastapi._response import RedirectResponse as RedirectResponse  # noqa
+from fastapi._response import Response as Response  # noqa
+from fastapi._response import StreamingResponse as StreamingResponse  # noqa
 
 try:
     import ujson

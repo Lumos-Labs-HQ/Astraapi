@@ -1,3 +1,1 @@
-from starlette.middleware.trustedhost import (  # noqa
-    TrustedHostMiddleware as TrustedHostMiddleware,
-)
+from fastapi._middleware_impl import TrustedHostMiddleware as TrustedHostMiddleware  # noqa

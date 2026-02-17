@@ -3,9 +3,9 @@ from typing import Annotated, Optional, Union
 from annotated_doc import Doc
 from fastapi.openapi.models import APIKey, APIKeyIn
 from fastapi.security.base import SecurityBase
-from starlette.exceptions import HTTPException
-from starlette.requests import Request
-from starlette.status import HTTP_401_UNAUTHORIZED
+from fastapi.exceptions import HTTPException
+from fastapi._request import Request
+from fastapi._status import HTTP_401_UNAUTHORIZED
 
 
 class APIKeyBase(SecurityBase):

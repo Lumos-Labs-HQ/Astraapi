@@ -1,6 +1,6 @@
 from contextlib import AsyncExitStack
 
-from starlette.types import ASGIApp, Receive, Scope, Send
+from fastapi._types import ASGIApp, Receive, Scope, Send
 
 
 # Used mainly to close files after the request is done, dependencies are closed

@@ -2,7 +2,7 @@
 
 __version__ = "0.128.3"
 
-from starlette import status as status
+from fastapi import _status as status
 
 from .applications import FastAPI as FastAPI
 from .background import BackgroundTasks as BackgroundTasks

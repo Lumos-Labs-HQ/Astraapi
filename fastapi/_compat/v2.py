@@ -47,45 +47,6 @@ UndefinedType = PydanticUndefinedType
 evaluate_forwardref = eval_type_lenient
 Validator = Any
 
-# TODO: remove when dropping support for Pydantic < v2.12.3
-_Attrs = {
-    "default": ...,
-    "default_factory": None,
-    "alias": None,
-    "alias_priority": None,
-    "validation_alias": None,
-    "serialization_alias": None,
-    "title": None,
-    "field_title_generator": None,
-    "description": None,
-    "examples": None,
-    "exclude": None,
-    "exclude_if": None,
-    "discriminator": None,
-    "deprecated": None,
-    "json_schema_extra": None,
-    "frozen": None,
-    "validate_default": None,
-    "repr": True,
-    "init": None,
-    "init_var": None,
-    "kw_only": None,
-}
-
-
-# TODO: remove when dropping support for Pydantic < v2.12.3
-def asdict(field_info: FieldInfo) -> dict[str, Any]:
-    attributes = {}
-    for attr in _Attrs:
-        value = getattr(field_info, attr, Undefined)
-        if value is not Undefined:
-            attributes[attr] = value
-    return {
-        "annotation": field_info.annotation,
-        "metadata": field_info.metadata,
-        "attributes": attributes,
-    }
-
 
 class BaseConfig:
     pass
@@ -143,9 +104,7 @@ class ModelField:
                 warnings.simplefilter(
                     "ignore", category=UnsupportedFieldAttributeWarning
                 )
-            # TODO: remove after dropping support for Python 3.8 and
-            # setting the min Pydantic to v2.12.3 that adds asdict()
-            field_dict = asdict(self.field_info)
+            field_dict = self.field_info.asdict()
             annotated_args = (
                 field_dict["annotation"],
                 *field_dict["metadata"],
@@ -393,7 +352,7 @@ def get_model_fields(model: type[BaseModel]) -> list[ModelField]:
     return model_fields
 
 
-@lru_cache
+@lru_cache(maxsize=1024)
 def get_cached_model_fields(model: type[BaseModel]) -> list[ModelField]:
     return get_model_fields(model)
 

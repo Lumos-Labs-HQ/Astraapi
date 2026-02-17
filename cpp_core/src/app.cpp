@@ -710,8 +710,6 @@ static PyObject* CoreApp_get_response_filters(CoreAppObject* self, PyObject* arg
     const auto& route = self->routes[idx];
     PyObject* inc = route.include ? route.include : Py_None;
     PyObject* exc = route.exclude ? route.exclude : Py_None;
-    Py_INCREF(inc);
-    Py_INCREF(exc);
     return PyTuple_Pack(2, inc, exc);
 }
 
@@ -1037,13 +1035,20 @@ static PyObject* CoreApp_handle_and_respond(
 
             // Header params — stack buffer normalization
             if (spec.has_header_params) {
-                char norm_buf[256];
-                Py_ssize_t norm_len = name_len < 255 ? name_len : 255;
-                for (Py_ssize_t j = 0; j < norm_len; j++) {
+                // PERF-8: Stack buffer for common case, heap for oversized headers
+                constexpr Py_ssize_t STACK_LIMIT = 255;
+                char stack_buf[256];
+                std::unique_ptr<char[]> heap_buf;
+                char* norm_buf = stack_buf;
+                if (name_len > STACK_LIMIT) {
+                    heap_buf = std::make_unique<char[]>(name_len + 1);
+                    norm_buf = heap_buf.get();
+                }
+                for (Py_ssize_t j = 0; j < name_len; j++) {
                     char c = name_data[j];
                     norm_buf[j] = (c >= 'A' && c <= 'Z') ? c + 32 : (c == '-') ? '_' : c;
                 }
-                std::string_view normalized(norm_buf, norm_len);
+                std::string_view normalized(norm_buf, name_len);
                 // O(1) hash map lookup instead of O(n) linear scan
                 auto hit = spec.header_map.find(normalized);
                 if (hit != spec.header_map.end()) {
@@ -1202,6 +1207,7 @@ asgi_call_endpoint:
                 PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
                 PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
                 Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
                 if (detail && sc) {
                     int scode = (int)PyLong_AsLong(sc.get());
                     return build_error_response(detail.get(), scode);
@@ -1310,6 +1316,7 @@ asgi_call_endpoint:
             PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
             PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
             Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+            exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
             if (detail && sc) {
                 int scode = (int)PyLong_AsLong(sc.get());
                 return build_error_response(detail.get(), scode);
@@ -1474,13 +1481,20 @@ static PyObject* CoreApp_handle_request_inline(
             }
 
             if (spec.has_header_params) {
-                char norm_buf[256];
-                Py_ssize_t norm_len = name_len < 255 ? name_len : 255;
-                for (Py_ssize_t j = 0; j < norm_len; j++) {
+                // PERF-8: Stack buffer for common case, heap for oversized headers
+                constexpr Py_ssize_t STACK_LIMIT = 255;
+                char stack_buf[256];
+                std::unique_ptr<char[]> heap_buf;
+                char* norm_buf = stack_buf;
+                if (name_len > STACK_LIMIT) {
+                    heap_buf = std::make_unique<char[]>(name_len + 1);
+                    norm_buf = heap_buf.get();
+                }
+                for (Py_ssize_t j = 0; j < name_len; j++) {
                     char c = name_data[j];
                     norm_buf[j] = (c >= 'A' && c <= 'Z') ? c + 32 : (c == '-') ? '_' : c;
                 }
-                std::string_view normalized(norm_buf, norm_len);
+                std::string_view normalized(norm_buf, name_len);
                 // O(1) hash map lookup instead of O(n) linear scan
                 auto hit = spec.header_map.find(normalized);
                 if (hit != spec.header_map.end()) {
@@ -2468,7 +2482,7 @@ static PyObject* CoreApp_handle_http(
             PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
 
             if (ws_endpoint) {
-                // Return (consumed, ("ws", endpoint, path_params_dict, path)) for Python to handle
+                // Return (consumed, ("ws", endpoint, path_params_dict, path, headers_list, query_bytes)) for Python to handle
                 PyRef ws_tag(PyUnicode_InternFromString("ws"));
                 PyRef path_params(PyDict_New());
                 if (ws_match && ws_match->param_count > 0) {
@@ -2481,7 +2495,31 @@ static PyObject* CoreApp_handle_http(
                     }
                 }
                 PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
-                PyRef ws_info(PyTuple_Pack(4, ws_tag.get(), ws_endpoint, path_params.get(), path_str.get()));
+
+                // Build ASGI-style headers list: [(name_bytes, value_bytes), ...]
+                PyRef headers_list(PyList_New(req.header_count));
+                if (headers_list) {
+                    for (int hi = 0; hi < req.header_count; hi++) {
+                        const auto& hdr = req.headers[hi];
+                        PyRef hname(PyBytes_FromStringAndSize(hdr.name.data, (Py_ssize_t)hdr.name.len));
+                        PyRef hval(PyBytes_FromStringAndSize(hdr.value.data, (Py_ssize_t)hdr.value.len));
+                        if (hname && hval) {
+                            PyObject* pair = PyTuple_Pack(2, hname.get(), hval.get());
+                            PyList_SET_ITEM(headers_list.get(), hi, pair);  // steals ref
+                        } else {
+                            Py_INCREF(Py_None);
+                            PyList_SET_ITEM(headers_list.get(), hi, Py_None);
+                        }
+                    }
+                }
+
+                // Query string as bytes
+                PyRef qs_bytes(PyBytes_FromStringAndSize(
+                    req.query_string.data ? req.query_string.data : "",
+                    req.query_string.data ? (Py_ssize_t)req.query_string.len : 0));
+
+                PyRef ws_info(PyTuple_Pack(6, ws_tag.get(), ws_endpoint, path_params.get(),
+                              path_str.get(), headers_list.get(), qs_bytes.get()));
                 Py_DECREF(ws_endpoint);
                 return PyTuple_Pack(2, consumed.get(), ws_info.get());
             }
@@ -3118,6 +3156,7 @@ body_done:
                     // Call handler(request_dict, exc) — handler returns Response
                     PyRef handler_result(PyObject_CallOneArg(eh_it->second, exc_val));
                     Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                    exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
                     if (handler_result) {
                         // Try to extract response body from handler result
                         PyRef body_attr(PyObject_GetAttrString(handler_result.get(), "body"));
@@ -3136,6 +3175,7 @@ body_done:
                 }
 
                 Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
                 if (detail && sc) {
                     PyRef detail_str(PyObject_Str(detail.get()));
                     const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
@@ -3408,6 +3448,7 @@ body_done:
             if (eh_it != self->exception_handlers.end()) {
                 PyRef handler_result(PyObject_CallOneArg(eh_it->second, exc_val));
                 Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
                 if (handler_result) {
                     PyRef body_attr(PyObject_GetAttrString(handler_result.get(), "body"));
                     if (body_attr && PyBytes_Check(body_attr.get())) {
@@ -3425,6 +3466,7 @@ body_done:
             }
 
             Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+            exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
             if (detail && sc) {
                 PyRef detail_str(PyObject_Str(detail.get()));
                 const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";

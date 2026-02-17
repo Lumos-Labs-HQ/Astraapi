@@ -29,17 +29,17 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.params import Depends
 from fastapi.types import DecoratedCallable, IncEx
 from fastapi.utils import generate_unique_id
-from starlette.applications import Starlette
-from starlette.datastructures import State
-from starlette.exceptions import HTTPException
-from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.middleware.errors import ServerErrorMiddleware
-from starlette.middleware.exceptions import ExceptionMiddleware
-from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import BaseRoute
-from starlette.types import ASGIApp, ExceptionHandler, Lifespan, Receive, Scope, Send
+from fastapi._app_base import AppBase
+from fastapi._datastructures_impl import State
+from fastapi.exceptions import HTTPException
+from fastapi._middleware_impl import Middleware
+from fastapi._middleware_impl import BaseHTTPMiddleware
+from fastapi._middleware_impl import ServerErrorMiddleware
+from fastapi._middleware_impl import ExceptionMiddleware
+from fastapi._request import Request
+from fastapi._response import HTMLResponse, JSONResponse, Response
+from fastapi._routing_base import BaseRoute
+from fastapi._types import ASGIApp, ExceptionHandler, Lifespan, Receive, Scope, Send
 from typing_extensions import deprecated
 
 from fastapi._core_bridge import CoreApp, openapi_dict_to_json_bytes
@@ -47,7 +47,7 @@ from fastapi._core_bridge import CoreApp, openapi_dict_to_json_bytes
 AppType = TypeVar("AppType", bound="FastAPI")
 
 
-class FastAPI(Starlette):
+class FastAPI(AppBase):
     """
     `FastAPI` app class, the main entrypoint to use FastAPI.
 
@@ -1000,6 +1000,18 @@ class FastAPI(Starlette):
         )
         self.middleware_stack: Union[ASGIApp, None] = None
 
+        # Classify middleware: C++-compatible types don't block the fast path
+        from fastapi._middleware_impl import (
+            CORSMiddleware as _CORSMw,
+            GZipMiddleware as _GZipMw,
+            TrustedHostMiddleware as _THMw,
+            HTTPSRedirectMiddleware as _HTTPSMw,
+        )
+        _cpp_mw_types = (_CORSMw, _GZipMw, _THMw, _HTTPSMw)
+        self._has_only_cpp_middleware: bool = all(
+            m.cls in _cpp_mw_types for m in self.user_middleware
+        )
+
         # ── v2.0: Initialize C++ ASGI core ──────────────────────────────
         self._core_app = CoreApp()
         from fastapi._core_app import CoreASGIApp
@@ -1268,15 +1280,16 @@ class FastAPI(Starlette):
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if self.root_path:
             scope["root_path"] = self.root_path
-        # C++ fast path: skip all middleware + Starlette routing for eligible routes
+        # C++ fast path: skip middleware + routing for eligible routes when
+        # all user middleware is C++-handled (CORS, GZip, TrustedHost, HTTPS)
         if (
             scope["type"] == "http"
             and self._core_asgi._fast_routes_registered
-            and not self.user_middleware
+            and self._has_only_cpp_middleware
         ):
             if await self._core_asgi.handle_fast(scope, receive, send):
                 return
-        # Standard path: Starlette routing with per-function C++ optimizations
+        # Standard path: native routing with per-function C++ optimizations
         await super().__call__(scope, receive, send)
 
     def add_api_route(

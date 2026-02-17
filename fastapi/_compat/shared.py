@@ -14,7 +14,7 @@ from typing import (
 from fastapi.types import UnionType
 from pydantic import BaseModel
 from pydantic.version import VERSION as PYDANTIC_VERSION
-from starlette.datastructures import UploadFile
+from fastapi._datastructures_impl import UploadFile
 from typing_extensions import get_args, get_origin
 
 # Copy from Pydantic: pydantic/_internal/_typing_extra.py

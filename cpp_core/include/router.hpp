@@ -24,7 +24,7 @@ struct MatchParams {
         std::string_view name;   // points into trie node (stable after startup)
         std::string_view value;  // points into request buffer (valid for request lifetime)
     };
-    static constexpr int MAX_INLINE = 4;
+    static constexpr int MAX_INLINE = 8;
     Param params[MAX_INLINE];
     int param_count = 0;
 

@@ -1,3 +1,1 @@
-from starlette.middleware.wsgi import (
-    WSGIMiddleware as WSGIMiddleware,
-)  # pragma: no cover # noqa
+from fastapi._middleware_impl import WSGIMiddleware as WSGIMiddleware  # noqa

@@ -3,10 +3,6 @@ from typing import Annotated, Any, Optional, TypedDict, Union
 
 from annotated_doc import Doc
 from pydantic import BaseModel, create_model
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.exceptions import WebSocketException as StarletteWebSocketException
-
-
 class EndpointContext(TypedDict, total=False):
     function: str
     path: str
@@ -14,7 +10,7 @@ class EndpointContext(TypedDict, total=False):
     line: int
 
 
-class HTTPException(StarletteHTTPException):
+class HTTPException(Exception):
     """
     An HTTP exception you can raise in your own code to show errors to the client.
 
@@ -80,10 +76,16 @@ class HTTPException(StarletteHTTPException):
             ),
         ] = None,
     ) -> None:
-        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.status_code = status_code
+        self.detail = detail
+        self.headers = headers
+        super().__init__(detail)
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(status_code={self.status_code!r}, detail={self.detail!r})"
 
 
-class WebSocketException(StarletteWebSocketException):
+class WebSocketException(Exception):
     """
     A WebSocket exception you can raise in your own code to show errors to the client.
 
@@ -151,7 +153,9 @@ class WebSocketException(StarletteWebSocketException):
             ),
         ] = None,
     ) -> None:
-        super().__init__(code=code, reason=reason)
+        self.code = code
+        self.reason = reason or ""
+        super().__init__(self.reason)
 
 
 RequestErrorModel: type[BaseModel] = create_model("Request")
