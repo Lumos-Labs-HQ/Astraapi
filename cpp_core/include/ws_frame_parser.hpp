@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // ── WebSocket frame parser/builder (RFC 6455) ───────────────────────────────
@@ -48,7 +49,7 @@ std::vector<uint8_t> ws_build_frame(WsOpcode opcode, const uint8_t* payload, siz
 // Build WebSocket upgrade response (101 Switching Protocols)
 // sec_key: value of Sec-WebSocket-Key header
 // Returns complete HTTP response bytes
-std::vector<char> ws_build_upgrade_response(const char* sec_key, size_t key_len);
+std::string ws_build_upgrade_response(const char* sec_key, size_t key_len);
 
 // Build a close frame with optional status code
 std::vector<uint8_t> ws_build_close_frame(uint16_t status_code = 1000);
@@ -160,7 +161,7 @@ struct WsDeflateContext {
 // Build upgrade response with optional extension negotiation
 // If client requests permessage-deflate and deflate_out is non-null,
 // negotiation result is stored in *deflate_out.
-std::vector<char> ws_build_upgrade_response_ext(
+std::string ws_build_upgrade_response_ext(
     const char* sec_key, size_t key_len,
     const char* extensions, size_t ext_len,
     const char* subprotocol, size_t sub_len,

@@ -2,6 +2,7 @@
 #include <Python.h>
 #include "json_parser.hpp"
 #include "json_writer.hpp"
+#include "buffer_pool.hpp"
 #include "ws_frame_parser.hpp"
 #include "pyref.hpp"
 #include <vector>
@@ -82,6 +83,43 @@ PyObject* py_ws_batch_parse(PyObject* self, PyObject* arg) {
     }
 
     return result.release();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ws_build_json_frame(obj: PyAny, opcode: int) → PyBytes
+// Combined JSON serialize + WebSocket frame build in single allocation.
+// Eliminates intermediate PyBytes from separate serialize + frame_build calls.
+// ══════════════════════════════════════════════════════════════════════════════
+
+PyObject* py_ws_build_json_frame(PyObject* /*self*/, PyObject* args) {
+    PyObject* obj;
+    int opcode;
+    if (!PyArg_ParseTuple(args, "Oi", &obj, &opcode)) return nullptr;
+
+    // Serialize Python object to JSON using buffer pool
+    auto buf = acquire_buffer();
+    if (write_json(obj, buf, 0) < 0) {
+        release_buffer(std::move(buf));
+        return nullptr;
+    }
+
+    size_t json_len = buf.size();
+    size_t hdr_size = ws_frame_header_size(json_len);
+    size_t total = hdr_size + json_len;
+
+    // Single allocation: frame header + JSON payload
+    PyObject* result = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)total);
+    if (!result) {
+        release_buffer(std::move(buf));
+        return nullptr;
+    }
+
+    uint8_t* out = (uint8_t*)PyBytes_AS_STRING(result);
+    ws_write_frame_header(out, (WsOpcode)opcode, json_len);
+    memcpy(out + hdr_size, buf.data(), json_len);
+
+    release_buffer(std::move(buf));
+    return result;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

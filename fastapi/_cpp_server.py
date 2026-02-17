@@ -111,6 +111,8 @@ try:
         ws_build_ping_frame as _ws_build_ping_frame,
         ws_build_close_frame_bytes as _ws_build_close_frame_bytes,
         ws_build_frames_batch as _ws_build_frames_batch,
+        # Combined JSON serialize + frame build (single allocation)
+        ws_build_json_frame as _ws_build_json_frame,
         # JSON parse/serialize (receive_json/send_json)
         ws_parse_json as _ws_parse_json,
         ws_serialize_json as _ws_serialize_json,
@@ -206,6 +208,7 @@ def _feed_frames(ws, transport, frames, ring_buf) -> bool:
     waiter = channel._waiter
     buf = channel._buffer
     metrics = ws._metrics
+    now = time.monotonic()  # once per batch, not per frame
     for opcode, payload in frames:
         if opcode == 0x8:  # Close frame
             # Resolve graceful close waiter if pending (our close was acknowledged)
@@ -225,7 +228,7 @@ def _feed_frames(ws, transport, frames, ring_buf) -> bool:
         metrics.messages_received += 1
         plen = len(payload) if isinstance(payload, (bytes, str)) else 0
         metrics.bytes_received += plen
-        metrics.last_activity = time.monotonic()
+        metrics.last_activity = now
         if waiter is not None and not waiter.done():
             channel._waiter = None
             waiter.set_result((opcode, payload))
@@ -284,7 +287,8 @@ class CppWebSocket:
         "client_state", "application_state", "scope", "path_params",
         "_corked", "_cork_buf",
         "_protocol", "_echo_detect_count", "_last_received",
-        "_pending_writes", "_flush_scheduled",
+        "_last_received_json",
+        "_pending_sends", "_flush_scheduled",
         "_close_waiter", "_metrics",
     )
 
@@ -302,13 +306,14 @@ class CppWebSocket:
         self._close_code = 1000
         self._corked = False
         self._cork_buf: list[tuple[int, bytes]] = []
-        # Auto-cork: coalesce writes within same event loop tick
-        self._pending_writes: list[bytes] = []
+        # Auto-cork: coalesce writes within same event loop tick, batch frame building
+        self._pending_sends: list[tuple[int, bytes]] = []
         self._flush_scheduled = False
         # Echo auto-detection
         self._protocol = None  # back-ref to CppHttpProtocol, set after creation
         self._echo_detect_count = 0
         self._last_received = None  # track last received for echo detection
+        self._last_received_json = None  # track last received JSON for echo detection
         # Graceful close
         self._close_waiter: asyncio.Future | None = None
         # Per-connection metrics
@@ -341,7 +346,7 @@ class CppWebSocket:
         if self._corked:
             self._flush_cork()
         # Flush any pending auto-corked writes
-        if self._pending_writes:
+        if self._pending_sends:
             self._flush_pending()
         frame = _ws_build_close_frame_bytes(code) if _ws_build_close_frame_bytes else self._build_frame_py(0x8, struct.pack("!H", code))
         try:
@@ -360,21 +365,20 @@ class CppWebSocket:
 
     # ── Write helpers ─────────────────────────────────────────────────
 
-    def _write_frame(self, frame: bytes) -> None:
-        """Write frame with auto-cork: coalesces writes within same event loop tick."""
+    def _queue_send(self, opcode: int, payload: bytes) -> None:
+        """Queue a send for batch building: coalesces within same event loop tick."""
         transport = self._transport
         if transport is None or transport.is_closing():
             return
-        pending = self._pending_writes
-        pending.append(frame)
+        self._pending_sends.append((opcode, payload))
         if not self._flush_scheduled:
             self._flush_scheduled = True
             self._loop.call_soon(self._flush_pending)
 
     def _flush_pending(self) -> None:
-        """Flush all pending writes as a single writev syscall."""
+        """Batch-build and flush all pending frames in a single write."""
         self._flush_scheduled = False
-        pending = self._pending_writes
+        pending = self._pending_sends
         if not pending:
             return
         transport = self._transport
@@ -382,9 +386,17 @@ class CppWebSocket:
             pending.clear()
             return
         if len(pending) == 1:
-            transport.write(pending[0])
+            opcode, payload = pending[0]
+            frame = _ws_build_frame_bytes(opcode, payload) if _ws_build_frame_bytes else self._build_frame_py(opcode, payload)
+            transport.write(frame)
         else:
-            transport.writelines(pending)  # single writev syscall
+            # Batch-build all frames in single C++ call (one allocation, one memcpy)
+            if _ws_build_frames_batch is not None:
+                combined = _ws_build_frames_batch(pending)
+                transport.write(combined)
+            else:
+                for opcode, payload in pending:
+                    transport.write(self._build_frame_py(opcode, payload))
         pending.clear()
 
     # ── Send methods ──────────────────────────────────────────────────
@@ -418,8 +430,7 @@ class CppWebSocket:
         if self._corked:
             self._cork_buf.append((0x1, payload))
             return _NOOP
-        frame = _ws_build_frame_bytes(0x1, payload) if _ws_build_frame_bytes else self._build_frame_py(0x1, payload)
-        self._write_frame(frame)
+        self._queue_send(0x1, payload)
         return _NOOP
 
     def send_bytes(self, data: bytes) -> _NoopAwaitable:
@@ -433,28 +444,53 @@ class CppWebSocket:
         if self._corked:
             self._cork_buf.append((0x2, data))
             return _NOOP
-        frame = _ws_build_frame_bytes(0x2, data) if _ws_build_frame_bytes else self._build_frame_py(0x2, data)
-        self._write_frame(frame)
+        self._queue_send(0x2, data)
         return _NOOP
 
     def send_json(self, data: Any, mode: str = "text") -> _NoopAwaitable:
         """Send JSON data. Returns awaitable for API compatibility."""
         if self._closed:
             raise RuntimeError("WebSocket is closed")
-        if _ws_serialize_json is not None:
+        # JSON echo detection: if sending the exact same object received via receive_json,
+        # switch to raw text echo handler (bypasses JSON parse+serialize entirely).
+        if self._echo_detect_count >= 0 and self._last_received_json is not None:
+            if data is self._last_received_json:
+                self._echo_detect_count += 1
+                if self._echo_detect_count >= 1:
+                    proto = self._protocol
+                    if proto is not None:
+                        if proto._ws_fd >= 0:
+                            proto._ws_handler = proto._handle_ws_frames_echo_fd
+                        else:
+                            proto._ws_handler = proto._handle_ws_frames_echo
+                    self._echo_detect_count = -1
+            else:
+                self._echo_detect_count = 0
+            self._last_received_json = None
+        opcode = 0x1 if mode == "text" else 0x2
+        if _ws_build_json_frame is not None:
+            # Combined serialize + frame build: single C++ call, single allocation
+            frame = _ws_build_json_frame(data, opcode)
+            if self._corked:
+                self._cork_buf.append((opcode, frame))
+                return _NOOP
+            # Write pre-built frame directly (bypass _queue_send batch building)
+            transport = self._transport
+            if transport is not None and not transport.is_closing():
+                transport.write(frame)
+        elif _ws_serialize_json is not None:
             json_bytes = _ws_serialize_json(data)
-            opcode = 0x1 if mode == "text" else 0x2
             if self._corked:
                 self._cork_buf.append((opcode, json_bytes))
                 return _NOOP
-            frame = _ws_build_frame_bytes(opcode, json_bytes) if _ws_build_frame_bytes else self._build_frame_py(opcode, json_bytes)
-            self._write_frame(frame)
+            self._queue_send(opcode, json_bytes)
         else:
             import json
             payload = json.dumps(data).encode("utf-8")
-            opcode = 0x1 if mode == "text" else 0x2
-            frame = self._build_frame_py(opcode, payload)
-            self._write_frame(frame)
+            if self._corked:
+                self._cork_buf.append((opcode, payload))
+                return _NOOP
+            self._queue_send(opcode, payload)
         return _NOOP
 
     # ── Receive methods ───────────────────────────────────────────────
@@ -500,17 +536,26 @@ class CppWebSocket:
         # If payload is already a parsed Python object (from _ws_parse_frames_json),
         # return it directly. Otherwise parse it.
         if isinstance(payload, (dict, list, int, float, bool)) or payload is None:
+            self._last_received_json = payload  # save ref for echo detection
             return payload
         if isinstance(payload, str):
             if _ws_parse_json is not None:
-                return _ws_parse_json(payload)
+                result = _ws_parse_json(payload)
+                self._last_received_json = result
+                return result
             import json
-            return json.loads(payload)
+            result = json.loads(payload)
+            self._last_received_json = result
+            return result
         # bytes
         if _ws_parse_json is not None:
-            return _ws_parse_json(payload)
+            result = _ws_parse_json(payload)
+            self._last_received_json = result
+            return result
         import json
-        return json.loads(payload)
+        result = json.loads(payload)
+        self._last_received_json = result
+        return result
 
     # ── Dict-based ASGI protocol methods ──────────────────────────────
 

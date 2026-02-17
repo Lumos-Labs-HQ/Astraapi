@@ -32,6 +32,7 @@ extern PyObject* py_extract_all_security_credentials(PyObject* self, PyObject* a
 extern PyObject* py_ws_parse_json(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_serialize_json(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_batch_parse(PyObject* self, PyObject* arg);
+extern PyObject* py_ws_build_json_frame(PyObject* self, PyObject* args);
 extern PyObject* py_ws_parse_frames_json(PyObject* self, PyObject* arg);
 
 // ws_frame_parser.cpp
@@ -257,6 +258,7 @@ static PyMethodDef module_methods[] = {
     {"ws_build_ping_frame", (PyCFunction)py_ws_build_ping_frame, METH_O, nullptr},
     {"ws_build_close_frame_bytes", (PyCFunction)py_ws_build_close_frame_bytes, METH_O, nullptr},
     {"ws_build_frames_batch", (PyCFunction)py_ws_build_frames_batch, METH_O, nullptr},
+    {"ws_build_json_frame", (PyCFunction)py_ws_build_json_frame, METH_VARARGS, nullptr},
 
     // v2.0: WebSocket Ring Buffer
     {"ws_ring_buffer_create", (PyCFunction)py_ws_ring_buffer_create, METH_NOARGS, nullptr},

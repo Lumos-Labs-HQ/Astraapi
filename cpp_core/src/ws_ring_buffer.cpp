@@ -5,7 +5,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <vector>
-#include <unistd.h>   // write(), ssize_t for direct socket I/O
+#include "platform.hpp"   // platform_socket_write(), ssize_t
 
 // ── Platform-specific aligned allocation ─────────────────────────────────
 namespace {
@@ -152,27 +152,26 @@ std::pair<uint8_t*, size_t> WsRingBuffer::readable_contiguous() {
     // Wrapped — linearize in-place: move data to start of buffer.
     // Data layout: [tail(0..write_idx) | ...gap... | head(read_idx..capacity_)]
     // Goal:        [head | tail | ...gap...]
+    //
+    // Thread-local scratch buffer: grows to peak usage once, reused across calls.
+    // Eliminates per-message malloc/free in the wrap-around case.
+    static thread_local std::vector<uint8_t> scratch;
+
     size_t first = capacity_ - read_idx;  // head segment size
+    size_t smaller = (write_idx <= first) ? write_idx : first;
+
+    if (scratch.size() < smaller) scratch.resize(smaller);
+
     if (write_idx <= first) {
         // Tail is smaller — save tail, move head, append tail
-        uint8_t stack_buf[8192];
-        uint8_t* tmp = (write_idx <= sizeof(stack_buf))
-            ? stack_buf
-            : (uint8_t*)malloc(write_idx);
-        memcpy(tmp, buffer_, write_idx);
+        memcpy(scratch.data(), buffer_, write_idx);
         memmove(buffer_, buffer_ + read_idx, first);
-        memcpy(buffer_ + first, tmp, write_idx);
-        if (tmp != stack_buf) free(tmp);
+        memcpy(buffer_ + first, scratch.data(), write_idx);
     } else {
         // Head is smaller — save head, move tail, prepend head
-        uint8_t stack_buf[8192];
-        uint8_t* tmp = (first <= sizeof(stack_buf))
-            ? stack_buf
-            : (uint8_t*)malloc(first);
-        memcpy(tmp, buffer_ + read_idx, first);
+        memcpy(scratch.data(), buffer_ + read_idx, first);
         memmove(buffer_ + first, buffer_, write_idx);
-        memcpy(buffer_, tmp, first);
-        if (tmp != stack_buf) free(tmp);
+        memcpy(buffer_, scratch.data(), first);
     }
 
     read_pos_ = 0;
@@ -470,7 +469,7 @@ PyObject* py_ws_echo_direct_fd(PyObject* /*self*/, PyObject* args) {
             const uint8_t* ptr = out.data();
             size_t remaining = out.size();
             while (remaining > 0) {
-                ssize_t n = write(fd, ptr, remaining);
+                ssize_t n = platform_socket_write(fd, ptr, remaining);
                 if (n <= 0) { write_ok = false; break; }
                 ptr += n;
                 remaining -= (size_t)n;
@@ -483,7 +482,7 @@ PyObject* py_ws_echo_direct_fd(PyObject* /*self*/, PyObject* args) {
             const uint8_t* ptr = out.data();
             size_t remaining = out.size();
             while (remaining > 0) {
-                ssize_t n = write(fd, ptr, remaining);
+                ssize_t n = platform_socket_write(fd, ptr, remaining);
                 if (n <= 0) { write_ok = false; break; }
                 ptr += n;
                 remaining -= (size_t)n;

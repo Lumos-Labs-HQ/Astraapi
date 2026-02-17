@@ -192,11 +192,11 @@ void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]) {
     size_t i = 0;
 
 #if defined(__AVX2__)
-    // AVX2: unmask 32 bytes at a time (2x SSE2 throughput)
+    // AVX2: unmask 32 bytes at a time — broadcast mask via single instruction
     if (len >= 32) {
-        uint8_t mask32[32];
-        for (int j = 0; j < 32; j++) mask32[j] = mask[j & 3];
-        __m256i mask_vec = _mm256_loadu_si256((__m256i*)mask32);
+        uint32_t m;
+        memcpy(&m, mask, 4);
+        __m256i mask_vec = _mm256_set1_epi32((int)m);
 
         for (; i + 31 < len; i += 32) {
             __m256i d = _mm256_loadu_si256((__m256i*)(payload + i));
@@ -205,9 +205,9 @@ void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]) {
     }
     // SSE2 for 16-byte remainder (AVX2 implies SSE2)
     if (i + 15 < len) {
-        uint8_t mask16[16];
-        for (int j = 0; j < 16; j++) mask16[j] = mask[j & 3];
-        __m128i mask_vec = _mm_loadu_si128((__m128i*)mask16);
+        uint32_t m;
+        memcpy(&m, mask, 4);
+        __m128i mask_vec = _mm_set1_epi32((int)m);
 
         for (; i + 15 < len; i += 16) {
             __m128i data_vec = _mm_loadu_si128((__m128i*)(payload + i));
@@ -215,11 +215,11 @@ void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]) {
         }
     }
 #elif defined(__SSE2__)
-    // SSE2: unmask 16 bytes at a time
+    // SSE2: unmask 16 bytes at a time — broadcast mask via single instruction
     if (len >= 16) {
-        uint8_t mask16[16];
-        for (int j = 0; j < 16; j++) mask16[j] = mask[j & 3];
-        __m128i mask_vec = _mm_loadu_si128((__m128i*)mask16);
+        uint32_t m;
+        memcpy(&m, mask, 4);
+        __m128i mask_vec = _mm_set1_epi32((int)m);
 
         for (; i + 15 < len; i += 16) {
             __m128i data_vec = _mm_loadu_si128((__m128i*)(payload + i));
@@ -228,11 +228,11 @@ void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]) {
         }
     }
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__)
-    // NEON: unmask 16 bytes at a time
+    // NEON: unmask 16 bytes at a time — broadcast mask via single instruction
     if (len >= 16) {
-        uint8_t mask16[16];
-        for (int j = 0; j < 16; j++) mask16[j] = mask[j & 3];
-        uint8x16_t mask_vec = vld1q_u8(mask16);
+        uint32_t m;
+        memcpy(&m, mask, 4);
+        uint8x16_t mask_vec = vreinterpretq_u8_u32(vdupq_n_u32(m));
 
         for (; i + 15 < len; i += 16) {
             uint8x16_t data_vec = vld1q_u8(payload + i);
@@ -302,7 +302,7 @@ std::vector<uint8_t> ws_build_close_frame(uint16_t status_code) {
 
 static const char WS_MAGIC_GUID[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-std::vector<char> ws_build_upgrade_response(const char* sec_key, size_t key_len) {
+std::string ws_build_upgrade_response(const char* sec_key, size_t key_len) {
     // Compute Sec-WebSocket-Accept = base64(SHA1(key + magic_guid))
     SHA1 sha;
     sha.update((const uint8_t*)sec_key, key_len);
@@ -321,7 +321,7 @@ std::vector<char> ws_build_upgrade_response(const char* sec_key, size_t key_len)
     resp += accept;
     resp += "\r\n\r\n";
 
-    return std::vector<char>(resp.begin(), resp.end());
+    return resp;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1001,17 +1001,30 @@ bool WsDeflateContext::decompress(const uint8_t* in, size_t in_len,
     if (!inflate_ctx) return false;
     auto* strm = static_cast<z_stream*>(inflate_ctx);
 
-    // Per RFC 7692: append 0x00 0x00 0xFF 0xFF trailer before decompression
-    std::vector<uint8_t> input(in, in + in_len);
-    static const uint8_t trailer[] = {0x00, 0x00, 0xFF, 0xFF};
-    input.insert(input.end(), trailer, trailer + 4);
-
-    strm->next_in = input.data();
-    strm->avail_in = (uInt)input.size();
-
     out.clear();
     uint8_t buf[8192];
     int ret;
+
+    // Step 1: Decompress the actual payload data (zero-copy — no input buffer allocation)
+    strm->next_in = const_cast<uint8_t*>(in);
+    strm->avail_in = (uInt)in_len;
+
+    do {
+        strm->next_out = buf;
+        strm->avail_out = sizeof(buf);
+        ret = inflate(strm, Z_NO_FLUSH);
+        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+            return false;
+        }
+        size_t have = sizeof(buf) - strm->avail_out;
+        out.insert(out.end(), buf, buf + have);
+    } while (strm->avail_out == 0);
+
+    // Step 2: Feed the 4-byte RFC 7692 trailer separately (avoids copying entire input)
+    static const uint8_t trailer[] = {0x00, 0x00, 0xFF, 0xFF};
+    strm->next_in = const_cast<uint8_t*>(trailer);
+    strm->avail_in = 4;
+
     do {
         strm->next_out = buf;
         strm->avail_out = sizeof(buf);
@@ -1066,7 +1079,7 @@ bool WsDeflateContext::compress(const uint8_t* in, size_t in_len,
 
 // ── Upgrade response with extension negotiation ──────────────────────────
 
-std::vector<char> ws_build_upgrade_response_ext(
+std::string ws_build_upgrade_response_ext(
     const char* sec_key, size_t key_len,
     const char* extensions, size_t ext_len,
     const char* subprotocol, size_t sub_len,
@@ -1123,5 +1136,5 @@ std::vector<char> ws_build_upgrade_response_ext(
     }
 
     resp += "\r\n";
-    return std::vector<char>(resp.begin(), resp.end());
+    return resp;
 }

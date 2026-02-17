@@ -60,49 +60,73 @@ target_include_directories(_fastapi_core PRIVATE
 )
 
 # ── PGO (Profile-Guided Optimization) ────────────────────────────────────────
-# Usage:
+# Usage (GCC/Clang):
 #   Step 1: cmake -DENABLE_PGO_GENERATE=ON .. && make -j$(nproc)
 #   Step 2: Run benchmarks to generate profile data
 #   Step 3: cmake -DENABLE_PGO_USE=ON .. && make -j$(nproc)
 option(ENABLE_PGO_GENERATE "Build with PGO instrumentation" OFF)
 option(ENABLE_PGO_USE "Build with PGO data" OFF)
 
-# ── Compiler flags: maximum optimization ─────────────────────────────────────
-# Common flags for both C and C++
-target_compile_options(_fastapi_core PRIVATE
-    -O3
-    -march=native
-    -flto
-    -fno-math-errno
-    -funroll-loops
-    -fomit-frame-pointer
-    -ftree-vectorize
-    -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type
-)
+# ── Compiler flags: maximum optimization (platform-specific) ─────────────────
+if(MSVC)
+    # MSVC (Windows)
+    target_compile_options(_fastapi_core PRIVATE
+        /O2 /Ob3 /GL /fp:fast
+        /W3 /wd4244 /wd4267 /wd4996
+    )
+    target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GR->)
+    target_link_options(_fastapi_core PRIVATE /LTCG)
 
-# C++-only flags (don't pass to C files)
-target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
+    # PGO for MSVC
+    if(ENABLE_PGO_GENERATE)
+        target_compile_options(_fastapi_core PRIVATE /GL)
+        target_link_options(_fastapi_core PRIVATE /LTCG:PGI)
+        message(STATUS "PGO: MSVC instrumentation enabled")
+    elseif(ENABLE_PGO_USE)
+        target_compile_options(_fastapi_core PRIVATE /GL)
+        target_link_options(_fastapi_core PRIVATE /LTCG:PGO)
+        message(STATUS "PGO: MSVC using profile data")
+    endif()
+else()
+    # GCC / Clang (Linux, macOS)
+    target_compile_options(_fastapi_core PRIVATE
+        -O3
+        -march=native
+        -flto
+        -fno-math-errno
+        -funroll-loops
+        -fomit-frame-pointer
+        -ftree-vectorize
+        -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type
+    )
+    target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
 
-# PGO instrumentation / optimization flags
-if(ENABLE_PGO_GENERATE)
-    target_compile_options(_fastapi_core PRIVATE -fprofile-generate)
-    target_link_options(_fastapi_core PRIVATE -fprofile-generate)
-    message(STATUS "PGO: Instrumentation enabled — run benchmarks to generate profile data")
-elseif(ENABLE_PGO_USE)
-    target_compile_options(_fastapi_core PRIVATE -fprofile-use -fprofile-correction)
-    target_link_options(_fastapi_core PRIVATE -fprofile-use)
-    message(STATUS "PGO: Using profile data for optimization")
+    # -Wno-free-nonheap-object: suppress GCC 14 false positive in LTO-inlined vector::push_back
+    target_link_options(_fastapi_core PRIVATE -flto -Wno-free-nonheap-object)
+
+    # PGO for GCC/Clang
+    if(ENABLE_PGO_GENERATE)
+        target_compile_options(_fastapi_core PRIVATE -fprofile-generate)
+        target_link_options(_fastapi_core PRIVATE -fprofile-generate)
+        message(STATUS "PGO: Instrumentation enabled — run benchmarks to generate profile data")
+    elseif(ENABLE_PGO_USE)
+        target_compile_options(_fastapi_core PRIVATE -fprofile-use -fprofile-correction)
+        target_link_options(_fastapi_core PRIVATE -fprofile-use)
+        message(STATUS "PGO: Using profile data for optimization")
+    endif()
 endif()
-
-# -Wno-free-nonheap-object: suppress GCC 14 false positive in LTO-inlined vector::push_back
-target_link_options(_fastapi_core PRIVATE -flto -Wno-free-nonheap-object)
 
 # ── Link system libs ────────────────────────────────────────────────────────
 # Try to find brotli; if not found, build without it
 find_library(BROTLI_ENC brotlienc)
 find_library(BROTLI_DEC brotlidec)
 
-target_link_libraries(_fastapi_core PRIVATE z)
+if(MSVC)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(_fastapi_core PRIVATE ZLIB::ZLIB ws2_32)
+else()
+    target_link_libraries(_fastapi_core PRIVATE z)
+endif()
 
 if(BROTLI_ENC AND BROTLI_DEC)
     target_link_libraries(_fastapi_core PRIVATE ${BROTLI_ENC} ${BROTLI_DEC})
@@ -116,8 +140,9 @@ target_compile_definitions(_fastapi_core PRIVATE
     YYJSON_DISABLE_NON_STANDARD=1
 )
 
-# ── Output name: match Python's expected .so name ────────────────────────────
-# Python expects: _fastapi_core.cpython-311-x86_64-linux-gnu.so
+# ── Output name: match Python's expected module name ─────────────────────────
+# Linux:   _fastapi_core.cpython-311-x86_64-linux-gnu.so
+# Windows: _fastapi_core.pyd
 set_target_properties(_fastapi_core PROPERTIES
     PREFIX ""
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"

@@ -9,7 +9,7 @@
 #include "ws_frame_parser.hpp"
 #include "pyref.hpp"
 #include <cstring>
-#include <strings.h>  // strcasecmp (POSIX)
+#include "platform.hpp"
 #include <mutex>
 #include <new>
 #include <algorithm>
@@ -490,6 +490,45 @@ static PyObject* CoreApp_get_routes(CoreAppObject* self, PyObject*) {
     return list.release();
 }
 
+// ── Method string → bitmask helpers ─────────────────────────────────────────
+// Convert HTTP method string to MethodBit bitmask. Returns 0 for unrecognized.
+// Expects uppercase input (as sent over HTTP per RFC 7230 §3.1.1).
+
+static inline uint8_t method_str_to_bit(const char* method, size_t len) {
+    switch (len) {
+        case 3:
+            if (memcmp(method, "GET", 3) == 0) return METHOD_GET;
+            if (memcmp(method, "PUT", 3) == 0) return METHOD_PUT;
+            break;
+        case 4:
+            if (memcmp(method, "POST", 4) == 0) return METHOD_POST;
+            if (memcmp(method, "HEAD", 4) == 0) return METHOD_HEAD;
+            break;
+        case 5:
+            if (memcmp(method, "PATCH", 5) == 0) return METHOD_PATCH;
+            break;
+        case 6:
+            if (memcmp(method, "DELETE", 6) == 0) return METHOD_DELETE;
+            break;
+        case 7:
+            if (memcmp(method, "OPTIONS", 7) == 0) return METHOD_OPTIONS;
+            break;
+    }
+    return 0;
+}
+
+// Case-insensitive variant for route registration (methods may arrive lowercase).
+static inline uint8_t method_str_to_bit_ci(const char* method, size_t len) {
+    if (len == 0 || len > 7) return 0;
+    // Uppercase into stack buffer
+    char upper[8];
+    for (size_t i = 0; i < len; i++) {
+        upper[i] = (method[i] >= 'a' && method[i] <= 'z')
+            ? static_cast<char>(method[i] - 32) : method[i];
+    }
+    return method_str_to_bit(upper, len);
+}
+
 // ── add_route ───────────────────────────────────────────────────────────────
 
 static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject* kwargs) {
@@ -536,15 +575,8 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
         const char* ms = PyUnicode_AsUTF8(m);
         if (!ms) return nullptr;
         route.methods.emplace_back(ms);
-        // Build method bitmask for O(1) method checking
-        size_t mlen = strlen(ms);
-        if (mlen == 3 && strncasecmp(ms, "GET", 3) == 0) route.method_mask |= METHOD_GET;
-        else if (mlen == 4 && strncasecmp(ms, "POST", 4) == 0) route.method_mask |= METHOD_POST;
-        else if (mlen == 3 && strncasecmp(ms, "PUT", 3) == 0) route.method_mask |= METHOD_PUT;
-        else if (mlen == 6 && strncasecmp(ms, "DELETE", 6) == 0) route.method_mask |= METHOD_DELETE;
-        else if (mlen == 5 && strncasecmp(ms, "PATCH", 5) == 0) route.method_mask |= METHOD_PATCH;
-        else if (mlen == 4 && strncasecmp(ms, "HEAD", 4) == 0) route.method_mask |= METHOD_HEAD;
-        else if (mlen == 7 && strncasecmp(ms, "OPTIONS", 7) == 0) route.method_mask |= METHOD_OPTIONS;
+        // Build method bitmask for O(1) method checking (case-insensitive for registration)
+        route.method_mask |= method_str_to_bit_ci(ms, strlen(ms));
     }
 
     Py_INCREF(endpoint);
@@ -607,12 +639,9 @@ static PyObject* CoreApp_match_request(CoreAppObject* self, PyObject* args) {
 
     const auto& route = self->routes[idx];
 
-    if (!route.methods.empty()) {
-        bool found = false;
-        for (const auto& m : route.methods) {
-            if (strcasecmp(m.c_str(), method) == 0) { found = true; break; }
-        }
-        if (!found) { lock.unlock(); Py_RETURN_NONE; }
+    if (route.method_mask) {
+        uint8_t req_method = method_str_to_bit_ci(method, strlen(method));
+        if (!(route.method_mask & req_method)) { lock.unlock(); Py_RETURN_NONE; }
     }
 
     MatchResultObject* mr = PyObject_New(MatchResultObject, &MatchResultType);
@@ -888,17 +917,9 @@ static PyObject* CoreApp_handle_and_respond(
 
     const auto& route = self->routes[idx];
 
-    // Method check — O(1) bitmask (same as handle_http)
+    // Method check — O(1) bitmask
     if (route.method_mask) {
-        size_t mlen = strlen(method_str);
-        uint8_t req_method = 0;
-        if (mlen == 3 && memcmp(method_str, "GET", 3) == 0) req_method = METHOD_GET;
-        else if (mlen == 4 && memcmp(method_str, "POST", 4) == 0) req_method = METHOD_POST;
-        else if (mlen == 3 && memcmp(method_str, "PUT", 3) == 0) req_method = METHOD_PUT;
-        else if (mlen == 6 && memcmp(method_str, "DELETE", 6) == 0) req_method = METHOD_DELETE;
-        else if (mlen == 5 && memcmp(method_str, "PATCH", 5) == 0) req_method = METHOD_PATCH;
-        else if (mlen == 4 && memcmp(method_str, "HEAD", 4) == 0) req_method = METHOD_HEAD;
-        else if (mlen == 7 && memcmp(method_str, "OPTIONS", 7) == 0) req_method = METHOD_OPTIONS;
+        uint8_t req_method = method_str_to_bit(method_str, strlen(method_str));
         if (!(route.method_mask & req_method)) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
     }
 
@@ -1333,12 +1354,9 @@ static PyObject* CoreApp_handle_request_inline(
 
     const auto& route = self->routes[idx];
 
-    if (!route.methods.empty()) {
-        bool found = false;
-        for (const auto& m : route.methods) {
-            if (strcasecmp(m.c_str(), method_str) == 0) { found = true; break; }
-        }
-        if (!found) { lock.unlock(); Py_RETURN_NONE; }
+    if (route.method_mask) {
+        uint8_t req_method = method_str_to_bit(method_str, strlen(method_str));
+        if (!(route.method_mask & req_method)) { lock.unlock(); Py_RETURN_NONE; }
     }
 
     if (!route.fast_spec) { lock.unlock(); Py_RETURN_NONE; }
@@ -2535,15 +2553,7 @@ static PyObject* CoreApp_handle_http(
 
     // ── Method check (O(1) bitmask) ────────────────────────────────────
     if (route.method_mask) {
-        uint8_t req_method = 0;
-        if (req.method.len == 3 && memcmp(req.method.data, "GET", 3) == 0) req_method = METHOD_GET;
-        else if (req.method.len == 4 && memcmp(req.method.data, "POST", 4) == 0) req_method = METHOD_POST;
-        else if (req.method.len == 3 && memcmp(req.method.data, "PUT", 3) == 0) req_method = METHOD_PUT;
-        else if (req.method.len == 6 && memcmp(req.method.data, "DELETE", 6) == 0) req_method = METHOD_DELETE;
-        else if (req.method.len == 5 && memcmp(req.method.data, "PATCH", 5) == 0) req_method = METHOD_PATCH;
-        else if (req.method.len == 4 && memcmp(req.method.data, "HEAD", 4) == 0) req_method = METHOD_HEAD;
-        else if (req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0) req_method = METHOD_OPTIONS;
-
+        uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (!(route.method_mask & req_method)) {
             if (!rt_frozen) lock.unlock();
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
@@ -3682,15 +3692,7 @@ static PyObject* CoreApp_parse_and_route(
 
     // ── Method check (O(1) bitmask) ────────────────────────────────────
     if (route.method_mask) {
-        uint8_t req_method = 0;
-        if (req.method.len == 3 && memcmp(req.method.data, "GET", 3) == 0) req_method = METHOD_GET;
-        else if (req.method.len == 4 && memcmp(req.method.data, "POST", 4) == 0) req_method = METHOD_POST;
-        else if (req.method.len == 3 && memcmp(req.method.data, "PUT", 3) == 0) req_method = METHOD_PUT;
-        else if (req.method.len == 6 && memcmp(req.method.data, "DELETE", 6) == 0) req_method = METHOD_DELETE;
-        else if (req.method.len == 5 && memcmp(req.method.data, "PATCH", 5) == 0) req_method = METHOD_PATCH;
-        else if (req.method.len == 4 && memcmp(req.method.data, "HEAD", 4) == 0) req_method = METHOD_HEAD;
-        else if (req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0) req_method = METHOD_OPTIONS;
-
+        uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (!(route.method_mask & req_method)) {
             if (lock.owns_lock()) lock.unlock();
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
