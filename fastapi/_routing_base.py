@@ -987,6 +987,12 @@ class Router:
     ) -> None:
         route = WebSocketRoute(path, endpoint=endpoint, name=name)
         self.routes.append(route)
+        # Pre-compute WS parameter name at registration (avoids inspect on first connection)
+        try:
+            from fastapi._cpp_server import precompute_ws_signature
+            precompute_ws_signature(endpoint)
+        except ImportError:
+            pass
 
     def route(
         self,

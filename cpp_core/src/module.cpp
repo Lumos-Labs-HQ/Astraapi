@@ -11,6 +11,21 @@
 // Forward declarations for module-level functions (implemented in other files)
 // ══════════════════════════════════════════════════════════════════════════════
 
+// app.cpp
+extern void init_status_line_cache();
+extern PyObject* py_build_response_from_parts(PyObject* self, PyObject* args);
+extern PyObject* py_build_chunked_frame(PyObject* self, PyObject* arg);
+extern PyObject* py_set_http_fd(PyObject* self, PyObject* arg);
+extern PyObject* py_http_buf_create(PyObject* self, PyObject* args);
+extern PyObject* py_http_buf_append(PyObject* self, PyObject* args);
+extern PyObject* py_http_buf_get_view(PyObject* self, PyObject* capsule);
+extern PyObject* py_http_buf_consume(PyObject* self, PyObject* args);
+extern PyObject* py_http_buf_clear(PyObject* self, PyObject* capsule);
+extern PyObject* py_http_buf_len(PyObject* self, PyObject* capsule);
+
+// ws_ring_buffer.cpp
+extern void init_ws_opcode_cache();
+
 // request_parser.cpp
 extern PyObject* py_parse_request_full(PyObject* self, PyObject* args, PyObject* kwargs);
 
@@ -53,6 +68,9 @@ extern PyObject* py_ws_echo_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_echo_direct_fd(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
+extern PyObject* py_ws_get_metrics(PyObject* self, PyObject* capsule);
+extern PyObject* py_ws_update_send_metrics(PyObject* self, PyObject* args);
+extern PyObject* py_ws_handle_and_feed(PyObject* self, PyObject* args);
 
 // dep_engine.cpp
 extern PyObject* py_compile_dep_plan(PyObject* self, PyObject* args, PyObject* kwargs);
@@ -266,6 +284,9 @@ static PyMethodDef module_methods[] = {
     {"ws_handle_direct", (PyCFunction)py_ws_handle_direct, METH_VARARGS, nullptr},
     {"ws_handle_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
     {"ws_handle_json_direct", (PyCFunction)py_ws_handle_json_direct, METH_VARARGS, nullptr},
+    {"ws_get_metrics", (PyCFunction)py_ws_get_metrics, METH_O, nullptr},
+    {"ws_update_send_metrics", (PyCFunction)py_ws_update_send_metrics, METH_VARARGS, nullptr},
+    {"ws_handle_and_feed", (PyCFunction)py_ws_handle_and_feed, METH_VARARGS, nullptr},
 
     // v2.0: Dependency engine
     {"compile_dep_plan", (PyCFunction)py_compile_dep_plan, METH_VARARGS | METH_KEYWORDS, nullptr},
@@ -322,6 +343,17 @@ static PyMethodDef module_methods[] = {
     {"batch_extract_all_params", (PyCFunction)py_batch_extract_all_params, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"batch_extract_params_inline", (PyCFunction)py_batch_extract_params_inline, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"unregister_route_params", (PyCFunction)py_unregister_route_params, METH_O, nullptr},
+
+    // Response building helpers
+    {"build_response_from_parts", (PyCFunction)py_build_response_from_parts, METH_VARARGS, nullptr},
+    {"build_chunked_frame", (PyCFunction)py_build_chunked_frame, METH_O, nullptr},
+    {"set_http_fd", (PyCFunction)py_set_http_fd, METH_O, nullptr},
+    {"http_buf_create", (PyCFunction)py_http_buf_create, METH_NOARGS, nullptr},
+    {"http_buf_append", (PyCFunction)py_http_buf_append, METH_VARARGS, nullptr},
+    {"http_buf_get_view", (PyCFunction)py_http_buf_get_view, METH_O, nullptr},
+    {"http_buf_consume", (PyCFunction)py_http_buf_consume, METH_VARARGS, nullptr},
+    {"http_buf_clear", (PyCFunction)py_http_buf_clear, METH_O, nullptr},
+    {"http_buf_len", (PyCFunction)py_http_buf_len, METH_O, nullptr},
 
     {nullptr, nullptr, 0, nullptr}
 };
@@ -385,6 +417,12 @@ PyMODINIT_FUNC PyInit__fastapi_core(void) {
 
     // Pre-initialize JSON writer special type caches
     json_writer_init();
+
+    // Pre-build cached HTTP status lines and JSON response prefixes
+    init_status_line_cache();
+
+    // Pre-cache WebSocket opcode PyLong objects
+    init_ws_opcode_cache();
 
     return m;
 }

@@ -158,6 +158,12 @@ struct WsDeflateContext {
     bool compress(const uint8_t* in, size_t in_len, std::vector<uint8_t>& out);
 };
 
+// ── OPT-11: Shared deflate context pool ──────────────────────────────────
+// Borrow/return z_stream pairs from a shared pool (reduces memory from ~500KB/conn
+// to ~500KB total for 16 pooled contexts). For server_no_context_takeover mode.
+int shared_deflate_pool_acquire(void*& inflate_ctx, void*& deflate_ctx);
+void shared_deflate_pool_release(int idx);
+
 // Build upgrade response with optional extension negotiation
 // If client requests permessage-deflate and deflate_out is non-null,
 // negotiation result is stored in *deflate_out.

@@ -22,13 +22,17 @@ struct StringView {
     }
 
     // Case-insensitive compare (for header names)
+    // Optimized: early-exit on length mismatch + first-byte check before full scan
     bool iequals(const char* s, size_t slen) const {
         if (len != slen) return false;
-        for (size_t i = 0; i < len; i++) {
+        if (len == 0) return true;
+        // First-byte fast reject (lowercase both)
+        char a0 = data[0]; if (a0 >= 'A' && a0 <= 'Z') a0 += 32;
+        if (a0 != s[0]) return false;
+        for (size_t i = 1; i < len; i++) {
             char a = data[i];
-            char b = s[i];
             if (a >= 'A' && a <= 'Z') a += 32;
-            if (a != b) return false;
+            if (a != s[i]) return false;
         }
         return true;
     }
@@ -60,8 +64,15 @@ struct ParsedHttpRequest {
     std::vector<char> chunked_body;
 
     // Find a header by lowercase name
+    // Optimized: length-dispatch + first-byte check eliminates most comparisons
     StringView find_header(const char* name, size_t name_len) const {
+        char first = (name_len > 0) ? name[0] : 0;  // name is already lowercase
         for (int i = 0; i < header_count; i++) {
+            if (headers[i].name.len != name_len) continue;  // length mismatch: skip
+            // First-byte fast check (lowercase both)
+            char h0 = headers[i].name.data[0];
+            if (h0 >= 'A' && h0 <= 'Z') h0 += 32;
+            if (h0 != first) continue;  // first byte mismatch: skip
             if (headers[i].name.iequals(name, name_len)) {
                 return headers[i].value;
             }

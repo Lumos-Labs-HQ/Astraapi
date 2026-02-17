@@ -1,6 +1,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "ws_frame_parser.hpp"
+#include "platform.hpp"    // fast_memcpy_small (OPT-18)
 #include "pyref.hpp"
 #include <cstring>
 #include <string>
@@ -969,7 +970,9 @@ bool WsDeflateContext::init() {
     def->zalloc = Z_NULL;
     def->zfree = Z_NULL;
     def->opaque = Z_NULL;
-    if (deflateInit2(def, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
+    // Level 1 (fastest) for WebSocket — most WS messages are small (<4KB)
+    // and level 1 gives ~90% of the compression ratio at 3-5x the speed
+    if (deflateInit2(def, 1, Z_DEFLATED,
                      -server_max_window_bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         inflateEnd(inf);
         delete inf;
@@ -1075,6 +1078,105 @@ bool WsDeflateContext::compress(const uint8_t* in, size_t in_len,
         deflateReset(strm);
     }
     return true;
+}
+
+// ── OPT-11: Shared Deflate Context Pool ──────────────────────────────────
+// Instead of allocating z_stream per connection (~500KB each), connections
+// borrow from a shared pool when server_no_context_takeover is set.
+// Pool size matches typical CPU core count for good cache locality.
+
+#include <mutex>
+
+namespace {
+
+class SharedDeflatePool {
+    static constexpr size_t POOL_SIZE = 16;
+
+    struct PoolEntry {
+        z_stream* inflate_ctx = nullptr;
+        z_stream* deflate_ctx = nullptr;
+        bool in_use = false;
+    };
+
+    PoolEntry entries_[POOL_SIZE];
+    std::mutex mutex_;
+    bool initialized_ = false;
+
+public:
+    SharedDeflatePool() = default;
+
+    ~SharedDeflatePool() {
+        for (auto& e : entries_) {
+            if (e.inflate_ctx) { inflateEnd(e.inflate_ctx); delete e.inflate_ctx; }
+            if (e.deflate_ctx) { deflateEnd(e.deflate_ctx); delete e.deflate_ctx; }
+        }
+    }
+
+    // Initialize pool entries lazily on first acquire
+    bool ensure_init() {
+        if (initialized_) return true;
+        for (size_t i = 0; i < POOL_SIZE; i++) {
+            auto* inf = new z_stream{};
+            inf->zalloc = Z_NULL; inf->zfree = Z_NULL; inf->opaque = Z_NULL;
+            if (inflateInit2(inf, -15) != Z_OK) { delete inf; return false; }
+
+            auto* def = new z_stream{};
+            def->zalloc = Z_NULL; def->zfree = Z_NULL; def->opaque = Z_NULL;
+            if (deflateInit2(def, 1, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+                inflateEnd(inf); delete inf; delete def; return false;
+            }
+
+            entries_[i].inflate_ctx = inf;
+            entries_[i].deflate_ctx = def;
+        }
+        initialized_ = true;
+        return true;
+    }
+
+    // Borrow a z_stream pair. Returns index or -1 if pool exhausted.
+    int acquire(z_stream*& out_inflate, z_stream*& out_deflate) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ensure_init()) return -1;
+        for (size_t i = 0; i < POOL_SIZE; i++) {
+            if (!entries_[i].in_use) {
+                entries_[i].in_use = true;
+                out_inflate = entries_[i].inflate_ctx;
+                out_deflate = entries_[i].deflate_ctx;
+                return (int)i;
+            }
+        }
+        return -1;  // pool exhausted — caller falls back to per-connection alloc
+    }
+
+    // Return a borrowed z_stream pair. Resets state for next use.
+    void release(int idx) {
+        if (idx < 0 || idx >= (int)POOL_SIZE) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& e = entries_[idx];
+        if (e.inflate_ctx) inflateReset(e.inflate_ctx);
+        if (e.deflate_ctx) deflateReset(e.deflate_ctx);
+        e.in_use = false;
+    }
+};
+
+static SharedDeflatePool s_deflate_pool;
+
+} // anonymous namespace
+
+// Public API: acquire/release shared deflate contexts
+int shared_deflate_pool_acquire(void*& inflate_ctx, void*& deflate_ctx) {
+    z_stream* inf = nullptr;
+    z_stream* def = nullptr;
+    int idx = s_deflate_pool.acquire(inf, def);
+    if (idx >= 0) {
+        inflate_ctx = inf;
+        deflate_ctx = def;
+    }
+    return idx;
+}
+
+void shared_deflate_pool_release(int idx) {
+    s_deflate_pool.release(idx);
 }
 
 // ── Upgrade response with extension negotiation ──────────────────────────

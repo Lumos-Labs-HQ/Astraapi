@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstring>
 #include <utility>
+#include <atomic>
 #include "ws_frame_parser.hpp"
 
 // WsRingBuffer — Circular buffer for WebSocket frame accumulation
@@ -99,14 +100,24 @@ private:
     size_t write_pos_ = 0;
 };
 
-// WsConnectionState — bundles ring buffer + fragment assembler per connection
+// WsConnectionState — bundles ring buffer + fragment assembler + metrics per connection
 struct WsConnectionState {
     WsRingBuffer ring;
     WsFragmentAssembler assembler;
 
+    // Per-connection metrics tracked in C++ (avoids Python attribute stores per frame)
+    uint64_t messages_in = 0;
+    uint64_t bytes_in = 0;
+    uint64_t messages_out = 0;
+    uint64_t bytes_out = 0;
+
     void reset() {
         ring.reset();
         assembler.reset();
+        messages_in = 0;
+        bytes_in = 0;
+        messages_out = 0;
+        bytes_out = 0;
     }
 };
 

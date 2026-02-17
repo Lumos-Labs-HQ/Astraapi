@@ -96,7 +96,9 @@ class _WsFastChannel:
             self._waiter = None
             waiter.set_result((opcode, payload))
         else:
-            plen = len(payload) if isinstance(payload, (bytes, str, bytearray)) else 0
+            # Fast type identity check instead of isinstance() — C++ always sends bytes or str
+            pt = type(payload)
+            plen = len(payload) if pt is bytes or pt is str or pt is bytearray else 0
             self._total_bytes += plen
             self._buffer.append((opcode, payload))
             # Apply backpressure: message count OR byte count
@@ -114,7 +116,8 @@ class _WsFastChannel:
         buf = self._buffer
         if buf:
             item = buf.popleft()  # O(1) instead of O(N) list.pop(0)
-            plen = len(item[1]) if isinstance(item[1], (bytes, str, bytearray)) else 0
+            pt = type(item[1])
+            plen = len(item[1]) if pt is bytes or pt is str or pt is bytearray else 0
             self._total_bytes -= plen
             # Resume reading when BOTH message count AND byte count are below low water
             if (self._paused
@@ -154,6 +157,23 @@ try:
         # Ring buffer lifecycle
         ws_ring_buffer_create as _ws_ring_buffer_create,
         ws_ring_buffer_reset as _ws_ring_buffer_reset,
+        # HTTP response helpers
+        build_response_from_parts as _build_response_from_parts,
+        build_chunked_frame as _build_chunked_frame,
+        # Metrics (tracked in C++ to avoid per-frame Python attribute stores)
+        ws_get_metrics as _ws_get_metrics,
+        ws_update_send_metrics as _ws_update_send_metrics,
+        # Direct socket write for HTTP (bypasses asyncio transport)
+        set_http_fd as _set_http_fd,
+        # Direct channel feed (bypasses intermediate Python list)
+        ws_handle_and_feed as _ws_handle_and_feed,
+        # HTTP connection buffer (replaces Python bytearray + memmove)
+        http_buf_create as _http_buf_create,
+        http_buf_append as _http_buf_append,
+        http_buf_get_view as _http_buf_get_view,
+        http_buf_consume as _http_buf_consume,
+        http_buf_clear as _http_buf_clear,
+        http_buf_len as _http_buf_len,
     )
 except ImportError as e:
     raise ImportError(
@@ -197,6 +217,25 @@ _ws_pool = _WsConnectionPool() if _ws_ring_buffer_create is not None else None
 # ── WebSocket endpoint signature cache ────────────────────────────────────────
 _ws_sig_cache: dict[int, str] = {}
 
+def precompute_ws_signature(endpoint: Any) -> None:
+    """Pre-compute WebSocket parameter name at route registration time.
+    Called from applications.py add_websocket_route() to avoid
+    inspect.signature() overhead on first WS connection."""
+    ep_id = id(endpoint)
+    if ep_id in _ws_sig_cache:
+        return
+    sig = inspect.signature(endpoint)
+    ws_param = "websocket"
+    for param_name, param in sig.parameters.items():
+        ann = param.annotation
+        if param_name == "websocket" or (
+            ann is not inspect.Parameter.empty
+            and getattr(ann, "__name__", "") == "WebSocket"
+        ):
+            ws_param = param_name
+            break
+    _ws_sig_cache[ep_id] = ws_param
+
 # ── Pre-built responses (allocated once, reused forever) ─────────────────────
 
 _500_RESP = (
@@ -238,12 +277,13 @@ def _send_close_response(transport, payload: bytes) -> None:
 
 
 def _feed_frames(ws, transport, frames, ring_buf) -> bool:
-    """Feed parsed frames to WebSocket channel. Returns True if close detected."""
+    """Feed parsed frames to WebSocket channel. Returns True if close detected.
+
+    Metrics are tracked in C++ (ws_ring_buffer.cpp) — no per-frame Python updates needed.
+    """
     channel = ws._channel
     waiter = channel._waiter
     buf = channel._buffer
-    metrics = ws._metrics
-    now = time.monotonic()  # once per batch, not per frame
     for opcode, payload in frames:
         if opcode == 0x8:  # Close frame
             # Resolve graceful close waiter if pending (our close was acknowledged)
@@ -259,11 +299,7 @@ def _feed_frames(ws, transport, frames, ring_buf) -> bool:
             if ring_buf is not None and _ws_ring_buffer_reset is not None:
                 _ws_ring_buffer_reset(ring_buf)
             return True
-        # Data frame — feed to channel directly
-        metrics.messages_received += 1
-        plen = len(payload) if isinstance(payload, (bytes, str)) else 0
-        metrics.bytes_received += plen
-        metrics.last_activity = now
+        # Data frame — feed to channel directly (metrics tracked in C++)
         if waiter is not None and not waiter.done():
             channel._waiter = None
             waiter.set_result((opcode, payload))
@@ -481,10 +517,7 @@ class CppWebSocket:
                 self._echo_detect_count = 0  # non-match resets counter
             self._last_received = None
         payload = data if isinstance(data, bytes) else data.encode("utf-8")
-        m = self._metrics
-        m.messages_sent += 1
-        m.bytes_sent += len(payload)
-        m.last_activity = time.monotonic()
+        # Send metrics tracked in C++ (avoids 3 Python attribute stores per message)
         if self._corked:
             self._cork_buf.append((0x1, payload))
             return _NOOP
@@ -495,10 +528,6 @@ class CppWebSocket:
         """Send a binary message. Returns awaitable for API compatibility."""
         if self._closed:
             raise RuntimeError("WebSocket is closed")
-        m = self._metrics
-        m.messages_sent += 1
-        m.bytes_sent += len(data)
-        m.last_activity = time.monotonic()
         if self._corked:
             self._cork_buf.append((0x2, data))
             return _NOOP
@@ -696,13 +725,31 @@ class CppWebSocket:
     # ── Write batching (cork/uncork) ─────────────────────────────────
 
     def cork(self) -> None:
-        """Start buffering outgoing frames for batch write."""
+        """Start buffering outgoing frames for batch write.
+        Also sets TCP_CORK to batch TCP segments (Linux only)."""
         self._corked = True
+        proto = self._protocol
+        if proto is not None and proto._ws_fd >= 0 and sys.platform == "linux":
+            try:
+                sock = proto._transport.get_extra_info("socket")
+                if sock is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, 3, 1)  # TCP_CORK = 3
+            except (OSError, AttributeError):
+                pass
 
     def uncork(self) -> None:
-        """Flush buffered frames as a single write and stop buffering."""
+        """Flush buffered frames as a single write and stop buffering.
+        Also clears TCP_CORK to flush batched TCP segments."""
         self._flush_cork()
         self._corked = False
+        proto = self._protocol
+        if proto is not None and proto._ws_fd >= 0 and sys.platform == "linux":
+            try:
+                sock = proto._transport.get_extra_info("socket")
+                if sock is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, 3, 0)  # TCP_CORK = 3
+            except (OSError, AttributeError):
+                pass
 
     def _flush_cork(self) -> None:
         """Flush corked frames."""
@@ -777,6 +824,34 @@ class CppWebSocket:
         return bytes(header) + payload
 
 
+# ── OPT-14: Protocol Object Pool ──────────────────────────────────────────
+# Reuse CppHttpProtocol instances to avoid per-connection __init__ overhead
+# and reduce GC pressure under high connection rates. Pool returns protocol
+# objects to a free list on connection_lost(), reuses on next connection.
+
+class _ProtocolPool:
+    """Fixed-size pool of CppHttpProtocol objects for reuse."""
+    __slots__ = ("_pool", "_max_size")
+
+    def __init__(self, max_size: int = 256):
+        self._pool: list = []
+        self._max_size = max_size
+
+    def acquire(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
+                ka_timeout: float, connections_set: set | None) -> "CppHttpProtocol":
+        if self._pool:
+            proto = self._pool.pop()
+            proto._reinit(core_app, loop, ka_timeout, connections_set)
+            return proto
+        return CppHttpProtocol(core_app, loop, ka_timeout, connections_set)
+
+    def release(self, proto: "CppHttpProtocol") -> None:
+        if len(self._pool) < self._max_size:
+            self._pool.append(proto)
+
+_protocol_pool = _ProtocolPool()
+
+
 class CppHttpProtocol(asyncio.Protocol):
     """Per-connection HTTP/1.1 protocol with WebSocket upgrade support.
 
@@ -791,7 +866,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_buf", "_ka", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set")
+    __slots__ = ("_core", "_transport", "_http_buf", "_ka", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -801,8 +876,8 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ka_timeout = keep_alive_timeout
         self._connections_set = connections_set
         self._transport: asyncio.Transport | None = None
-        # Use ring buffer for WebSocket if available, bytearray otherwise (HTTP fallback)
-        self._buf = bytearray()
+        # C++ HTTP connection buffer (O(1) consume vs O(N) memmove)
+        self._http_buf = _http_buf_create()
         self._ka: asyncio.TimerHandle | None = None
         self._ka_deadline: float = 0.0
         self._wr_paused = False
@@ -813,6 +888,26 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle: asyncio.TimerHandle | None = None
         self._ws_pong_received = True
         self._ws_task: asyncio.Task | None = None  # TS-2: tracked for cancellation
+
+    def _reinit(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
+                ka_timeout: float, connections_set: set | None) -> None:
+        """Reset protocol for reuse from pool (OPT-14). Avoids __init__ overhead."""
+        self._core = core_app
+        self._loop = loop
+        self._ka_timeout = ka_timeout
+        self._connections_set = connections_set
+        self._transport = None
+        _http_buf_clear(self._http_buf)  # reuse existing C++ buffer
+        self._ka = None
+        self._ka_deadline = 0.0
+        self._wr_paused = False
+        self._ws_handler = None
+        self._ws = None
+        self._ws_ring_buf = None
+        self._ws_fd = -1
+        self._ws_ping_handle = None
+        self._ws_pong_received = True
+        self._ws_task = None
 
     # ── Connection lifecycle ─────────────────────────────────────────────
 
@@ -825,10 +920,16 @@ class CppHttpProtocol(asyncio.Protocol):
                 sock.setsockopt(socket.IPPROTO_TCP, 12, 1)  # TCP_QUICKACK = 12
             except (OSError, AttributeError):
                 pass
+            # Cache socket FD for direct C++ writes (bypasses asyncio transport)
+            try:
+                _set_http_fd(sock.fileno())
+            except (OSError, AttributeError):
+                _set_http_fd(-1)
         transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
         self._ka_reset()
 
     def connection_lost(self, exc: Exception | None) -> None:
+        _set_http_fd(-1)  # Clear direct write FD
         self._ka_cancel()
         self._stop_ws_heartbeat()
         # TS-2: Cancel tracked WebSocket task to prevent hanging
@@ -840,10 +941,7 @@ class CppHttpProtocol(asyncio.Protocol):
         if self._ws and not self._ws._closed:
             self._ws._closed = True
             self._ws.feed_frame(0x8, b"")  # signal close to waiting receives
-        try:
-            self._buf.clear()
-        except BufferError:
-            self._buf = bytearray()  # memoryview still held from crashed data_received
+        _http_buf_clear(self._http_buf)
         # Return ring buffer to pool for reuse (or reset and drop)
         if self._ws_ring_buf is not None:
             if _ws_pool is not None:
@@ -856,6 +954,8 @@ class CppHttpProtocol(asyncio.Protocol):
         # Remove from active connections set (graceful shutdown tracking)
         if self._connections_set is not None:
             self._connections_set.discard(self)
+        # OPT-14: Return protocol to pool for reuse
+        _protocol_pool.release(self)
 
     # ── Data handling — the hot path ─────────────────────────────────────
 
@@ -864,26 +964,19 @@ class CppHttpProtocol(asyncio.Protocol):
         if self._ws is not None:
             # Any incoming data means the connection is alive (PONG tracking)
             self._ws_pong_received = True
-            try:
-                self._ws_handler(data)
-            except Exception as e:
-                import traceback
-                print(f"[WS-ERROR] {self._ws_handler.__name__}: {e}", file=sys.stderr)
-                traceback.print_exc(file=sys.stderr)
-                if self._transport and not self._transport.is_closing():
-                    self._transport.close()
+            # Hot path: no try/except for echo handlers (C++ handles errors internally).
+            # Exception handling moved into individual non-echo handlers.
+            self._ws_handler(data)
             return
 
-        buf = self._buf
-        buf += data
-
-        # PERF-1 / SEC-3: Reject oversized requests to prevent memory exhaustion
-        if len(buf) > 1_048_576:  # 1MB max buffer
+        # Append to C++ HTTP buffer (O(1) amortized, no Python bytearray concat)
+        if not _http_buf_append(self._http_buf, data):
+            # Buffer exceeded 1MB max — reject with 413
             transport = self._transport
             if transport and not transport.is_closing():
                 transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
                 transport.close()
-            buf.clear()
+            _http_buf_clear(self._http_buf)
             return
 
         if self._wr_paused:
@@ -896,19 +989,22 @@ class CppHttpProtocol(asyncio.Protocol):
         core = self._core
         IR = _InlineResult
 
-        # Use offset tracking instead of repeated del buf[:consumed]
-        # This does ONE memmove at the end instead of N memmoves in the loop
+        # Get memoryview into C++ buffer's readable region (zero-copy)
+        mv = _http_buf_get_view(self._http_buf)
+        if mv is None:
+            return
         total_consumed = 0
-        mv = memoryview(buf)
-        buf_len = len(buf)
+        buf_len = len(mv)
 
         while total_consumed < buf_len:
             # ── C++ handle_http: parse + route + dispatch + write ──────
+            # OPT-7: Pass offset to C++ instead of creating memoryview slices.
+            # Avoids N-1 PyMemoryView_FromObject calls for N pipelined requests.
             try:
-                consumed, result = core.handle_http(mv[total_consumed:], transport)
+                consumed, result = core.handle_http(mv, transport, total_consumed)
             except Exception:
                 mv.release()
-                buf.clear()
+                _http_buf_clear(self._http_buf)
                 transport.write(_500_RESP)
                 transport.close()
                 return
@@ -919,7 +1015,7 @@ class CppHttpProtocol(asyncio.Protocol):
             if consumed < 0:
                 # Parse error — 400 already sent by C++
                 mv.release()
-                buf.clear()
+                _http_buf_clear(self._http_buf)
                 transport.close()
                 return
 
@@ -949,7 +1045,7 @@ class CppHttpProtocol(asyncio.Protocol):
                         if transport and not transport.is_closing():
                             transport.close()
                         mv.release()
-                        buf.clear()
+                        _http_buf_clear(self._http_buf)
                         return
                     ws = CppWebSocket(
                         transport, self._loop,
@@ -971,6 +1067,9 @@ class CppHttpProtocol(asyncio.Protocol):
                             self._ws_fd = sock.fileno()
                     except (OSError, AttributeError):
                         pass
+                    # WS connections need higher write buffer limits to avoid
+                    # premature backpressure during high-throughput echo/broadcast
+                    transport.set_write_buffer_limits(high=524288, low=131072)
                     # Initialize ring buffer for WebSocket frame accumulation
                     if _ws_pool is not None:
                         self._ws_ring_buf = _ws_pool.acquire()
@@ -982,12 +1081,12 @@ class CppHttpProtocol(asyncio.Protocol):
                     # TS-2: Track WS task for cancellation on connection_lost
                     self._ws_task = self._loop.create_task(
                         self._handle_websocket(endpoint, path_params))
-                    # Remaining buf data (if any) is WebSocket frames
+                    # Remaining buffer data (if any) is WebSocket frames
                     remaining = bytes(mv[total_consumed:])
                     mv.release()
-                    buf.clear()
+                    _http_buf_clear(self._http_buf)
                     if remaining:
-                        self._ws_handler(bytes(remaining))
+                        self._ws_handler(remaining)
                     return  # connection is now WebSocket
 
                 elif tag == "async":
@@ -1006,30 +1105,50 @@ class CppHttpProtocol(asyncio.Protocol):
                 # Pydantic body validation needed
                 self._loop.create_task(self._handle_pydantic(result))
 
-        # Remove all consumed data in one operation (instead of N memmoves)
+        # O(1) consume — just advances read pointer in C++ buffer (no memmove)
         mv.release()
         if total_consumed > 0:
-            del buf[:total_consumed]
+            _http_buf_consume(self._http_buf, total_consumed)
 
         # ── Flush ─────────────────────────────────────────────────────
-        if not buf:
+        if _http_buf_len(self._http_buf) == 0:
             self._ka_reset()
 
     # ── WebSocket frame handling ─────────────────────────────────────────
 
     def _handle_ws_frames(self, data: bytes) -> None:
-        """Normal frame handler — single C++ call does everything."""
+        """Normal frame handler — single C++ call parses + feeds directly to channel."""
         ws = self._ws
         if not ws:
             return
-        result = _ws_handle_direct(self._ws_ring_buf, data)
-        if result is None:
-            return
-        frames, pong_bytes = result
-        transport = self._transport
-        if pong_bytes is not None and transport and not transport.is_closing():
-            transport.write(pong_bytes)
-        _feed_frames(ws, transport, frames, self._ws_ring_buf)
+        try:
+            channel = ws._channel
+            result = _ws_handle_and_feed(
+                self._ws_ring_buf, data, channel._waiter, channel._buffer)
+            if result is None:
+                return
+            pong_bytes, close_payload, frames_fed = result
+            # Clear waiter if it was resolved by C++
+            if frames_fed > 0 and channel._waiter is not None:
+                w = channel._waiter
+                if w.done():
+                    channel._waiter = None
+            transport = self._transport
+            if pong_bytes is not None and transport and not transport.is_closing():
+                transport.write(pong_bytes)
+            if close_payload is not None:
+                _send_close_response(transport, close_payload)
+                if self._ws_ring_buf is not None and _ws_ring_buffer_reset is not None:
+                    _ws_ring_buffer_reset(self._ws_ring_buf)
+            # Synchronous cork: flush any queued sends immediately (no call_soon latency)
+            if ws._pending_sends:
+                ws._flush_pending()
+        except Exception as e:
+            import traceback
+            print(f"[WS-ERROR] _handle_ws_frames: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            if self._transport and not self._transport.is_closing():
+                self._transport.close()
 
     def _handle_ws_frames_echo(self, data: bytes) -> None:
         """Echo fast path — single C++ call does ring + parse + echo + consume."""
@@ -1049,8 +1168,21 @@ class CppHttpProtocol(asyncio.Protocol):
     def _handle_ws_frames_echo_fd(self, data: bytes) -> None:
         """Ultra-fast echo — C++ writes directly to socket FD, bypassing asyncio."""
         result = _ws_echo_direct_fd(self._ws_ring_buf, data, self._ws_fd)
-        if result is not None:
-            # Close frame detected (rare path)
+        if result is None:
+            return  # Happy path — all echoed via writev()
+        if isinstance(result, tuple):
+            # writev() failed — fallback: write echo bytes via transport + handle close
+            fallback_bytes, close_payload = result
+            transport = self._transport
+            if fallback_bytes is not None and transport and not transport.is_closing():
+                transport.write(fallback_bytes)
+            if close_payload is not None:
+                ws = self._ws
+                if ws:
+                    ws.feed_frame(0x8, close_payload)
+                    _send_close_response(transport, close_payload)
+        elif isinstance(result, bytes):
+            # Close frame only (bytes) — normal close path
             ws = self._ws
             if ws:
                 ws.feed_frame(0x8, result)
@@ -1061,14 +1193,24 @@ class CppHttpProtocol(asyncio.Protocol):
         ws = self._ws
         if not ws:
             return
-        result = _ws_handle_json_direct(self._ws_ring_buf, data)
-        if result is None:
-            return
-        frames, pong_bytes = result
-        transport = self._transport
-        if pong_bytes is not None and transport and not transport.is_closing():
-            transport.write(pong_bytes)
-        _feed_frames(ws, transport, frames, self._ws_ring_buf)
+        try:
+            result = _ws_handle_json_direct(self._ws_ring_buf, data)
+            if result is None:
+                return
+            frames, pong_bytes = result
+            transport = self._transport
+            if pong_bytes is not None and transport and not transport.is_closing():
+                transport.write(pong_bytes)
+            _feed_frames(ws, transport, frames, self._ws_ring_buf)
+            # Synchronous cork: flush any queued sends immediately (no call_soon latency)
+            if ws._pending_sends:
+                ws._flush_pending()
+        except Exception as e:
+            import traceback
+            print(f"[WS-ERROR] _handle_ws_frames_json: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            if self._transport and not self._transport.is_closing():
+                self._transport.close()
 
     # ── Back-pressure (write flow control) ───────────────────────────────
 
@@ -1077,11 +1219,11 @@ class CppHttpProtocol(asyncio.Protocol):
 
     def resume_writing(self) -> None:
         self._wr_paused = False
-        if self._buf and self._transport and not self._transport.is_closing():
+        if _http_buf_len(self._http_buf) > 0 and self._transport and not self._transport.is_closing():
             self._loop.call_soon(self._drain_buf)
 
     def _drain_buf(self) -> None:
-        if self._wr_paused or not self._buf:
+        if self._wr_paused or _http_buf_len(self._http_buf) == 0:
             return
         self.data_received(b"")
 
@@ -1135,20 +1277,10 @@ class CppHttpProtocol(asyncio.Protocol):
         if not isinstance(body, bytes):
             body = body.encode("utf-8")
         sc = resp_obj.status_code
-        reason = _STATUS_PHRASES.get(sc, "OK")
-        parts = [f"HTTP/1.1 {sc} {reason}\r\n".encode()]
-        seen = set()
-        for k, v in resp_obj.headers.items():
-            kl = k.lower()
-            seen.add(kl)
-            parts.append(f"{k}: {v}\r\n".encode())
-        if "content-length" not in seen:
-            parts.append(f"content-length: {len(body)}\r\n".encode())
-        conn = b"connection: keep-alive\r\n" if keep_alive else b"connection: close\r\n"
-        parts.append(conn)
-        parts.append(b"\r\n")
-        parts.append(body)
-        self._transport.write(b"".join(parts))
+        headers_list = [(k, v) for k, v in resp_obj.headers.items()]
+        self._transport.write(
+            _build_response_from_parts(sc, headers_list, body, keep_alive)
+        )
 
     # ── Async endpoint dispatch ──────────────────────────────────────────
 
@@ -1178,7 +1310,7 @@ class CppHttpProtocol(asyncio.Protocol):
                         if isinstance(chunk, str):
                             chunk = chunk.encode("utf-8")
                         if chunk:
-                            transport.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                            transport.write(_build_chunked_frame(chunk))
                     transport.write(b"0\r\n\r\n")
                 # Handle Starlette Response objects (HTMLResponse, etc.)
                 elif hasattr(raw, "body") and hasattr(raw, "status_code"):
@@ -1281,21 +1413,9 @@ class CppHttpProtocol(asyncio.Protocol):
             return
         try:
             kwargs = dict(path_params) if path_params else {}
-            # Inject WebSocket — use cached signature inspection
+            # Inject WebSocket — use cached signature (pre-computed at registration)
             ep_id = id(endpoint)
-            ws_param = _ws_sig_cache.get(ep_id)
-            if ws_param is None:
-                sig = inspect.signature(endpoint)
-                ws_param = "websocket"  # default
-                for param_name, param in sig.parameters.items():
-                    ann = param.annotation
-                    if param_name == "websocket" or (
-                        ann is not inspect.Parameter.empty
-                        and getattr(ann, "__name__", "") == "WebSocket"
-                    ):
-                        ws_param = param_name
-                        break
-                _ws_sig_cache[ep_id] = ws_param
+            ws_param = _ws_sig_cache.get(ep_id, "websocket")
             kwargs[ws_param] = ws
             await endpoint(**kwargs)
         except Exception as exc:
@@ -1431,21 +1551,32 @@ async def run_server(
     active_connections: set[CppHttpProtocol] = set()
 
     def _protocol_factory() -> CppHttpProtocol:
-        proto = CppHttpProtocol(
-            core_app, loop,
-            keep_alive_timeout=keep_alive_timeout,
-            connections_set=active_connections,
-        )
+        # OPT-14: Reuse protocol objects from pool to reduce __init__ + GC overhead
+        proto = _protocol_pool.acquire(
+            core_app, loop, keep_alive_timeout, active_connections)
         active_connections.add(proto)
         return proto
 
-    server = await loop.create_server(
-        _protocol_factory,
-        host,
-        port,
-        reuse_address=True,
-        backlog=2048,
-    )
+    # SO_REUSEPORT: allows multiple processes to bind the same port (kernel load-balances)
+    reuse_port = (sys.platform != "win32")
+    try:
+        server = await loop.create_server(
+            _protocol_factory,
+            host,
+            port,
+            reuse_address=True,
+            reuse_port=reuse_port,
+            backlog=2048,
+        )
+    except OSError:
+        # SO_REUSEPORT not supported on this kernel — fall back
+        server = await loop.create_server(
+            _protocol_factory,
+            host,
+            port,
+            reuse_address=True,
+            backlog=2048,
+        )
 
     print(f"C++ HTTP server running on http://{host}:{port}")
     print("Press Ctrl+C to stop")

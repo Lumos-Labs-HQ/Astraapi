@@ -321,6 +321,12 @@ static void CoreApp_dealloc(CoreAppObject* self) {
 // ── Forward declarations ─────────────────────────────────────────────────────
 static const char* status_reason(int code);
 
+// Forward declarations for pre-cached status lines (defined after status_reason)
+struct CachedStatusLine { const char* data; size_t len; };
+struct CachedJsonPrefix { const char* data; size_t len; };
+static CachedStatusLine s_status_lines[600];
+static CachedJsonPrefix s_json_prefixes[600];
+
 // ── CoreApp methods ─────────────────────────────────────────────────────────
 
 // Build a complete HTTP response for text/html or application/json content
@@ -330,15 +336,21 @@ static PyObject* build_static_response(
     auto buf = acquire_buffer();
     buf.reserve(256 + body_len);
 
-    static const char prefix[] = "HTTP/1.1 ";
-    buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
-    char sc_buf[8];
-    int sn = fast_i64_to_buf(sc_buf, status_code);
-    buf.insert(buf.end(), sc_buf, sc_buf + sn);
-    buf.push_back(' ');
-    const char* reason = status_reason(status_code);
-    size_t rlen = strlen(reason);
-    buf.insert(buf.end(), reason, reason + rlen);
+    // Use pre-cached status line if available
+    if (status_code >= 0 && status_code < 600 && s_status_lines[status_code].data) {
+        const auto& sl = s_status_lines[status_code];
+        buf.insert(buf.end(), sl.data, sl.data + sl.len - 2);  // exclude \r\n (added with ct_pre below)
+    } else {
+        static const char prefix[] = "HTTP/1.1 ";
+        buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
+        char sc_buf[8];
+        int sn = fast_i64_to_buf(sc_buf, status_code);
+        buf.insert(buf.end(), sc_buf, sc_buf + sn);
+        buf.push_back(' ');
+        const char* reason = status_reason(status_code);
+        size_t rlen = strlen(reason);
+        buf.insert(buf.end(), reason, reason + rlen);
+    }
 
     // Content-Type header
     const char* ct_pre = "\r\ncontent-type: ";
@@ -1977,6 +1989,57 @@ static const char* status_reason(int code) {
     }
 }
 
+// ── Pre-cached status lines: "HTTP/1.1 XXX Reason\r\n" ──────────────────────
+// Eliminates status_reason() lookup + strlen() + per-byte copy on every response.
+// NOTE: CachedStatusLine, CachedJsonPrefix, s_status_lines, s_json_prefixes
+// are forward-declared near top of file (before build_static_response).
+
+// Storage backing for cached strings (static lifetime)
+static char s_status_storage[16384];
+static size_t s_status_storage_used = 0;
+static char s_json_prefix_storage[32768];
+static size_t s_json_prefix_used = 0;
+
+void init_status_line_cache() {
+    struct Entry { int code; const char* reason; };
+    static const Entry entries[] = {
+        {200, "OK"}, {201, "Created"}, {204, "No Content"},
+        {301, "Moved Permanently"}, {302, "Found"}, {304, "Not Modified"},
+        {307, "Temporary Redirect"}, {308, "Permanent Redirect"},
+        {400, "Bad Request"}, {401, "Unauthorized"}, {403, "Forbidden"},
+        {404, "Not Found"}, {405, "Method Not Allowed"},
+        {413, "Payload Too Large"}, {422, "Unprocessable Entity"},
+        {500, "Internal Server Error"}, {502, "Bad Gateway"},
+        {503, "Service Unavailable"},
+    };
+
+    memset(s_status_lines, 0, sizeof(s_status_lines));
+    memset(s_json_prefixes, 0, sizeof(s_json_prefixes));
+
+    for (const auto& e : entries) {
+        if (e.code < 0 || e.code >= 600) continue;
+
+        // Build "HTTP/1.1 XXX Reason\r\n"
+        char* p = s_status_storage + s_status_storage_used;
+        int n = snprintf(p, sizeof(s_status_storage) - s_status_storage_used,
+                         "HTTP/1.1 %d %s\r\n", e.code, e.reason);
+        if (n > 0 && s_status_storage_used + (size_t)n < sizeof(s_status_storage)) {
+            s_status_lines[e.code] = {p, (size_t)n};
+            s_status_storage_used += (size_t)n + 1;
+        }
+
+        // Build "HTTP/1.1 XXX Reason\r\ncontent-type: application/json\r\ncontent-length: "
+        char* jp = s_json_prefix_storage + s_json_prefix_used;
+        int jn = snprintf(jp, sizeof(s_json_prefix_storage) - s_json_prefix_used,
+                          "HTTP/1.1 %d %s\r\ncontent-type: application/json\r\ncontent-length: ",
+                          e.code, e.reason);
+        if (jn > 0 && s_json_prefix_used + (size_t)jn < sizeof(s_json_prefix_storage)) {
+            s_json_prefixes[e.code] = {jp, (size_t)jn};
+            s_json_prefix_used += (size_t)jn + 1;
+        }
+    }
+}
+
 // ── CORS helpers ──────────────────────────────────────────────────────────
 
 // Check if origin is allowed by CORS config. Returns true if allowed.
@@ -2161,8 +2224,10 @@ static const char* try_compress_inline(
 #endif
 
     if (accept_gzip) {
+        // Size-adaptive compression: level 1 for <4KB (speed), 4 for 4-64KB, 6 for >64KB
+        int gz_level = (body_len < 4096) ? 1 : (body_len <= 65536) ? 4 : 6;
         z_stream strm = {};
-        int ret = deflateInit2(&strm, 6, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
+        int ret = deflateInit2(&strm, gz_level, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
         if (ret == Z_OK) {
             out.resize(deflateBound(&strm, (uLong)body_len));
             strm.next_in = (Bytef*)body;
@@ -2208,8 +2273,12 @@ static PyObject* build_http_response_bytes(
     } else if (status_code == 200) {
         // 200 with CORS or compression
         buf.insert(buf.end(), HDR_200_JSON, HDR_200_JSON + sizeof(HDR_200_JSON) - 1);
+    } else if (status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data) {
+        // Cached JSON prefix: "HTTP/1.1 XXX Reason\r\ncontent-type: application/json\r\ncontent-length: "
+        const auto& jp = s_json_prefixes[status_code];
+        buf.insert(buf.end(), jp.data, jp.data + jp.len);
     } else {
-        // General path
+        // Uncached status code — build dynamically
         static const char prefix[] = "HTTP/1.1 ";
         buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
         char sc_buf[8];
@@ -2293,8 +2362,32 @@ static PyObject* build_http_error_response(int status_code, const char* message,
     return result;
 }
 
+// Cached socket FD for direct write (set per-connection from Python side)
+// -1 = not available, use transport.write() fallback
+static thread_local int s_http_fd = -1;
+
 static int write_to_transport(PyObject* transport, PyObject* data) {
     if (!transport || transport == Py_None) return -1;
+
+    // Fast path: direct socket write bypasses asyncio transport overhead
+    // (2 Python method calls: is_closing() + write() → 1 syscall)
+    if (s_http_fd >= 0 && PyBytes_Check(data)) {
+        const char* buf = PyBytes_AS_STRING(data);
+        Py_ssize_t len = PyBytes_GET_SIZE(data);
+        ssize_t written = 0;
+        while (written < len) {
+            ssize_t n = platform_socket_write(s_http_fd,
+                buf + written, (size_t)(len - written));
+            if (n <= 0) {
+                // Socket error — fall through to transport.write() which handles buffering
+                break;
+            }
+            written += n;
+        }
+        if (written == len) return 0;
+        // Partial write — fall through to transport for remaining data
+        // (transport handles write buffering and backpressure)
+    }
 
     if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
     if (!g_str_is_closing) g_str_is_closing = PyUnicode_InternFromString("is_closing");
@@ -2309,6 +2402,171 @@ static int write_to_transport(PyObject* transport, PyObject* data) {
         return -1;
     }
     return 0;
+}
+
+// Set the HTTP socket FD for direct write (called from Python at connection_made)
+PyObject* py_set_http_fd(PyObject* /*self*/, PyObject* arg) {
+    s_http_fd = (int)PyLong_AsLong(arg);
+    if (s_http_fd == -1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        s_http_fd = -1;
+    }
+    Py_RETURN_NONE;
+}
+
+// ── HttpConnectionBuffer — replaces Python bytearray + memmove ──────────────
+// Linear buffer with read/write offsets. Compact only when read_pos > 50% capacity.
+// Eliminates: Python memoryview creation, slice ops, O(N) memmove per request.
+
+class HttpConnectionBuffer {
+    static constexpr size_t INITIAL_CAPACITY = 8192;
+    static constexpr size_t MAX_CAPACITY = 1048576;  // 1MB
+
+    uint8_t* buf_;
+    size_t capacity_;
+    size_t read_pos_;
+    size_t write_pos_;
+
+public:
+    HttpConnectionBuffer()
+        : buf_(static_cast<uint8_t*>(malloc(INITIAL_CAPACITY)))
+        , capacity_(INITIAL_CAPACITY)
+        , read_pos_(0)
+        , write_pos_(0) {}
+
+    ~HttpConnectionBuffer() { free(buf_); }
+
+    bool append(const uint8_t* data, size_t len) {
+        size_t used = write_pos_ - read_pos_;
+        size_t needed = used + len;
+        if (needed > MAX_CAPACITY) return false;
+
+        // Compact if read_pos > 50% of capacity (amortized memmove)
+        if (read_pos_ > capacity_ / 2) {
+            memmove(buf_, buf_ + read_pos_, used);
+            write_pos_ = used;
+            read_pos_ = 0;
+        }
+
+        // Grow if needed
+        if (write_pos_ + len > capacity_) {
+            size_t new_cap = capacity_;
+            while (new_cap < write_pos_ + len) new_cap *= 2;
+            if (new_cap > MAX_CAPACITY) new_cap = MAX_CAPACITY;
+            uint8_t* nb = static_cast<uint8_t*>(realloc(buf_, new_cap));
+            if (!nb) return false;
+            buf_ = nb;
+            capacity_ = new_cap;
+        }
+
+        memcpy(buf_ + write_pos_, data, len);
+        write_pos_ += len;
+        return true;
+    }
+
+    const uint8_t* data() const { return buf_ + read_pos_; }
+    size_t size() const { return write_pos_ - read_pos_; }
+
+    void consume(size_t n) {
+        read_pos_ += n;
+        if (read_pos_ >= write_pos_) {
+            read_pos_ = 0;
+            write_pos_ = 0;
+        }
+    }
+
+    void clear() {
+        read_pos_ = 0;
+        write_pos_ = 0;
+    }
+};
+
+static const char* HTTP_BUF_CAPSULE_NAME = "http_connection_buffer";
+
+namespace {
+void http_buf_destructor(PyObject* capsule) {
+    void* ptr = PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME);
+    if (ptr) delete static_cast<HttpConnectionBuffer*>(ptr);
+}
+}
+
+PyObject* py_http_buf_create(PyObject* /*self*/, PyObject* /*args*/) {
+    auto* buf = new HttpConnectionBuffer();
+    return PyCapsule_New(buf, HTTP_BUF_CAPSULE_NAME, http_buf_destructor);
+}
+
+// http_buf_append: Append data to buffer. Returns True on success, False on overflow.
+PyObject* py_http_buf_append(PyObject* /*self*/, PyObject* args) {
+    PyObject* capsule;
+    Py_buffer py_buf;
+    if (!PyArg_ParseTuple(args, "Oy*", &capsule, &py_buf)) return nullptr;
+
+    auto* buf = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    if (!buf) {
+        PyBuffer_Release(&py_buf);
+        PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
+        return nullptr;
+    }
+
+    bool ok = buf->append(static_cast<const uint8_t*>(py_buf.buf), py_buf.len);
+    PyBuffer_Release(&py_buf);
+
+    if (ok) Py_RETURN_TRUE;
+    Py_RETURN_FALSE;
+}
+
+// http_buf_get_view: Return a memoryview into the readable portion of the buffer.
+// Zero-copy — the memoryview points directly into the C++ buffer.
+PyObject* py_http_buf_get_view(PyObject* /*self*/, PyObject* capsule) {
+    auto* buf = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    if (!buf) {
+        PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
+        return nullptr;
+    }
+    if (buf->size() == 0) Py_RETURN_NONE;
+    return PyMemoryView_FromMemory(
+        (char*)buf->data(), (Py_ssize_t)buf->size(), PyBUF_READ);
+}
+
+// http_buf_consume: Advance read position by N bytes. O(1) — no memmove!
+PyObject* py_http_buf_consume(PyObject* /*self*/, PyObject* args) {
+    PyObject* capsule;
+    Py_ssize_t n;
+    if (!PyArg_ParseTuple(args, "On", &capsule, &n)) return nullptr;
+
+    auto* buf = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    if (!buf) {
+        PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
+        return nullptr;
+    }
+    buf->consume((size_t)n);
+    Py_RETURN_NONE;
+}
+
+// http_buf_clear: Reset buffer to empty state.
+PyObject* py_http_buf_clear(PyObject* /*self*/, PyObject* capsule) {
+    auto* buf = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    if (!buf) {
+        PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
+        return nullptr;
+    }
+    buf->clear();
+    Py_RETURN_NONE;
+}
+
+// http_buf_len: Return readable byte count.
+PyObject* py_http_buf_len(PyObject* /*self*/, PyObject* capsule) {
+    auto* buf = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    if (!buf) {
+        PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
+        return nullptr;
+    }
+    return PyLong_FromSsize_t((Py_ssize_t)buf->size());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2328,13 +2586,19 @@ static int write_to_transport(PyObject* transport, PyObject* data) {
 static PyObject* CoreApp_handle_http(
     CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
 {
-    if (nargs != 2) {
-        PyErr_SetString(PyExc_TypeError, "handle_http requires 2 args (buffer, transport)");
+    if (nargs < 2 || nargs > 3) {
+        PyErr_SetString(PyExc_TypeError, "handle_http requires 2-3 args (buffer, transport[, offset])");
         return nullptr;
     }
 
     PyObject* buffer_obj = args[0];
     PyObject* transport = args[1];
+    // OPT-7: Optional offset parameter eliminates memoryview slicing in Python loop
+    Py_ssize_t offset = 0;
+    if (nargs == 3) {
+        offset = PyLong_AsSsize_t(args[2]);
+        if (offset < 0 && PyErr_Occurred()) return nullptr;
+    }
 
     // Accept any buffer protocol object (bytes, bytearray, memoryview)
     Py_buffer view;
@@ -2347,8 +2611,10 @@ static PyObject* CoreApp_handle_http(
         ~BufferGuard() { PyBuffer_Release(v); }
     } buf_guard{&view};
 
-    char* buf_data = (char*)view.buf;
-    Py_ssize_t buf_len = view.len;
+    // Apply offset (OPT-7: avoids Python memoryview slice creation per request)
+    if (offset > view.len) offset = view.len;
+    char* buf_data = (char*)view.buf + offset;
+    Py_ssize_t buf_len = view.len - offset;
 
     // ── Parse HTTP request ───────────────────────────────────────────────
     ParsedHttpRequest req;
@@ -3132,8 +3398,20 @@ static PyObject* CoreApp_handle_http(
     Py_XDECREF(body_params_local);
 
 body_done:
-    // ── CALL ENDPOINT FROM C++ ───────────────────────────────────────────
-    PyRef coro(PyObject_Call(endpoint_local, g_empty_tuple, kwargs.get()));
+    // ── CALL ENDPOINT FROM C++ (OPT-9: fast-call) ──────────────────────
+    // Use PyObject_CallNoArgs for zero-param endpoints (fastest possible call).
+    // Use PyObject_VectorcallDict for endpoints with params (avoids tuple creation).
+    PyRef coro(nullptr);
+    {
+        Py_ssize_t nkw = PyDict_GET_SIZE(kwargs.get());
+        if (nkw == 0) {
+            // Zero params — fastest path: no args tuple, no kwargs dict
+            coro = PyRef(PyObject_CallNoArgs(endpoint_local));
+        } else {
+            // Use vectorcall dict — avoids creating empty args tuple
+            coro = PyRef(PyObject_VectorcallDict(endpoint_local, nullptr, 0, kwargs.get()));
+        }
+    }
     Py_DECREF(endpoint_local);  // release our strong ref
     if (!coro) {
         if (PyErr_Occurred()) {
@@ -3318,16 +3596,21 @@ body_done:
             auto buf = acquire_buffer();
             buf.reserve(256 + (size_t)resp_body_len);
 
-            // Build HTTP response status line
-            static const char prefix[] = "HTTP/1.1 ";
-            buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
-            char sc_buf[8];
-            int sn = fast_i64_to_buf(sc_buf, resp_sc);
-            buf.insert(buf.end(), sc_buf, sc_buf + sn);
-            buf.push_back(' ');
-            const char* reason = status_reason(resp_sc);
-            size_t rlen = strlen(reason);
-            buf.insert(buf.end(), reason, reason + rlen);
+            // Build HTTP response status line (use cache if available)
+            if (resp_sc > 0 && resp_sc < 600 && s_status_lines[resp_sc].data) {
+                const auto& sl = s_status_lines[resp_sc];
+                buf.insert(buf.end(), sl.data, sl.data + sl.len - 2);  // exclude trailing \r\n
+            } else {
+                static const char prefix[] = "HTTP/1.1 ";
+                buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
+                char sc_buf[8];
+                int sn = fast_i64_to_buf(sc_buf, resp_sc);
+                buf.insert(buf.end(), sc_buf, sc_buf + sn);
+                buf.push_back(' ');
+                const char* reason = status_reason(resp_sc);
+                size_t rlen = strlen(reason);
+                buf.insert(buf.end(), reason, reason + rlen);
+            }
 
             // Emit response headers from raw_headers list
             if (raw_hdrs && PyList_Check(raw_hdrs.get())) {
@@ -4016,6 +4299,142 @@ PyTypeObject CoreAppType = {
 };
 
 // ── Module registration ─────────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Standalone response helpers (called from Python _cpp_server.py)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// build_response_from_parts(status_code, headers_list, body, keep_alive) → bytes
+// Replaces _write_response_obj() Python f-string + b"".join() with single C++ call
+PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
+    int status_code;
+    PyObject* headers_list;
+    Py_buffer body;
+    int keep_alive;
+
+    if (!PyArg_ParseTuple(args, "iOy*p", &status_code, &headers_list, &body, &keep_alive)) {
+        return nullptr;
+    }
+
+    auto buf = acquire_buffer();
+    size_t body_len = (size_t)body.len;
+    buf.reserve(256 + body_len);
+
+    // Status line (use cache if available)
+    if (status_code >= 0 && status_code < 600 && s_status_lines[status_code].data) {
+        const auto& sl = s_status_lines[status_code];
+        buf.insert(buf.end(), sl.data, sl.data + sl.len);
+    } else {
+        static const char prefix[] = "HTTP/1.1 ";
+        buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
+        char sc_buf[8];
+        int sn = fast_i64_to_buf(sc_buf, status_code);
+        buf.insert(buf.end(), sc_buf, sc_buf + sn);
+        buf.push_back(' ');
+        const char* reason = status_reason(status_code);
+        size_t rlen = strlen(reason);
+        buf.insert(buf.end(), reason, reason + rlen);
+        buf.insert(buf.end(), {'\r', '\n'});
+    }
+
+    // Headers from list of (key, value) tuples
+    bool has_content_length = false;
+    Py_ssize_t n_hdrs = PyList_Size(headers_list);
+    for (Py_ssize_t i = 0; i < n_hdrs; i++) {
+        PyObject* item = PyList_GET_ITEM(headers_list, i);
+        PyObject* key = PyTuple_GET_ITEM(item, 0);
+        PyObject* val = PyTuple_GET_ITEM(item, 1);
+
+        Py_ssize_t klen, vlen;
+        const char* kstr = PyUnicode_AsUTF8AndSize(key, &klen);
+        const char* vstr = PyUnicode_AsUTF8AndSize(val, &vlen);
+        if (!kstr || !vstr) {
+            PyBuffer_Release(&body);
+            release_buffer(std::move(buf));
+            return nullptr;
+        }
+
+        buf.insert(buf.end(), kstr, kstr + klen);
+        buf.insert(buf.end(), {':', ' '});
+        buf.insert(buf.end(), vstr, vstr + vlen);
+        buf.insert(buf.end(), {'\r', '\n'});
+
+        // Check if content-length was provided (case-insensitive first char + length match)
+        if (klen == 14) {
+            char c0 = kstr[0];
+            if ((c0 == 'c' || c0 == 'C') && strncasecmp(kstr, "content-length", 14) == 0) {
+                has_content_length = true;
+            }
+        }
+    }
+
+    // Add content-length if not provided by headers
+    if (!has_content_length) {
+        static const char cl_pre[] = "content-length: ";
+        buf.insert(buf.end(), cl_pre, cl_pre + sizeof(cl_pre) - 1);
+        char cl_buf[20];
+        int cl_n = fast_i64_to_buf(cl_buf, (long long)body_len);
+        buf.insert(buf.end(), cl_buf, cl_buf + cl_n);
+        buf.insert(buf.end(), {'\r', '\n'});
+    }
+
+    // Connection header
+    if (keep_alive) {
+        static const char ka[] = "connection: keep-alive\r\n";
+        buf.insert(buf.end(), ka, ka + sizeof(ka) - 1);
+    } else {
+        static const char cl[] = "connection: close\r\n";
+        buf.insert(buf.end(), cl, cl + sizeof(cl) - 1);
+    }
+
+    // End of headers + body
+    buf.insert(buf.end(), {'\r', '\n'});
+    buf.insert(buf.end(), (const char*)body.buf, (const char*)body.buf + body_len);
+    PyBuffer_Release(&body);
+
+    PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    release_buffer(std::move(buf));
+    return result;
+}
+
+// build_chunked_frame(chunk: bytes) → bytes
+// Builds "{hex_len}\r\n{chunk}\r\n" in a single allocation
+// Replaces Python: f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n"
+PyObject* py_build_chunked_frame(PyObject* /*self*/, PyObject* arg) {
+    Py_buffer chunk;
+    if (PyObject_GetBuffer(arg, &chunk, PyBUF_SIMPLE) < 0) {
+        return nullptr;
+    }
+
+    size_t chunk_len = (size_t)chunk.len;
+    if (chunk_len == 0) {
+        PyBuffer_Release(&chunk);
+        return PyBytes_FromStringAndSize("0\r\n\r\n", 5);
+    }
+
+    // Hex encode length: max 16 chars for size_t
+    char hex_buf[20];
+    int hex_len = snprintf(hex_buf, sizeof(hex_buf), "%zx", chunk_len);
+
+    // Total: hex + \r\n + chunk + \r\n
+    size_t total = (size_t)hex_len + 2 + chunk_len + 2;
+    PyObject* result = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)total);
+    if (!result) {
+        PyBuffer_Release(&chunk);
+        return nullptr;
+    }
+
+    char* out = PyBytes_AS_STRING(result);
+    memcpy(out, hex_buf, (size_t)hex_len);
+    out[hex_len] = '\r';
+    out[hex_len + 1] = '\n';
+    memcpy(out + hex_len + 2, chunk.buf, chunk_len);
+    out[hex_len + 2 + chunk_len] = '\r';
+    out[hex_len + 2 + chunk_len + 1] = '\n';
+
+    PyBuffer_Release(&chunk);
+    return result;
+}
 
 int register_app_types(PyObject* module) {
     if (PyType_Ready(&CoreAppType) < 0) return -1;

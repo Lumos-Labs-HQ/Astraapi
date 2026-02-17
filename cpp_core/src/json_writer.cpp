@@ -9,6 +9,14 @@
 #include <cmath>
 #include <mutex>
 
+// SIMD headers for accelerated JSON string escaping
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#include <emmintrin.h>
+#define HAS_SSE2 1
+#else
+#define HAS_SSE2 0
+#endif
+
 extern "C" {
 #include "ryu/ryu.h"
 }
@@ -82,35 +90,94 @@ static inline void buf_push(std::vector<char>& buf, char c) {
 
 // Batch-scan string escaping: copy safe ranges in one memcpy, only branch on escapable chars.
 // Most strings are pure ASCII with no escapes — this is ~3-5x faster than per-character switch.
+// Scalar escape handler (shared by both scalar and SIMD paths)
+static inline void emit_escape(std::vector<char>& buf, unsigned char c) {
+    switch (c) {
+        case '"':  buf.push_back('\\'); buf.push_back('"');  break;
+        case '\\': buf.push_back('\\'); buf.push_back('\\'); break;
+        case '\b': buf.push_back('\\'); buf.push_back('b');  break;
+        case '\f': buf.push_back('\\'); buf.push_back('f');  break;
+        case '\n': buf.push_back('\\'); buf.push_back('n');  break;
+        case '\r': buf.push_back('\\'); buf.push_back('r');  break;
+        case '\t': buf.push_back('\\'); buf.push_back('t');  break;
+        default: {
+            char esc[7];
+            snprintf(esc, sizeof(esc), "\\u%04x", c);
+            buf.insert(buf.end(), esc, esc + 6);
+            break;
+        }
+    }
+}
+
 static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize_t len) {
     buf.push_back('"');
     const char* p = s;
     const char* end = s + len;
     const char* safe = p;
+
+#if HAS_SSE2
+    // SSE2 fast path: scan 16 bytes at a time for characters needing escape.
+    // Characters that need escaping: < 0x20 (control), '"' (0x22), '\\' (0x5C)
+    // Characters >= 0x80 are valid UTF-8 and must NOT be escaped.
+    if (len >= 16) {
+        const __m128i v_space = _mm_set1_epi8(0x20);  // space
+        const __m128i v_quote = _mm_set1_epi8('"');
+        const __m128i v_bslash = _mm_set1_epi8('\\');
+        const __m128i v_high = _mm_set1_epi8((char)0x80);
+
+        const char* simd_end = end - 15;  // safe to read 16 bytes
+        while (p < simd_end) {
+            __m128i chunk = _mm_loadu_si128((const __m128i*)p);
+
+            // Check for bytes < 0x20 (control chars) — treating as unsigned:
+            // We want (byte < 0x20). Use saturating subtract: if byte < 0x20,
+            // then byte - 0x20 underflows to 0 with subs, but we check the other way.
+            // Simpler: compare less-than as signed. Bytes 0x00-0x1F are 0-31 (positive).
+            // But bytes >= 0x80 are negative in signed. So "less than 0x20" catches 0x80+ too.
+            // Fix: mask out high-bit bytes first.
+            __m128i is_high = _mm_and_si128(chunk, v_high);  // isolate bit 7
+            __m128i high_mask = _mm_cmpeq_epi8(is_high, v_high);  // 0xFF where >= 0x80
+
+            // Control chars: byte < 0x20 AND byte < 0x80
+            // Use: subtract 0x20 unsigned, then check if borrow (result >= 0xE0)
+            // Simpler approach: pcmpgtb treats as signed, so bytes 0-31 are fine
+            __m128i is_ctrl = _mm_andnot_si128(high_mask,
+                _mm_cmplt_epi8(chunk, v_space));
+
+            __m128i is_quote = _mm_cmpeq_epi8(chunk, v_quote);
+            __m128i is_bslash = _mm_cmpeq_epi8(chunk, v_bslash);
+            __m128i need_escape = _mm_or_si128(is_ctrl, _mm_or_si128(is_quote, is_bslash));
+
+            int mask = _mm_movemask_epi8(need_escape);
+            if (mask == 0) {
+                // No escapable chars in this 16-byte block — advance
+                p += 16;
+                continue;
+            }
+
+            // Found escapable chars — flush safe range up to first match
+            // __builtin_ctz / _BitScanForward to find first set bit
+#if defined(_MSC_VER)
+            unsigned long idx;
+            _BitScanForward(&idx, (unsigned long)mask);
+            int first = (int)idx;
+#else
+            int first = __builtin_ctz(mask);
+#endif
+            p += first;
+            if (p > safe) buf.insert(buf.end(), safe, p);
+            emit_escape(buf, (unsigned char)*p);
+            safe = ++p;
+        }
+    }
+#endif  // HAS_SSE2
+
+    // Scalar tail (also handles all data when no SSE2)
     while (p < end) {
         unsigned char c = (unsigned char)*p;
-        // Pass through: printable ASCII (except " and \) AND all UTF-8 bytes (>= 0x80).
-        // UTF-8 continuation/lead bytes must NOT be escaped individually — doing so
-        // would produce invalid JSON like "\u00f0\u009f" instead of the original UTF-8.
         if ((c >= 0x20 && c != '"' && c != '\\') || c >= 0x80) { p++; continue; }
-        // Flush safe range
         if (p > safe) buf.insert(buf.end(), safe, p);
-        // Emit escape
-        switch (c) {
-            case '"':  { static const char e[]="\\\""; buf.insert(buf.end(),e,e+2); break; }
-            case '\\': { static const char e[]="\\\\"; buf.insert(buf.end(),e,e+2); break; }
-            case '\b': { static const char e[]="\\b";  buf.insert(buf.end(),e,e+2); break; }
-            case '\f': { static const char e[]="\\f";  buf.insert(buf.end(),e,e+2); break; }
-            case '\n': { static const char e[]="\\n";  buf.insert(buf.end(),e,e+2); break; }
-            case '\r': { static const char e[]="\\r";  buf.insert(buf.end(),e,e+2); break; }
-            case '\t': { static const char e[]="\\t";  buf.insert(buf.end(),e,e+2); break; }
-            default: {
-                char esc[7];
-                snprintf(esc, sizeof(esc), "\\u%04x", c);
-                buf.insert(buf.end(), esc, esc + 6);
-                break;
-            }
-        }
+        emit_escape(buf, c);
         safe = ++p;
     }
     if (p > safe) buf.insert(buf.end(), safe, p);
