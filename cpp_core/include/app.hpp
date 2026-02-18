@@ -126,6 +126,9 @@ struct RouteInfo {
     std::optional<FastRouteSpec> fast_spec;
 };
 
+// ── Rate limiter shard count (outside struct — can't have static constexpr in unnamed struct)
+constexpr int RATE_LIMIT_SHARDS = 16;
+
 // ── CoreApp Python object ───────────────────────────────────────────────────
 
 typedef struct {
@@ -151,13 +154,16 @@ typedef struct {
     std::string docs_url;           // "/docs" (default)
     std::string redoc_url;          // "/redoc" (default)
 
-    // Rate limiting (C++ native)
+    // Rate limiting (C++ native) — sharded for low contention
     bool rate_limit_enabled = false;
     int rate_limit_max_requests = 100;
     int rate_limit_window_seconds = 60;
     struct RateLimitEntry { int count; int64_t window_start_ns; };
-    std::unordered_map<std::string, RateLimitEntry> rate_limit_counters;
-    std::mutex rate_limit_mutex;
+    struct RateLimitShard {
+        std::mutex mutex;
+        std::unordered_map<std::string, RateLimitEntry> counters;
+    };
+    RateLimitShard rate_limit_shards[RATE_LIMIT_SHARDS];
     std::string current_client_ip;
 
     // Post-response hook (for logging middleware)

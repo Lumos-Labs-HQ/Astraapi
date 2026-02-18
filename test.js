@@ -8,16 +8,16 @@ export const options = {
       executor: 'constant-arrival-rate',
       rate: 20000,        
       timeUnit: '1s',
-      duration: '10s',
+      duration: '30s',
 
       preAllocatedVUs: 20000,
-      maxVUs: 20000,
+      maxVUs: 25000,
     },
   },
 };
 
 export default function () {
-  let response = http.get('http://localhost:8002/');
+  let response = http.get('http://localhost:8002');
   check(response, {
     'status is 200': (r) => r.status === 200,
   });

@@ -85,6 +85,10 @@ public:
         // Don't shrink — keep allocated capacity for reuse
     }
 
+    // Shrink buffer if usage dropped well below capacity (reclaim memory)
+    // Called after consume() to avoid permanently holding peak-size buffers
+    void maybe_shrink();
+
 private:
     // Try to grow buffer. Returns true on success.
     bool grow(size_t required);

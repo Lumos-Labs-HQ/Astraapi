@@ -305,8 +305,10 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
         self->rate_limit_enabled = false;
         self->rate_limit_max_requests = 100;
         self->rate_limit_window_seconds = 60;
-        new (&self->rate_limit_counters) std::unordered_map<std::string, CoreAppObject::RateLimitEntry>();
-        new (&self->rate_limit_mutex) std::mutex();
+        for (int i = 0; i < RATE_LIMIT_SHARDS; i++) {
+            new (&self->rate_limit_shards[i].mutex) std::mutex();
+            new (&self->rate_limit_shards[i].counters) std::unordered_map<std::string, CoreAppObject::RateLimitEntry>();
+        }
         new (&self->current_client_ip) std::string();
         self->post_response_hook = nullptr;
     }
@@ -356,8 +358,10 @@ static void CoreApp_dealloc(CoreAppObject* self) {
     self->docs_url.~basic_string();
     self->redoc_url.~basic_string();
     Py_XDECREF(self->post_response_hook);
-    self->rate_limit_counters.~unordered_map();
-    self->rate_limit_mutex.~mutex();
+    for (int i = 0; i < RATE_LIMIT_SHARDS; i++) {
+        self->rate_limit_shards[i].counters.~unordered_map();
+        self->rate_limit_shards[i].mutex.~mutex();
+    }
     self->current_client_ip.~basic_string();
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
@@ -497,7 +501,7 @@ static PyObject* CoreApp_record_request_start(CoreAppObject* self, PyObject*) {
 }
 
 static PyObject* CoreApp_record_request_end(CoreAppObject* self, PyObject*) {
-    self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+    self->active_requests.fetch_sub(1, std::memory_order_release);
     Py_RETURN_NONE;
 }
 
@@ -520,7 +524,7 @@ static PyObject* CoreApp_get_metrics(CoreAppObject* self, PyObject*) {
     PyRef dict(PyDict_New());
     if (!dict) return nullptr;
     PyRef tr(PyLong_FromUnsignedLongLong(self->total_requests.load(std::memory_order_relaxed)));
-    PyRef ar(PyLong_FromLongLong(self->active_requests.load(std::memory_order_relaxed)));
+    PyRef ar(PyLong_FromLongLong(self->active_requests.load(std::memory_order_acquire)));
     PyRef te(PyLong_FromUnsignedLongLong(self->total_errors.load(std::memory_order_relaxed)));
     std::shared_lock lock(self->routes_mutex);
     PyRef rc(PyLong_FromSsize_t((Py_ssize_t)self->routes.size()));
@@ -832,12 +836,26 @@ static inline PyObject* coerce_param(std::string_view val, ParamType type_tag) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// HELPER: Log Python error to stderr before clearing (replaces silent PyErr_Clear)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static void log_and_clear_pyerr(const char* context) {
+    if (!PyErr_Occurred()) return;
+    PyObject *type, *value, *tb;
+    PyErr_Fetch(&type, &value, &tb);
+    PyErr_NormalizeException(&type, &value, &tb);
+    PyRef val_str(value ? PyObject_Str(value) : nullptr);
+    const char* msg = val_str ? PyUnicode_AsUTF8(val_str.get()) : "<unknown>";
+    fprintf(stderr, "[fastapi-cpp] %s: %s\n", context, msg ? msg : "<unknown>");
+    Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HELPER: Build 500 error tuple from pre-built constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
 static inline PyObject* build_500_tuple() {
-    Py_INCREF(g_500_start);
-    Py_INCREF(g_500_body);
+    // PyTuple_Pack INCREFs each item internally — no explicit INCREF needed
     return PyTuple_Pack(2, g_500_start, g_500_body);
 }
 
@@ -1138,7 +1156,7 @@ static PyObject* CoreApp_handle_and_respond(
             if (parsed) {
                 json_body_obj = parsed.release();
             } else {
-                PyErr_Clear();
+                log_and_clear_pyerr("JSON body parse failed");
             }
         }
 
@@ -1202,7 +1220,7 @@ static PyObject* CoreApp_handle_and_respond(
             goto asgi_call_endpoint;
         }
         // Validation error
-        PyErr_Clear();
+        log_and_clear_pyerr("parameter validation failed");
         // Fall through to InlineResult path
     }
     Py_XDECREF(asgi_model_validate);
@@ -2426,15 +2444,12 @@ static int write_to_transport(PyObject* transport, PyObject* data) {
     if (!transport || transport == Py_None) return -1;
 
     if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
-    if (!g_str_is_closing) g_str_is_closing = PyUnicode_InternFromString("is_closing");
 
-    // Check if transport is closing before writing — avoids exception overhead
-    PyRef closing(PyObject_CallMethodNoArgs(transport, g_str_is_closing));
-    if (closing && PyObject_IsTrue(closing.get())) return -1;
-
+    // Skip is_closing() check — direct write is faster and transport.write()
+    // handles closed transport gracefully. Saves one Python method call per request.
     PyRef result(PyObject_CallMethodOneArg(transport, g_str_write, data));
     if (!result) {
-        PyErr_Clear();
+        log_and_clear_pyerr("transport.write() failed");
         return -1;
     }
     return 0;
@@ -2504,6 +2519,14 @@ public:
     void clear() {
         read_pos_ = 0;
         write_pos_ = 0;
+        // Shrink if capacity grew beyond 4x initial to reclaim memory
+        if (capacity_ > INITIAL_CAPACITY * 4) {
+            uint8_t* nb = static_cast<uint8_t*>(realloc(buf_, INITIAL_CAPACITY));
+            if (nb) {
+                buf_ = nb;
+                capacity_ = INITIAL_CAPACITY;
+            }
+        }
     }
 };
 
@@ -2612,7 +2635,7 @@ static inline void fire_post_response_hook(
     if (m && p && sc && dur) {
         PyRef r(PyObject_CallFunctionObjArgs(self->post_response_hook,
                 m.get(), p.get(), sc.get(), dur.get(), nullptr));
-        if (!r) PyErr_Clear();  // Don't crash on hook errors
+        if (!r) log_and_clear_pyerr("post_response_hook error");
     }
 }
 
@@ -2733,7 +2756,7 @@ static PyObject* CoreApp_handle_http(
     auto th_config = self->trusted_host_config.load();
     if (th_config && !host_sv.empty()) {
         if (!check_trusted_host_inline(th_config.get(), host_sv.data, host_sv.len)) {
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             PyRef resp(build_http_error_response(400, "Invalid host header", req.keep_alive));
             if (resp) write_to_transport(transport, resp.get());
             return make_consumed_true(req.total_consumed);
@@ -2747,7 +2770,7 @@ static PyObject* CoreApp_handle_http(
 
     if (has_cors && req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0) {
         // Full CORS preflight response — entirely in C++, no route needed
-        self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+        self->active_requests.fetch_sub(1, std::memory_order_release);
         PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive));
         if (resp) write_to_transport(transport, resp.get());
         return make_consumed_true(req.total_consumed);
@@ -2757,17 +2780,17 @@ static PyObject* CoreApp_handle_http(
     if (req.path.len > 0) {
         std::string_view path_sv(req.path.data, req.path.len);
         if (self->openapi_json_resp && path_sv == self->openapi_url) {
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             write_to_transport(transport, self->openapi_json_resp);
             return make_consumed_true(req.total_consumed);
         }
         if (self->docs_html_resp && path_sv == self->docs_url) {
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             write_to_transport(transport, self->docs_html_resp);
             return make_consumed_true(req.total_consumed);
         }
         if (self->redoc_html_resp && path_sv == self->redoc_url) {
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             write_to_transport(transport, self->redoc_html_resp);
             return make_consumed_true(req.total_consumed);
         }
@@ -2803,7 +2826,7 @@ static PyObject* CoreApp_handle_http(
             }
             ws_lock.unlock();
 
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
 
             if (ws_endpoint) {
@@ -2857,10 +2880,19 @@ static PyObject* CoreApp_handle_http(
     }
 
     // ── Route matching ───────────────────────────────────────────────────
-    // Skip lock when routes are frozen (after startup) — atomic check first
+    // Skip lock when routes are frozen (after startup) — atomic check first.
+    // Auto-freeze on first request if not already frozen to eliminate lock contention.
     bool rt_frozen = self->routes_frozen.load(std::memory_order_acquire);
     std::shared_lock lock(self->routes_mutex, std::defer_lock);
-    if (!rt_frozen) lock.lock();
+    if (!rt_frozen) {
+        // Try to auto-freeze: first request triggers freeze
+        std::unique_lock wlock(self->routes_mutex);
+        if (!self->routes_frozen.load(std::memory_order_relaxed)) {
+            self->routes_frozen.store(true, std::memory_order_release);
+        }
+        rt_frozen = true;
+        // wlock released here — routes are now frozen, no lock needed going forward
+    }
 
     auto match = self->router.at(req.path.data, req.path.len);
     if (!match) {
@@ -2874,7 +2906,7 @@ static PyObject* CoreApp_handle_http(
         auto alt_match = self->router.at(alt_path.c_str(), alt_path.size());
         if (alt_match) {
             if (!rt_frozen) lock.unlock();
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             // Build 307 redirect response
             auto buf = acquire_buffer();
             buf.reserve(256);
@@ -2895,7 +2927,7 @@ static PyObject* CoreApp_handle_http(
         }
 
         if (!rt_frozen) lock.unlock();
-        self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+        self->active_requests.fetch_sub(1, std::memory_order_release);
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
@@ -2907,7 +2939,7 @@ static PyObject* CoreApp_handle_http(
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
         if (!rt_frozen) lock.unlock();
-        self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+        self->active_requests.fetch_sub(1, std::memory_order_release);
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
@@ -2923,7 +2955,7 @@ static PyObject* CoreApp_handle_http(
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (!(route.method_mask & req_method)) {
             if (!rt_frozen) lock.unlock();
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
@@ -2933,12 +2965,14 @@ static PyObject* CoreApp_handle_http(
         }
     }
 
-    // ── Rate limiting (C++ native, per client IP) ─────────────────────
+    // ── Rate limiting (C++ native, per client IP) — sharded for low contention
     if (self->rate_limit_enabled && !self->current_client_ip.empty()) {
         auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
         int64_t window_ns = (int64_t)self->rate_limit_window_seconds * 1'000'000'000LL;
-        std::lock_guard<std::mutex> rl_lock(self->rate_limit_mutex);
-        auto& entry = self->rate_limit_counters[self->current_client_ip];
+        size_t shard_idx = std::hash<std::string>{}(self->current_client_ip) % RATE_LIMIT_SHARDS;
+        auto& shard = self->rate_limit_shards[shard_idx];
+        std::lock_guard<std::mutex> rl_lock(shard.mutex);
+        auto& entry = shard.counters[self->current_client_ip];
         if (now_ns - entry.window_start_ns > window_ns) {
             entry.count = 1;
             entry.window_start_ns = now_ns;
@@ -2946,18 +2980,30 @@ static PyObject* CoreApp_handle_http(
             entry.count++;
         }
         if (entry.count > self->rate_limit_max_requests) {
+            // Unlock route lock before writing response
             if (!rt_frozen) lock.unlock();
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             PyRef resp(build_http_error_response(429, "Rate limit exceeded", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
             return make_consumed_true(req.total_consumed);
         }
+        // Periodic cleanup: sweep stale entries every 10K requests
+        static thread_local uint32_t rl_cleanup_counter = 0;
+        if (++rl_cleanup_counter >= 10000) {
+            rl_cleanup_counter = 0;
+            for (auto it = shard.counters.begin(); it != shard.counters.end(); ) {
+                if (now_ns - it->second.window_start_ns > 2 * window_ns)
+                    it = shard.counters.erase(it);
+                else
+                    ++it;
+            }
+        }
     }
 
     if (!route.fast_spec) {
         if (!rt_frozen) lock.unlock();
-        self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+        self->active_requests.fetch_sub(1, std::memory_order_release);
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
@@ -3320,7 +3366,8 @@ static PyObject* CoreApp_handle_http(
                         PyObject_SetAttr(dep_raw, s_fut_blocking_di, Py_False);
                     }
 
-                    self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                    // NOTE: Do NOT decrement active_requests here — Python will call
+                    // record_request_end() after async DI completion
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     Py_XDECREF(body_params_local);
 
@@ -3363,7 +3410,7 @@ static PyObject* CoreApp_handle_http(
                         fire_post_response_hook(self, req.method.data, req.method.len,
                                                 req.path.data, req.path.len, hook_status, request_start_time);
                     }
-                    self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                    self->active_requests.fetch_sub(1, std::memory_order_release);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     Py_DECREF(endpoint_local);
                     Py_XDECREF(body_params_local);
@@ -3389,7 +3436,7 @@ static PyObject* CoreApp_handle_http(
                     // If there are validation errors, return 422
                     if (dep_errors && PyList_Check(dep_errors) && PyList_GET_SIZE(dep_errors) > 0) {
                         Py_DECREF(dep_raw);
-                        self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                        self->active_requests.fetch_sub(1, std::memory_order_release);
                         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                         Py_DECREF(endpoint_local);
                         Py_XDECREF(body_params_local);
@@ -3429,7 +3476,7 @@ static PyObject* CoreApp_handle_http(
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, hook_status, request_start_time);
             }
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
             Py_DECREF(endpoint_local);
             Py_XDECREF(body_params_local);
@@ -3490,7 +3537,7 @@ static PyObject* CoreApp_handle_http(
                             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                             Py_DECREF(endpoint_local);
                             Py_DECREF(body_params_local);
-                            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                            self->active_requests.fetch_sub(1, std::memory_order_release);
                             self->total_errors.fetch_add(1, std::memory_order_relaxed);
                             return make_consumed_true(req.total_consumed);
                         }
@@ -3562,7 +3609,7 @@ static PyObject* CoreApp_handle_http(
                                 if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                                 Py_DECREF(endpoint_local);
                                 Py_DECREF(body_params_local);
-                                self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                                self->active_requests.fetch_sub(1, std::memory_order_release);
                                 self->total_errors.fetch_add(1, std::memory_order_relaxed);
                                 return make_consumed_true(req.total_consumed);
                             }
@@ -3613,7 +3660,7 @@ static PyObject* CoreApp_handle_http(
             ir->endpoint = endpoint_local;
             ir->body_params = body_params_local;
 
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             return make_consumed_obj(req.total_consumed, (PyObject*)ir);
         }
     }
@@ -3669,10 +3716,13 @@ body_done:
                                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                             if (resp) write_to_transport(transport, resp.get());
                         }
+                    } else {
+                        // Handler raised an exception — clear it before falling through to 500
+                        PyErr_Clear();
                     }
                     fire_post_response_hook(self, req.method.data, req.method.len,
                                             req.path.data, req.path.len, scode, request_start_time);
-                    self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                    self->active_requests.fetch_sub(1, std::memory_order_release);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(req.total_consumed);
                 }
@@ -3687,7 +3737,7 @@ body_done:
                     if (resp) write_to_transport(transport, resp.get());
                     fire_post_response_hook(self, req.method.data, req.method.len,
                                             req.path.data, req.path.len, scode, request_start_time);
-                    self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                    self->active_requests.fetch_sub(1, std::memory_order_release);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(req.total_consumed);
                 }
@@ -3700,7 +3750,7 @@ body_done:
         if (resp) write_to_transport(transport, resp.get());
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, 500, request_start_time);
-        self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+        self->active_requests.fetch_sub(1, std::memory_order_release);
         self->total_errors.fetch_add(1, std::memory_order_relaxed);
         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
         return make_consumed_true(req.total_consumed);
@@ -3741,7 +3791,7 @@ body_done:
                 PyRef resp(build_http_error_response(422, "Response validation error", req.keep_alive,
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
-                self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                self->active_requests.fetch_sub(1, std::memory_order_release);
                 return make_consumed_true(req.total_consumed);
             }
 
@@ -3770,7 +3820,7 @@ body_done:
                 PyRef resp(build_http_error_response(500, "JSON serialization failed", req.keep_alive,
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
-                self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                self->active_requests.fetch_sub(1, std::memory_order_release);
                 self->total_errors.fetch_add(1, std::memory_order_relaxed);
                 return make_consumed_true(req.total_consumed);
             }
@@ -3808,7 +3858,7 @@ body_done:
 
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, status_code_local, request_start_time);
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             return make_consumed_true(req.total_consumed);
         }
 
@@ -3910,7 +3960,7 @@ body_done:
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, resp_sc, request_start_time);
             Py_DECREF(raw_result);
-            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            self->active_requests.fetch_sub(1, std::memory_order_release);
             return make_consumed_true(req.total_consumed);
         }
 
@@ -3928,7 +3978,7 @@ body_done:
         }
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, status_code_local, request_start_time);
-        self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+        self->active_requests.fetch_sub(1, std::memory_order_release);
         return make_consumed_true(req.total_consumed);
     }
 
@@ -3936,7 +3986,8 @@ body_done:
         // Endpoint suspended — needs real async I/O
         // Return (consumed, ("async", coro, yielded, status_code, keep_alive)) for Python
         // raw_result is the yielded Future — pass it so Python can await it properly
-        self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+        // NOTE: Do NOT decrement active_requests here — Python will call
+        // record_request_end() after async completion
 
         // Reset _asyncio_future_blocking — C++ intercepted the yield before
         // asyncio's Task.__step could clear it. Python needs to re-await this
@@ -3989,7 +4040,7 @@ body_done:
                 }
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, scode, request_start_time);
-                self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                self->active_requests.fetch_sub(1, std::memory_order_release);
                 return make_consumed_true(req.total_consumed);
             }
 
@@ -4003,7 +4054,7 @@ body_done:
                 if (resp) write_to_transport(transport, resp.get());
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, scode, request_start_time);
-                self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                self->active_requests.fetch_sub(1, std::memory_order_release);
                 return make_consumed_true(req.total_consumed);
             }
         }
@@ -4015,7 +4066,7 @@ body_done:
     if (resp) write_to_transport(transport, resp.get());
     fire_post_response_hook(self, req.method.data, req.method.len,
                             req.path.data, req.path.len, 500, request_start_time);
-    self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+    self->active_requests.fetch_sub(1, std::memory_order_release);
     self->total_errors.fetch_add(1, std::memory_order_relaxed);
     return make_consumed_true(req.total_consumed);
 }
@@ -4094,7 +4145,7 @@ static PyObject* CoreApp_build_response(
     auto json_buf = acquire_buffer();
     if (write_json(content, json_buf, 0) < 0) {
         release_buffer(std::move(json_buf));
-        PyErr_Clear();
+        log_and_clear_pyerr("JSON serialization failed");
         return build_http_error_response(500, "JSON serialization failed", keep_alive);
     }
 

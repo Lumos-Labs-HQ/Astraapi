@@ -435,6 +435,7 @@ class CppWebSocket:
         try:
             self._transport.write(frame)
         except Exception:
+            logger.debug("WS close frame write failed", exc_info=True)
             return
         # Wait for peer close response (graceful handshake)
         try:
@@ -1116,21 +1117,21 @@ class CppHttpProtocol(asyncio.Protocol):
                     first_yield._asyncio_future_blocking = False
                     task = self._loop.create_task(
                         self._handle_async(coro, first_yield, status_code, keep_alive))
-                    self._pending_tasks.add(task)
                     task.add_done_callback(self._pending_tasks.discard)
+                    self._pending_tasks.add(task)
 
                 elif tag == "async_di":
                     _, di_coro, first_yield, endpoint, kwargs, sc, ka = result_obj
                     first_yield._asyncio_future_blocking = False
                     task = self._loop.create_task(
                         self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka))
-                    self._pending_tasks.add(task)
                     task.add_done_callback(self._pending_tasks.discard)
+                    self._pending_tasks.add(task)
 
             elif IR and type(result_obj) is IR:
                 task = self._loop.create_task(self._handle_pydantic(result_obj))
-                self._pending_tasks.add(task)
                 task.add_done_callback(self._pending_tasks.discard)
+                self._pending_tasks.add(task)
 
         mv.release()
         if offset > 0:
@@ -1356,10 +1357,11 @@ class CppHttpProtocol(asyncio.Protocol):
                                 transport.write(_build_chunked_frame(chunk))
                         transport.write(b"0\r\n\r\n")
                     except Exception:
+                        logger.warning("Streaming response error", exc_info=True)
                         try:
                             transport.write(b"0\r\n\r\n")
                         except Exception:
-                            pass
+                            logger.debug("Failed to write chunked trailer", exc_info=True)
                 # Handle Starlette Response objects (HTMLResponse, etc.)
                 elif hasattr(raw, "body") and hasattr(raw, "status_code"):
                     self._write_response_obj(raw, keep_alive)
@@ -1378,6 +1380,8 @@ class CppHttpProtocol(asyncio.Protocol):
                 await background()
         except Exception as exc:
             self._write_error(exc, keep_alive)
+        finally:
+            self._core.record_request_end()
 
     async def _handle_async_di(
         self, di_coro: Any, first_yield: Any, endpoint: Any, kwargs: dict,
@@ -1420,6 +1424,8 @@ class CppHttpProtocol(asyncio.Protocol):
                 await background()
         except Exception as exc:
             self._write_error(exc, keep_alive)
+        finally:
+            self._core.record_request_end()
 
     # ── Pydantic body validation path ────────────────────────────────────
 
@@ -1457,6 +1463,8 @@ class CppHttpProtocol(asyncio.Protocol):
                 await background()
         except Exception as exc:
             self._write_error(exc, True)
+        finally:
+            self._core.record_request_end()
 
     # ── WebSocket lifecycle handler ──────────────────────────────────────
 
@@ -1592,7 +1600,7 @@ async def run_server(
                 schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
                 core_app.set_openapi_schema(schema_json)
         except Exception:
-            pass  # Non-fatal — /docs won't work but server still runs
+            logger.debug("OpenAPI schema generation failed", exc_info=True)
 
     # ── Lifespan context manager detection ──────────────────────────────
     router = getattr(app, "router", None)

@@ -177,6 +177,42 @@ void WsRingBuffer::consume(size_t n) {
     }
 }
 
+void WsRingBuffer::maybe_shrink() {
+    // Shrink if capacity grew far beyond current usage to reclaim memory.
+    // Only shrink when usage drops below 25% of capacity AND capacity is
+    // at least 4x the default. Avoids thrashing for small buffers.
+    if (capacity_ <= DEFAULT_CAPACITY) return;
+    size_t used = readable();
+    if (used >= capacity_ / 4) return;
+
+    // Target: next power of 2 >= max(used*2, DEFAULT_CAPACITY)
+    size_t target = (used * 2 > DEFAULT_CAPACITY) ? used * 2 : DEFAULT_CAPACITY;
+    size_t new_cap = DEFAULT_CAPACITY;
+    while (new_cap < target) new_cap <<= 1;
+    if (new_cap >= capacity_) return;
+
+    uint8_t* new_buf = alloc_aligned(64, new_cap);
+    if (!new_buf) return;
+
+    // Copy existing data contiguously into new buffer
+    if (used > 0) {
+        size_t read_idx = read_pos_ & (capacity_ - 1);
+        size_t first = capacity_ - read_idx;
+        if (first >= used) {
+            memcpy(new_buf, buffer_ + read_idx, used);
+        } else {
+            memcpy(new_buf, buffer_ + read_idx, first);
+            memcpy(new_buf + first, buffer_, used - first);
+        }
+    }
+
+    free_aligned(buffer_);
+    buffer_ = new_buf;
+    capacity_ = new_cap;
+    read_pos_ = 0;
+    write_pos_ = used;
+}
+
 std::pair<uint8_t*, size_t> WsRingBuffer::readable_contiguous() {
     if (empty()) return {nullptr, 0};
 
@@ -216,6 +252,13 @@ std::pair<uint8_t*, size_t> WsRingBuffer::readable_contiguous() {
 
     read_pos_ = 0;
     write_pos_ = total;
+
+    // Shrink thread-local scratch if it grew too large (> 64KB)
+    if (scratch.capacity() > 65536) {
+        scratch.clear();
+        scratch.shrink_to_fit();
+    }
+
     return {buffer_, total};
 }
 
@@ -374,6 +417,7 @@ PyObject* py_ws_ring_buffer_consume(PyObject* /*self*/, PyObject* args) {
     }
 
     state->ring.consume(static_cast<size_t>(n));
+    state->ring.maybe_shrink();
     Py_RETURN_NONE;
 }
 
