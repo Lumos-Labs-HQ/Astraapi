@@ -30,6 +30,7 @@ static PyObject* s_uuid_type = nullptr;        // uuid.UUID
 static PyObject* s_enum_type = nullptr;        // enum.Enum
 static PyObject* s_isoformat = nullptr;        // cached "isoformat" string
 static PyObject* s_value = nullptr;            // cached "value" string
+static PyObject* s_model_dump = nullptr;       // cached "model_dump" string (Pydantic v2)
 
 // TS-1: Thread-safe lazy init for free-threaded Python (PEP 703) readiness
 static std::once_flag s_types_init_flag;
@@ -38,6 +39,7 @@ static void _do_ensure_special_types() {
 
     s_isoformat = PyUnicode_InternFromString("isoformat");
     s_value = PyUnicode_InternFromString("value");
+    s_model_dump = PyUnicode_InternFromString("model_dump");
 
     // datetime module
     PyRef dt_mod(PyImport_ImportModule("datetime"));
@@ -385,6 +387,19 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         return 0;
     }
 
+    // Pydantic v2 model → call model_dump() to get a dict, then serialize
+    if (s_model_dump) {
+        PyObject* dump_method = PyObject_GetAttr(obj, s_model_dump);
+        if (dump_method) {
+            PyRef dict_result(PyObject_CallNoArgs(dump_method));
+            Py_DECREF(dump_method);
+            if (dict_result) return write_json(dict_result.get(), buf, depth);
+            PyErr_Clear();
+        } else {
+            PyErr_Clear();
+        }
+    }
+
     // Fallback: try str()
     PyObject* str_repr = PyObject_Str(obj);
     if (!str_repr) return -1;
@@ -405,6 +420,7 @@ void json_writer_cleanup() {
     Py_CLEAR(s_enum_type);
     Py_CLEAR(s_isoformat);
     Py_CLEAR(s_value);
+    Py_CLEAR(s_model_dump);
 }
 
 PyObject* serialize_to_json_pybytes(PyObject* obj) {

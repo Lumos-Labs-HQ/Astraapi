@@ -45,13 +45,27 @@ async def _resume_coro(coro, first_yield):
     """Resume a coroutine that already yielded once (endpoint with real I/O).
 
     C++ drove the first step via PyIter_Send; this finishes the rest.
+    Mimics asyncio Task.__step: on await exception, throws it back into
+    the coroutine so user-defined handlers (try/except) work correctly.
     """
-    result = await first_yield
-    try:
-        while True:
-            result = await coro.send(result)
-    except StopIteration as e:
-        return e.value
+    next_yield = first_yield
+    while True:
+        try:
+            result = await next_yield
+        except BaseException as exc:
+            try:
+                next_yield = coro.throw(type(exc), exc, exc.__traceback__)
+            except StopIteration as e:
+                return e.value
+        else:
+            try:
+                next_yield = coro.send(result)
+            except StopIteration as e:
+                return e.value
+        try:
+            next_yield._asyncio_future_blocking = False
+        except AttributeError:
+            pass
 
 
 class CoreASGIApp:

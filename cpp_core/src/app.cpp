@@ -2388,13 +2388,6 @@ static PyObject* build_http_error_response(int status_code, const char* message,
     return result;
 }
 
-// Fast variant: skip is_closing() check for sync path where transport is already validated
-static int write_to_transport_fast(PyObject* transport, PyObject* data) {
-    if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
-    PyRef result(PyObject_CallMethodOneArg(transport, g_str_write, data));
-    if (!result) { PyErr_Clear(); return -1; }
-    return 0;
-}
 
 static int write_to_transport(PyObject* transport, PyObject* data) {
     if (!transport || transport == Py_None) return -1;
@@ -3167,7 +3160,16 @@ static PyObject* CoreApp_handle_http(
                     dep_resolved = true;
                 } else if (dep_send == PYGEN_NEXT) {
                     // Async dependency — return to Python for awaiting
-                    Py_XDECREF(dep_raw);
+                    // dep_raw is the yielded Future — pass it so Python can await it properly
+
+                    // Reset _asyncio_future_blocking — C++ intercepted the yield
+                    // before asyncio's Task.__step could clear it.
+                    static PyObject* s_fut_blocking_di = nullptr;
+                    if (!s_fut_blocking_di) s_fut_blocking_di = PyUnicode_InternFromString("_asyncio_future_blocking");
+                    if (dep_raw) {
+                        PyObject_SetAttr(dep_raw, s_fut_blocking_di, Py_False);
+                    }
+
                     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     Py_XDECREF(body_params_local);
@@ -3178,12 +3180,44 @@ static PyObject* CoreApp_handle_http(
 
                     PyObject* ka = req.keep_alive ? Py_True : Py_False;
                     Py_INCREF(ka);
-                    PyRef di_info(PyTuple_Pack(6, s_async_di_tag, dep_call_result.release(),
-                                 endpoint_local, kwargs.release(),
+                    PyRef di_info(PyTuple_Pack(7, s_async_di_tag, dep_call_result.release(),
+                                 dep_raw, endpoint_local, kwargs.release(),
                                  get_cached_status(status_code_local), ka));
+                    Py_XDECREF(dep_raw);
                     return make_consumed_obj(req.total_consumed, di_info.release());
                 } else {
-                    PyErr_Clear();
+                    // Async dep_solver raised immediately (e.g., HTTPException from auth check)
+                    if (PyErr_Occurred()) {
+                        if (!s_http_exc_type) {
+                            PyRef mod(PyImport_ImportModule("starlette.exceptions"));
+                            if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+                        }
+                        PyObject *dep_et, *dep_ev, *dep_tb;
+                        PyErr_Fetch(&dep_et, &dep_ev, &dep_tb);
+                        if (s_http_exc_type && dep_et && PyObject_IsSubclass(dep_et, s_http_exc_type)) {
+                            PyErr_NormalizeException(&dep_et, &dep_ev, &dep_tb);
+                            PyRef detail(PyObject_GetAttrString(dep_ev, "detail"));
+                            PyRef sc(PyObject_GetAttrString(dep_ev, "status_code"));
+                            int scode = sc ? (int)PyLong_AsLong(sc.get()) : 500;
+                            if (scode == -1 && PyErr_Occurred()) { PyErr_Clear(); scode = 500; }
+                            PyRef detail_str(detail ? PyObject_Str(detail.get()) : nullptr);
+                            const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
+                            Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
+                            PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error",
+                                       req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                            if (resp) write_to_transport(transport, resp.get());
+                        } else {
+                            Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
+                            PyRef resp(build_http_error_response(500, "Internal Server Error",
+                                       req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                            if (resp) write_to_transport(transport, resp.get());
+                        }
+                    }
+                    self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                    if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                    Py_DECREF(endpoint_local);
+                    Py_XDECREF(body_params_local);
+                    return make_consumed_true(req.total_consumed);
                 }
             } else if (PyTuple_Check(dep_call_result.get())) {
                 // Sync dep solver — result is already the tuple, no coroutine overhead
@@ -3218,7 +3252,38 @@ static PyObject* CoreApp_handle_http(
                 Py_DECREF(dep_raw);
             }
         } else {
-            PyErr_Clear();
+            // Sync dep_solver raised — check for HTTPException (auth/permission errors)
+            if (PyErr_Occurred()) {
+                if (!s_http_exc_type) {
+                    PyRef mod(PyImport_ImportModule("starlette.exceptions"));
+                    if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+                }
+                PyObject *dep_et, *dep_ev, *dep_tb;
+                PyErr_Fetch(&dep_et, &dep_ev, &dep_tb);
+                if (s_http_exc_type && dep_et && PyObject_IsSubclass(dep_et, s_http_exc_type)) {
+                    PyErr_NormalizeException(&dep_et, &dep_ev, &dep_tb);
+                    PyRef detail(PyObject_GetAttrString(dep_ev, "detail"));
+                    PyRef sc(PyObject_GetAttrString(dep_ev, "status_code"));
+                    int scode = sc ? (int)PyLong_AsLong(sc.get()) : 500;
+                    if (scode == -1 && PyErr_Occurred()) { PyErr_Clear(); scode = 500; }
+                    PyRef detail_str(detail ? PyObject_Str(detail.get()) : nullptr);
+                    const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
+                    Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
+                    PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error",
+                               req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                    if (resp) write_to_transport(transport, resp.get());
+                } else {
+                    Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
+                    PyRef resp(build_http_error_response(500, "Internal Server Error",
+                               req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                    if (resp) write_to_transport(transport, resp.get());
+                }
+            }
+            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+            Py_DECREF(endpoint_local);
+            Py_XDECREF(body_params_local);
+            return make_consumed_true(req.total_consumed);
         }
     }
 
@@ -3711,9 +3776,18 @@ body_done:
 
     if (send_status == PYGEN_NEXT) {
         // Endpoint suspended — needs real async I/O
-        // Return (consumed, ("async", coro, status_code, keep_alive)) for Python
+        // Return (consumed, ("async", coro, yielded, status_code, keep_alive)) for Python
+        // raw_result is the yielded Future — pass it so Python can await it properly
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
-        Py_XDECREF(raw_result);
+
+        // Reset _asyncio_future_blocking — C++ intercepted the yield before
+        // asyncio's Task.__step could clear it. Python needs to re-await this
+        // future, which requires fut_blocking to be False.
+        static PyObject* s_fut_blocking = nullptr;
+        if (!s_fut_blocking) s_fut_blocking = PyUnicode_InternFromString("_asyncio_future_blocking");
+        if (raw_result) {
+            PyObject_SetAttr(raw_result, s_fut_blocking, Py_False);
+        }
 
         static PyObject* s_async_tag = nullptr;
         if (!s_async_tag) s_async_tag = PyUnicode_InternFromString("async");
@@ -3721,8 +3795,9 @@ body_done:
 
         PyObject* ka = req.keep_alive ? Py_True : Py_False;
         Py_INCREF(ka);
-        PyRef async_info(PyTuple_Pack(4, s_async_tag, coro.release(),
-                         get_cached_status(status_code_local), ka));
+        PyRef async_info(PyTuple_Pack(5, s_async_tag, coro.release(),
+                         raw_result, get_cached_status(status_code_local), ka));
+        Py_XDECREF(raw_result);
         return make_consumed_obj(req.total_consumed, async_info.release());
     }
 

@@ -852,6 +852,38 @@ class _ProtocolPool:
 _protocol_pool = _ProtocolPool()
 
 
+# ── Coroutine driver — properly forwards exceptions via throw() ──────────────
+
+async def _drive_coro(coro: Any, first_yield: Any) -> Any:
+    """Drive a partially-consumed coroutine to completion.
+
+    C++ drove the first step via PyIter_Send; this finishes the rest.
+    Mimics asyncio Task.__step: on await exception, throws it back into
+    the coroutine so user-defined handlers (try/except) work correctly.
+    """
+    next_yield = first_yield
+    while True:
+        try:
+            result = await next_yield
+        except BaseException as exc:
+            # Throw exception into coroutine so its handlers can catch it
+            try:
+                next_yield = coro.throw(type(exc), exc, exc.__traceback__)
+            except StopIteration as e:
+                return e.value
+            # If coro.throw raises (user didn't handle), let it propagate
+        else:
+            try:
+                next_yield = coro.send(result)
+            except StopIteration as e:
+                return e.value
+        # Reset _asyncio_future_blocking — C++ bypassed Task.__step
+        try:
+            next_yield._asyncio_future_blocking = False
+        except AttributeError:
+            pass
+
+
 class CppHttpProtocol(asyncio.Protocol):
     """Per-connection HTTP/1.1 protocol with WebSocket upgrade support.
 
@@ -1073,16 +1105,21 @@ class CppHttpProtocol(asyncio.Protocol):
                     return  # connection is now WebSocket
 
                 elif tag == "async":
-                    _, coro, status_code, keep_alive = result_obj
+                    _, coro, first_yield, status_code, keep_alive = result_obj
+                    # C++ PyIter_Send intercepted the yield before asyncio's
+                    # Task.__step could reset _asyncio_future_blocking. Clear it
+                    # so the new await can proceed normally.
+                    first_yield._asyncio_future_blocking = False
                     task = self._loop.create_task(
-                        self._handle_async(coro, status_code, keep_alive))
+                        self._handle_async(coro, first_yield, status_code, keep_alive))
                     self._pending_tasks.add(task)
                     task.add_done_callback(self._pending_tasks.discard)
 
                 elif tag == "async_di":
-                    _, di_coro, endpoint, kwargs, sc, ka = result_obj
+                    _, di_coro, first_yield, endpoint, kwargs, sc, ka = result_obj
+                    first_yield._asyncio_future_blocking = False
                     task = self._loop.create_task(
-                        self._handle_async_di(di_coro, endpoint, kwargs, sc, ka))
+                        self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka))
                     self._pending_tasks.add(task)
                     task.add_done_callback(self._pending_tasks.discard)
 
@@ -1264,12 +1301,31 @@ class CppHttpProtocol(asyncio.Protocol):
             _build_response_from_parts(sc, headers_list, body, keep_alive)
         )
 
+    def _write_error(self, exc: Exception, keep_alive: bool) -> None:
+        """Write error response — handles HTTPException with proper status code."""
+        if self._transport and not self._transport.is_closing():
+            from fastapi.exceptions import HTTPException
+            if isinstance(exc, HTTPException):
+                detail = exc.detail if isinstance(exc.detail, (dict, list)) else {"detail": exc.detail}
+                resp = self._core.build_response(detail, exc.status_code, keep_alive)
+                if resp:
+                    self._transport.write(resp)
+                    return
+            logger.exception("Unhandled exception in endpoint")
+            self._transport.write(_500_RESP)
+
     # ── Async endpoint dispatch ──────────────────────────────────────────
 
-    async def _handle_async(self, coro: Any, status_code: int, keep_alive: bool) -> None:
-        """Await async endpoint coroutine, serialize + write response."""
+    async def _handle_async(self, coro: Any, first_yield: Any, status_code: int, keep_alive: bool) -> None:
+        """Await async endpoint coroutine, serialize + write response.
+
+        C++ partially drove the coroutine via PyIter_Send and passed
+        the yielded awaitable (first_yield). We finish execution here.
+        Properly forwards exceptions back into the coroutine via throw()
+        so user-defined exception handlers (e.g. try/except in endpoints) work.
+        """
         try:
-            raw = await coro
+            raw = await _drive_coro(coro, first_yield)
             transport = self._transport
             if transport and not transport.is_closing():
                 # StreamingResponse — chunked transfer encoding
@@ -1304,6 +1360,9 @@ class CppHttpProtocol(asyncio.Protocol):
                 elif hasattr(raw, "body") and hasattr(raw, "status_code"):
                     self._write_response_obj(raw, keep_alive)
                 else:
+                    # Pydantic models → dict for JSON serialization
+                    if hasattr(raw, 'model_dump'):
+                        raw = raw.model_dump(mode='json')
                     resp = self._core.build_response(raw, status_code, keep_alive)
                     if resp:
                         transport.write(resp)
@@ -1313,19 +1372,21 @@ class CppHttpProtocol(asyncio.Protocol):
             background = getattr(raw, 'background', None)
             if background is not None:
                 await background()
-        except Exception:
-            logger.exception("Unhandled exception in endpoint")
-            if self._transport and not self._transport.is_closing():
-                self._transport.write(_500_RESP)
+        except Exception as exc:
+            self._write_error(exc, keep_alive)
 
     async def _handle_async_di(
-        self, di_coro: Any, endpoint: Any, kwargs: dict,
+        self, di_coro: Any, first_yield: Any, endpoint: Any, kwargs: dict,
         status_code: int, keep_alive: bool
     ) -> None:
-        """Complete async DI resolution, then call endpoint + write response."""
+        """Complete async DI resolution, then call endpoint + write response.
+
+        C++ partially drove di_coro via PyIter_Send and passed
+        the yielded awaitable (first_yield). We finish DI resolution here.
+        """
         try:
-            # Complete DI resolution
-            solved = await di_coro
+            # Resume DI coroutine with the yielded awaitable
+            solved = await _drive_coro(di_coro, first_yield)
             if isinstance(solved, tuple) and len(solved) >= 2:
                 values, errors = solved[0], solved[1]
                 if errors:
@@ -1341,6 +1402,9 @@ class CppHttpProtocol(asyncio.Protocol):
             # Call endpoint
             raw = await endpoint(**kwargs)
             if self._transport and not self._transport.is_closing():
+                # Pydantic models → dict for JSON serialization
+                if hasattr(raw, 'model_dump'):
+                    raw = raw.model_dump(mode='json')
                 resp = self._core.build_response(raw, status_code, keep_alive)
                 if resp:
                     self._transport.write(resp)
@@ -1350,10 +1414,8 @@ class CppHttpProtocol(asyncio.Protocol):
             background = getattr(raw, 'background', None)
             if background is not None:
                 await background()
-        except Exception:
-            logger.exception("Unhandled exception in endpoint")
-            if self._transport and not self._transport.is_closing():
-                self._transport.write(_500_RESP)
+        except Exception as exc:
+            self._write_error(exc, keep_alive)
 
     # ── Pydantic body validation path ────────────────────────────────────
 
@@ -1378,6 +1440,8 @@ class CppHttpProtocol(asyncio.Protocol):
             raw = await ir.endpoint(**ir.kwargs)
             status_code = int(ir.status_code) if ir.status_code else 200
             if self._transport and not self._transport.is_closing():
+                if hasattr(raw, 'model_dump'):
+                    raw = raw.model_dump(mode='json')
                 resp = self._core.build_response(raw, status_code, True)
                 if resp:
                     self._transport.write(resp)
@@ -1387,10 +1451,8 @@ class CppHttpProtocol(asyncio.Protocol):
             background = getattr(raw, 'background', None)
             if background is not None:
                 await background()
-        except Exception:
-            logger.exception("Unhandled exception in endpoint")
-            if self._transport and not self._transport.is_closing():
-                self._transport.write(_500_RESP)
+        except Exception as exc:
+            self._write_error(exc, True)
 
     # ── WebSocket lifecycle handler ──────────────────────────────────────
 

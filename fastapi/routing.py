@@ -806,14 +806,27 @@ def _make_dep_solver(dependant: Dependant):
     If all dependencies are sync, returns a plain function (no coroutine overhead).
     If any dependency is async, returns an async function (coroutine).
     The solved dependency values get merged into kwargs by C++.
+    HTTPException is re-raised (not caught) so C++ can return proper status codes.
     """
-    # Pre-flatten the dependency callables and their names for fast resolution
-    dep_callables = []
+    from starlette.exceptions import HTTPException
+
+    # Pre-flatten the dependency callables, their names, and their param names
+    dep_callables: list[tuple] = []
     all_sync = True
     for sub_dep in dependant.dependencies:
         if sub_dep.call is not None and sub_dep.name:
             is_coro = getattr(sub_dep, 'is_coroutine_callable', False)
-            dep_callables.append((sub_dep.name, sub_dep.call, is_coro))
+            # Collect parameter names this dependency needs from the request
+            param_names: set[str] = set()
+            for f in sub_dep.query_params:
+                param_names.add(f.name)
+            for f in sub_dep.header_params:
+                param_names.add(f.name)
+            for f in sub_dep.cookie_params:
+                param_names.add(f.name)
+            for f in sub_dep.path_params:
+                param_names.add(f.name)
+            dep_callables.append((sub_dep.name, sub_dep.call, is_coro, param_names))
             if is_coro:
                 all_sync = False
 
@@ -822,10 +835,13 @@ def _make_dep_solver(dependant: Dependant):
         def _solve_sync(kwargs_dict):
             values = {}
             errors = []
-            for name, call, _ in dep_callables:
+            for name, call, _, param_names in dep_callables:
                 try:
-                    result = call()
+                    dep_kwargs = {k: kwargs_dict[k] for k in param_names if k in kwargs_dict}
+                    result = call(**dep_kwargs)
                     values[name] = result
+                except HTTPException:
+                    raise  # Propagate auth/permission errors — C++ handles these
                 except Exception as exc:
                     errors.append({"loc": ("dependency", name), "msg": str(exc), "type": "dependency_error"})
             return (values, errors)
@@ -835,13 +851,16 @@ def _make_dep_solver(dependant: Dependant):
         """Resolve dependencies and return (values_dict, errors_list)."""
         values = {}
         errors = []
-        for name, call, is_coro in dep_callables:
+        for name, call, is_coro, param_names in dep_callables:
             try:
+                dep_kwargs = {k: kwargs_dict[k] for k in param_names if k in kwargs_dict}
                 if is_coro:
-                    result = await call()
+                    result = await call(**dep_kwargs)
                 else:
-                    result = call()
+                    result = call(**dep_kwargs)
                 values[name] = result
+            except HTTPException:
+                raise  # Propagate auth/permission errors — C++ handles these
             except Exception as exc:
                 errors.append({"loc": ("dependency", name), "msg": str(exc), "type": "dependency_error"})
         return (values, errors)
@@ -1002,7 +1021,7 @@ class APIRoute(routing.Route):
         self._core_route_id: Optional[int] = None
         try:
             route_id = next(_route_id_counter)
-            specs = _build_field_specs(self.dependant)
+            specs = _build_field_specs(self._flat_dependant)
             if specs:
                 register_route_params(route_id, specs)
                 self._core_route_id = route_id
@@ -1014,12 +1033,12 @@ class APIRoute(routing.Route):
         if specs is not None:
             self._batch_specs = specs
         elif (
-            self.dependant.path_params
-            or self.dependant.query_params
-            or self.dependant.header_params
-            or self.dependant.cookie_params
+            self._flat_dependant.path_params
+            or self._flat_dependant.query_params
+            or self._flat_dependant.header_params
+            or self._flat_dependant.cookie_params
         ):
-            self._batch_specs = _build_field_specs(self.dependant)
+            self._batch_specs = _build_field_specs(self._flat_dependant)
         else:
             self._batch_specs = []
         # Determine if route is eligible for the Core ASGI fast path

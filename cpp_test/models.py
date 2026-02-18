@@ -20,6 +20,10 @@ class UserResponse(BaseModel):
     is_active: bool
     created_at: datetime
 
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
 class PostCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     content: str = Field(..., min_length=1)
