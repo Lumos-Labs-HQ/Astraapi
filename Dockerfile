@@ -32,8 +32,8 @@ WORKDIR /app
 
 COPY --from=builder /root/.local /root/.local
 COPY --from=builder /build/fastapi /app/fastapi
-COPY test_app.py /app/
+COPY test.py /app/
 
 ENV PATH=/root/.local/bin:$PATH
 
-CMD ["python", "test_app.py", "--host=0.0.0.0", "--port=8002"]
+CMD ["python", "test.py", "--host=0.0.0.0", "--port=8002"]

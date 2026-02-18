@@ -6,11 +6,11 @@ from auth import get_current_user
 from database import get_db
 from datetime import datetime
 
-# Protect ALL routes in this router
-router = APIRouter(dependencies=[Depends(get_current_user)])
+# Create router without dependencies - add them per route
+router = APIRouter()
 
 @router.get("/", response_model=List[UserResponse])
-async def list_users(skip: int = 0, limit: int = 10):
+async def list_users(skip: int = 0, limit: int = 10, current_user: dict = Depends(get_current_user)):
     """Protected: List all users"""
     db = get_db()
     cursor = await db.execute("SELECT * FROM users LIMIT ? OFFSET ?", (limit, skip))
@@ -43,7 +43,7 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     )
 
 @router.get("/{user_id}", response_model=UserResponse)
-async def get_user(user_id: int):
+async def get_user(user_id: int, current_user: dict = Depends(get_current_user)):
     """Protected: Get user by ID"""
     db = get_db()
     cursor = await db.execute("SELECT * FROM users WHERE id = ?", (user_id,))

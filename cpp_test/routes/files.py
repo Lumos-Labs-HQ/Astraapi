@@ -8,8 +8,8 @@ from database import get_db
 from datetime import datetime
 import os
 
-# Protect ALL file routes
-router = APIRouter(dependencies=[Depends(get_current_user)])
+# Create router without default dependencies
+router = APIRouter()
 
 UPLOAD_DIR = "./uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)

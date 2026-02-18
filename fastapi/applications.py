@@ -1000,18 +1000,6 @@ class FastAPI(AppBase):
         )
         self.middleware_stack: Union[ASGIApp, None] = None
 
-        # Classify middleware: C++-compatible types don't block the fast path
-        from fastapi._middleware_impl import (
-            CORSMiddleware as _CORSMw,
-            GZipMiddleware as _GZipMw,
-            TrustedHostMiddleware as _THMw,
-            HTTPSRedirectMiddleware as _HTTPSMw,
-        )
-        _cpp_mw_types = (_CORSMw, _GZipMw, _THMw, _HTTPSMw)
-        self._has_only_cpp_middleware: bool = all(
-            m.cls in _cpp_mw_types for m in self.user_middleware
-        )
-
         # ── v2.0: Initialize C++ ASGI core ──────────────────────────────
         self._core_app = CoreApp()
         from fastapi._core_app import CoreASGIApp
@@ -1285,7 +1273,6 @@ class FastAPI(AppBase):
         if (
             scope["type"] == "http"
             and self._core_asgi._fast_routes_registered
-            and self._has_only_cpp_middleware
         ):
             if await self._core_asgi.handle_fast(scope, receive, send):
                 return

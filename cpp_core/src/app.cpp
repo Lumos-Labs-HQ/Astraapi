@@ -14,6 +14,7 @@
 #include <new>
 #include <algorithm>
 #include <string_view>
+#include <chrono>
 #include <zlib.h>
 
 #if HAS_BROTLI
@@ -24,9 +25,10 @@
 #endif
 
 // ── Module-level cached imports (consolidated, cleaned up at exit) ────────────
-static PyObject* s_http_exc_type = nullptr;    // starlette.exceptions.HTTPException
-static PyObject* s_resume_func = nullptr;      // fastapi._core_app._resume_coro
-static PyObject* s_request_body_to_args = nullptr;  // fastapi.dependencies.utils.request_body_to_args
+static PyObject* s_http_exc_type = nullptr;         // starlette.exceptions.HTTPException
+static PyObject* s_fastapi_http_exc_type = nullptr;  // fastapi.exceptions.HTTPException
+static PyObject* s_resume_func = nullptr;            // fastapi._core_app._resume_coro
+static PyObject* s_request_body_to_args = nullptr;   // fastapi.dependencies.utils.request_body_to_args
 
 // Pre-interned strings for transport method calls (cleaned up at exit)
 static PyObject* g_str_write = nullptr;
@@ -34,10 +36,40 @@ static PyObject* g_str_is_closing = nullptr;
 
 static void cleanup_cached_refs() {
     Py_CLEAR(s_http_exc_type);
+    Py_CLEAR(s_fastapi_http_exc_type);
     Py_CLEAR(s_resume_func);
     Py_CLEAR(s_request_body_to_args);
     Py_CLEAR(g_str_write);
     Py_CLEAR(g_str_is_closing);
+}
+
+// ── HTTPException type check helper ──────────────────────────────────────────
+// Checks both starlette.exceptions.HTTPException and fastapi.exceptions.HTTPException
+// since they are separate class hierarchies.
+static bool is_http_exception(PyObject* exc_type) {
+    if (!exc_type) return false;
+    if (!s_http_exc_type) {
+        PyRef mod(PyImport_ImportModule("starlette.exceptions"));
+        if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else PyErr_Clear();
+    }
+    if (!s_fastapi_http_exc_type) {
+        PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
+        if (mod) s_fastapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else PyErr_Clear();
+    }
+    int r;
+    if (s_http_exc_type) {
+        r = PyObject_IsSubclass(exc_type, s_http_exc_type);
+        if (r < 0) PyErr_Clear();
+        if (r == 1) return true;
+    }
+    if (s_fastapi_http_exc_type) {
+        r = PyObject_IsSubclass(exc_type, s_fastapi_http_exc_type);
+        if (r < 0) PyErr_Clear();
+        if (r == 1) return true;
+    }
+    return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -269,6 +301,14 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
         new (&self->openapi_url) std::string("/openapi.json");
         new (&self->docs_url) std::string("/docs");
         new (&self->redoc_url) std::string("/redoc");
+        // Rate limiting + logging hook
+        self->rate_limit_enabled = false;
+        self->rate_limit_max_requests = 100;
+        self->rate_limit_window_seconds = 60;
+        new (&self->rate_limit_counters) std::unordered_map<std::string, CoreAppObject::RateLimitEntry>();
+        new (&self->rate_limit_mutex) std::mutex();
+        new (&self->current_client_ip) std::string();
+        self->post_response_hook = nullptr;
     }
     return (PyObject*)self;
 }
@@ -315,6 +355,10 @@ static void CoreApp_dealloc(CoreAppObject* self) {
     self->openapi_url.~basic_string();
     self->docs_url.~basic_string();
     self->redoc_url.~basic_string();
+    Py_XDECREF(self->post_response_hook);
+    self->rate_limit_counters.~unordered_map();
+    self->rate_limit_mutex.~mutex();
+    self->current_client_ip.~basic_string();
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
@@ -1206,15 +1250,9 @@ asgi_call_endpoint:
     if (!coro) {
         // Exception in endpoint call
         if (PyErr_Occurred()) {
-            // Check if it's HTTPException
-            if (!s_http_exc_type) {
-                PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-                if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-            }
-
             PyObject *exc_type, *exc_val, *exc_tb;
             PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
-            if (s_http_exc_type && exc_type && PyObject_IsSubclass(exc_type, s_http_exc_type)) {
+            if (is_http_exception(exc_type)) {
                 PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
                 PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
                 PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
@@ -1316,14 +1354,9 @@ asgi_call_endpoint:
 
     // PYGEN_ERROR: exception in coroutine
     if (PyErr_Occurred()) {
-        if (!s_http_exc_type) {
-            PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-            if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-        }
-
         PyObject *exc_type, *exc_val, *exc_tb;
         PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
-        if (s_http_exc_type && exc_type && PyObject_IsSubclass(exc_type, s_http_exc_type)) {
+        if (is_http_exception(exc_type)) {
             PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
             PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
             PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
@@ -2562,6 +2595,27 @@ PyObject* py_http_buf_len(PyObject* /*self*/, PyObject* capsule) {
     return PyLong_FromSsize_t((Py_ssize_t)buf->size());
 }
 
+// ── Post-response hook helper (for logging middleware) ──────────────────────
+// Calls the registered Python hook with (method, path, status_code, duration_ms)
+static inline void fire_post_response_hook(
+    CoreAppObject* self, const char* method_data, size_t method_len,
+    const char* path_data, size_t path_len, int status_code,
+    std::chrono::steady_clock::time_point start_time)
+{
+    if (!self->post_response_hook) return;
+    auto end = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(end - start_time).count();
+    PyRef m(PyUnicode_FromStringAndSize(method_data, (Py_ssize_t)method_len));
+    PyRef p(PyUnicode_FromStringAndSize(path_data, (Py_ssize_t)path_len));
+    PyRef sc(PyLong_FromLong(status_code));
+    PyRef dur(PyFloat_FromDouble(ms));
+    if (m && p && sc && dur) {
+        PyRef r(PyObject_CallFunctionObjArgs(self->post_response_hook,
+                m.get(), p.get(), sc.get(), dur.get(), nullptr));
+        if (!r) PyErr_Clear();  // Don't crash on hook errors
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // handle_http — C++ HTTP Server Hot Path (METH_FASTCALL)
 //
@@ -2632,16 +2686,20 @@ static PyObject* CoreApp_handle_http(
     self->total_requests.fetch_add(1, std::memory_order_relaxed);
     self->active_requests.fetch_add(1, std::memory_order_relaxed);
 
-    // ── Extract Origin, Host, Accept-Encoding headers ─────────────────────
+    // Capture start time for post-response hook (logging middleware)
+    auto request_start_time = std::chrono::steady_clock::now();
+
+    // ── Extract Origin, Host, Accept-Encoding, Authorization headers ────
     StringView origin_sv;
     StringView host_sv;
     StringView accept_encoding_sv;
     StringView content_type_sv;
+    StringView authorization_sv;
     {
         // Only look for origin if CORS is configured (skip if not)
         bool want_origin = (self->cors_config.load().get() != nullptr);
         int found = 0;
-        const int need = want_origin ? 4 : 3;
+        const int need = want_origin ? 5 : 4;
         for (int i = 0; i < req.header_count && found < need; i++) {
             const auto& hdr = req.headers[i];
             size_t nlen = hdr.name.len;
@@ -2658,6 +2716,10 @@ static PyObject* CoreApp_handle_http(
                 case 12:
                     if (content_type_sv.empty() && fb == 'c' && hdr.name.iequals("content-type", 12))
                         { content_type_sv = hdr.value; found++; }
+                    break;
+                case 13:
+                    if (authorization_sv.empty() && fb == 'a' && hdr.name.iequals("authorization", 13))
+                        { authorization_sv = hdr.value; found++; }
                     break;
                 case 15:
                     if (accept_encoding_sv.empty() && fb == 'a' && hdr.name.iequals("accept-encoding", 15))
@@ -2837,6 +2899,8 @@ static PyObject* CoreApp_handle_http(
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
+        fire_post_response_hook(self, req.method.data, req.method.len,
+                                req.path.data, req.path.len, 404, request_start_time);
         return make_consumed_true(req.total_consumed);
     }
 
@@ -2847,6 +2911,8 @@ static PyObject* CoreApp_handle_http(
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
+        fire_post_response_hook(self, req.method.data, req.method.len,
+                                req.path.data, req.path.len, 404, request_start_time);
         return make_consumed_true(req.total_consumed);
     }
 
@@ -2859,6 +2925,30 @@ static PyObject* CoreApp_handle_http(
             if (!rt_frozen) lock.unlock();
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
+                       has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+            if (resp) write_to_transport(transport, resp.get());
+            fire_post_response_hook(self, req.method.data, req.method.len,
+                                    req.path.data, req.path.len, 405, request_start_time);
+            return make_consumed_true(req.total_consumed);
+        }
+    }
+
+    // ── Rate limiting (C++ native, per client IP) ─────────────────────
+    if (self->rate_limit_enabled && !self->current_client_ip.empty()) {
+        auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+        int64_t window_ns = (int64_t)self->rate_limit_window_seconds * 1'000'000'000LL;
+        std::lock_guard<std::mutex> rl_lock(self->rate_limit_mutex);
+        auto& entry = self->rate_limit_counters[self->current_client_ip];
+        if (now_ns - entry.window_start_ns > window_ns) {
+            entry.count = 1;
+            entry.window_start_ns = now_ns;
+        } else {
+            entry.count++;
+        }
+        if (entry.count > self->rate_limit_max_requests) {
+            if (!rt_frozen) lock.unlock();
+            self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+            PyRef resp(build_http_error_response(429, "Rate limit exceeded", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
             return make_consumed_true(req.total_consumed);
@@ -3182,6 +3272,27 @@ static PyObject* CoreApp_handle_http(
             if (!s_p_key) s_p_key = PyUnicode_InternFromString("__path__");
             PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
             if (path_str) PyDict_SetItem(kwargs.get(), s_p_key, path_str.get());
+
+            // Inject parsed Authorization header (scheme + credentials)
+            // Python dep solver uses these for native HTTPBearer/HTTPBasic handling
+            if (!authorization_sv.empty()) {
+                size_t space_pos = 0;
+                while (space_pos < authorization_sv.len && authorization_sv.data[space_pos] != ' ')
+                    space_pos++;
+
+                static PyObject* s_as_key = nullptr;
+                if (!s_as_key) s_as_key = PyUnicode_InternFromString("__auth_scheme__");
+                static PyObject* s_ac_key = nullptr;
+                if (!s_ac_key) s_ac_key = PyUnicode_InternFromString("__auth_credentials__");
+
+                PyRef scheme(PyUnicode_FromStringAndSize(authorization_sv.data, (Py_ssize_t)space_pos));
+                size_t cred_start = space_pos < authorization_sv.len ? space_pos + 1 : space_pos;
+                PyRef creds(PyUnicode_FromStringAndSize(
+                    authorization_sv.data + cred_start,
+                    (Py_ssize_t)(authorization_sv.len - cred_start)));
+                if (scheme) PyDict_SetItem(kwargs.get(), s_as_key, scheme.get());
+                if (creds) PyDict_SetItem(kwargs.get(), s_ac_key, creds.get());
+            }
         }
 
         // dep_solver may be sync (returns tuple) or async (returns coroutine).
@@ -3227,18 +3338,16 @@ static PyObject* CoreApp_handle_http(
                 } else {
                     // Async dep_solver raised immediately (e.g., HTTPException from auth check)
                     if (PyErr_Occurred()) {
-                        if (!s_http_exc_type) {
-                            PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-                            if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-                        }
                         PyObject *dep_et, *dep_ev, *dep_tb;
                         PyErr_Fetch(&dep_et, &dep_ev, &dep_tb);
-                        if (s_http_exc_type && dep_et && PyObject_IsSubclass(dep_et, s_http_exc_type)) {
+                        int hook_status = 500;
+                        if (is_http_exception(dep_et)) {
                             PyErr_NormalizeException(&dep_et, &dep_ev, &dep_tb);
                             PyRef detail(PyObject_GetAttrString(dep_ev, "detail"));
                             PyRef sc(PyObject_GetAttrString(dep_ev, "status_code"));
                             int scode = sc ? (int)PyLong_AsLong(sc.get()) : 500;
                             if (scode == -1 && PyErr_Occurred()) { PyErr_Clear(); scode = 500; }
+                            hook_status = scode;
                             PyRef detail_str(detail ? PyObject_Str(detail.get()) : nullptr);
                             const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
                             Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
@@ -3251,6 +3360,8 @@ static PyObject* CoreApp_handle_http(
                                        req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                             if (resp) write_to_transport(transport, resp.get());
                         }
+                        fire_post_response_hook(self, req.method.data, req.method.len,
+                                                req.path.data, req.path.len, hook_status, request_start_time);
                     }
                     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
@@ -3293,18 +3404,16 @@ static PyObject* CoreApp_handle_http(
         } else {
             // Sync dep_solver raised — check for HTTPException (auth/permission errors)
             if (PyErr_Occurred()) {
-                if (!s_http_exc_type) {
-                    PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-                    if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-                }
                 PyObject *dep_et, *dep_ev, *dep_tb;
                 PyErr_Fetch(&dep_et, &dep_ev, &dep_tb);
-                if (s_http_exc_type && dep_et && PyObject_IsSubclass(dep_et, s_http_exc_type)) {
+                int hook_status = 500;
+                if (is_http_exception(dep_et)) {
                     PyErr_NormalizeException(&dep_et, &dep_ev, &dep_tb);
                     PyRef detail(PyObject_GetAttrString(dep_ev, "detail"));
                     PyRef sc(PyObject_GetAttrString(dep_ev, "status_code"));
                     int scode = sc ? (int)PyLong_AsLong(sc.get()) : 500;
                     if (scode == -1 && PyErr_Occurred()) { PyErr_Clear(); scode = 500; }
+                    hook_status = scode;
                     PyRef detail_str(detail ? PyObject_Str(detail.get()) : nullptr);
                     const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
                     Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
@@ -3317,6 +3426,8 @@ static PyObject* CoreApp_handle_http(
                                req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                     if (resp) write_to_transport(transport, resp.get());
                 }
+                fire_post_response_hook(self, req.method.data, req.method.len,
+                                        req.path.data, req.path.len, hook_status, request_start_time);
             }
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
@@ -3529,13 +3640,9 @@ body_done:
     if (!coro) {
         if (PyErr_Occurred()) {
             // ── Exception handler dispatch ──────────────────────────────
-            if (!s_http_exc_type) {
-                PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-                if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-            }
             PyObject *exc_type, *exc_val, *exc_tb;
             PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
-            if (s_http_exc_type && exc_type && PyObject_IsSubclass(exc_type, s_http_exc_type)) {
+            if (is_http_exception(exc_type)) {
                 PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
                 PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
                 PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
@@ -3563,6 +3670,8 @@ body_done:
                             if (resp) write_to_transport(transport, resp.get());
                         }
                     }
+                    fire_post_response_hook(self, req.method.data, req.method.len,
+                                            req.path.data, req.path.len, scode, request_start_time);
                     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(req.total_consumed);
@@ -3576,6 +3685,8 @@ body_done:
                     PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error", req.keep_alive,
                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                     if (resp) write_to_transport(transport, resp.get());
+                    fire_post_response_hook(self, req.method.data, req.method.len,
+                                            req.path.data, req.path.len, scode, request_start_time);
                     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(req.total_consumed);
@@ -3587,6 +3698,8 @@ body_done:
         PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
+        fire_post_response_hook(self, req.method.data, req.method.len,
+                                req.path.data, req.path.len, 500, request_start_time);
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
         self->total_errors.fetch_add(1, std::memory_order_relaxed);
         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
@@ -3693,6 +3806,8 @@ body_done:
                 write_to_transport(transport, http_resp.get());
             }
 
+            fire_post_response_hook(self, req.method.data, req.method.len,
+                                    req.path.data, req.path.len, status_code_local, request_start_time);
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             return make_consumed_true(req.total_consumed);
         }
@@ -3792,6 +3907,8 @@ body_done:
                 PyErr_Clear();
             }
 
+            fire_post_response_hook(self, req.method.data, req.method.len,
+                                    req.path.data, req.path.len, resp_sc, request_start_time);
             Py_DECREF(raw_result);
             self->active_requests.fetch_sub(1, std::memory_order_relaxed);
             return make_consumed_true(req.total_consumed);
@@ -3809,6 +3926,8 @@ body_done:
                 if (resp) write_to_transport(transport, resp.get());
             }
         }
+        fire_post_response_hook(self, req.method.data, req.method.len,
+                                req.path.data, req.path.len, status_code_local, request_start_time);
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
         return make_consumed_true(req.total_consumed);
     }
@@ -3842,13 +3961,9 @@ body_done:
 
     // PYGEN_ERROR — exception handler dispatch
     if (PyErr_Occurred()) {
-        if (!s_http_exc_type) {
-            PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-            if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-        }
         PyObject *exc_type, *exc_val, *exc_tb;
         PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
-        if (s_http_exc_type && exc_type && PyObject_IsSubclass(exc_type, s_http_exc_type)) {
+        if (is_http_exception(exc_type)) {
             PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
             PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
             PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
@@ -3872,6 +3987,8 @@ body_done:
                         if (resp) write_to_transport(transport, resp.get());
                     }
                 }
+                fire_post_response_hook(self, req.method.data, req.method.len,
+                                        req.path.data, req.path.len, scode, request_start_time);
                 self->active_requests.fetch_sub(1, std::memory_order_relaxed);
                 return make_consumed_true(req.total_consumed);
             }
@@ -3884,6 +4001,8 @@ body_done:
                 PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error", req.keep_alive,
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
+                fire_post_response_hook(self, req.method.data, req.method.len,
+                                        req.path.data, req.path.len, scode, request_start_time);
                 self->active_requests.fetch_sub(1, std::memory_order_relaxed);
                 return make_consumed_true(req.total_consumed);
             }
@@ -3894,6 +4013,8 @@ body_done:
     PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
     if (resp) write_to_transport(transport, resp.get());
+    fire_post_response_hook(self, req.method.data, req.method.len,
+                            req.path.data, req.path.len, 500, request_start_time);
     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
     self->total_errors.fetch_add(1, std::memory_order_relaxed);
     return make_consumed_true(req.total_consumed);
@@ -4378,6 +4499,36 @@ static PyObject* CoreApp_parse_and_route(
     return make_consumed_obj(req.total_consumed, (PyObject*)prep);
 }
 
+// ── configure_rate_limit(enabled, max_requests, window_seconds) ────────────
+static PyObject* CoreApp_configure_rate_limit(CoreAppObject* self, PyObject* args) {
+    int enabled, max_req, window_sec;
+    if (!PyArg_ParseTuple(args, "pii", &enabled, &max_req, &window_sec)) return nullptr;
+    self->rate_limit_enabled = (bool)enabled;
+    self->rate_limit_max_requests = max_req;
+    self->rate_limit_window_seconds = window_sec;
+    Py_RETURN_NONE;
+}
+
+// ── set_client_ip(ip_string) ───────────────────────────────────────────────
+static PyObject* CoreApp_set_client_ip(CoreAppObject* self, PyObject* arg) {
+    const char* ip = PyUnicode_AsUTF8(arg);
+    if (!ip) return nullptr;
+    self->current_client_ip = ip;
+    Py_RETURN_NONE;
+}
+
+// ── set_post_response_hook(callable_or_None) ───────────────────────────────
+static PyObject* CoreApp_set_post_response_hook(CoreAppObject* self, PyObject* arg) {
+    Py_XDECREF(self->post_response_hook);
+    if (arg == Py_None) {
+        self->post_response_hook = nullptr;
+    } else {
+        Py_INCREF(arg);
+        self->post_response_hook = arg;
+    }
+    Py_RETURN_NONE;
+}
+
 // ── Method table ────────────────────────────────────────────────────────────
 
 static PyMethodDef CoreApp_methods[] = {
@@ -4413,6 +4564,10 @@ static PyMethodDef CoreApp_methods[] = {
     {"parse_and_route", (PyCFunction)(void(*)(void))CoreApp_parse_and_route, METH_FASTCALL, nullptr},
     {"freeze_routes", (PyCFunction)CoreApp_freeze_routes, METH_NOARGS, nullptr},
     {"set_openapi_schema", (PyCFunction)CoreApp_set_openapi_schema, METH_O, nullptr},
+    // C++ native middleware support
+    {"configure_rate_limit", (PyCFunction)CoreApp_configure_rate_limit, METH_VARARGS, nullptr},
+    {"set_client_ip", (PyCFunction)CoreApp_set_client_ip, METH_O, nullptr},
+    {"set_post_response_hook", (PyCFunction)CoreApp_set_post_response_hook, METH_O, nullptr},
     {nullptr}
 };
 

@@ -857,6 +857,13 @@ def _flatten_deps(
         for f in sub_dep.path_params:
             param_names.add(f.name)
 
+        # Detect security scheme deps (HTTPBearer, HTTPBasic, etc.)
+        # These are resolved natively by C++ auth extraction — no Starlette needed
+        from fastapi.security.http import HTTPBase
+        is_security = isinstance(sub_dep.call, HTTPBase)
+        security_type = type(sub_dep.call).__name__ if is_security else None
+        auto_error = getattr(sub_dep.call, 'auto_error', True) if is_security else True
+
         result.append({
             'name': name,
             'call': sub_dep.call,
@@ -867,6 +874,9 @@ def _flatten_deps(
             'http_connection_param_name': sub_dep.http_connection_param_name,
             'child_names': child_names,
             'param_names': param_names,
+            'is_security': is_security,
+            'security_type': security_type,
+            'auto_error': auto_error,
         })
 
 
@@ -909,7 +919,12 @@ def _make_lightweight_request(raw_headers, method, path):
 
 def _resolve_deps_sync(dep_nodes, kwargs_dict):
     """Resolve dependencies in topological order (sync version)."""
-    from starlette.exceptions import HTTPException
+    from fastapi.exceptions import HTTPException as _FastAPIHTTPExc
+    try:
+        from starlette.exceptions import HTTPException as _StarletteHTTPExc
+        _http_exc_types = (_FastAPIHTTPExc, _StarletteHTTPExc)
+    except ImportError:
+        _http_exc_types = (_FastAPIHTTPExc,)
 
     resolved = {}
     errors = []
@@ -918,10 +933,39 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict):
     raw_headers = kwargs_dict.pop('__raw_headers__', None)
     raw_method = kwargs_dict.pop('__method__', 'GET')
     raw_path = kwargs_dict.pop('__path__', '/')
+    auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
+    auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
     request_obj = None
 
     for node in dep_nodes:
         try:
+            # C++ native security extraction — no Starlette Request needed
+            if node.get('is_security'):
+                sec_type = node['security_type']
+                if sec_type in ('HTTPBearer', 'HTTPBase'):
+                    if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
+                        if node['auto_error']:
+                            raise _FastAPIHTTPExc(status_code=403, detail="Not authenticated")
+                        resolved[node['name']] = None
+                        continue
+                    from fastapi.security.http import HTTPAuthorizationCredentials
+                    resolved[node['name']] = HTTPAuthorizationCredentials(
+                        scheme=auth_scheme, credentials=auth_credentials)
+                    continue
+                elif sec_type == 'HTTPBasic':
+                    if not auth_scheme or auth_scheme.lower() != 'basic' or not auth_credentials:
+                        if node['auto_error']:
+                            raise _FastAPIHTTPExc(status_code=401, detail="Not authenticated")
+                        resolved[node['name']] = None
+                        continue
+                    import base64
+                    decoded = base64.b64decode(auth_credentials).decode('utf-8')
+                    username, _, password = decoded.partition(':')
+                    from fastapi.security.http import HTTPBasicCredentials
+                    resolved[node['name']] = HTTPBasicCredentials(
+                        username=username, password=password)
+                    continue
+
             dep_kwargs = {}
 
             # Inject resolved child dependencies
@@ -934,7 +978,7 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict):
                 if pname in kwargs_dict:
                     dep_kwargs[pname] = kwargs_dict[pname]
 
-            # Inject Request object if needed
+            # Inject Request object if needed (fallback for non-security deps)
             if node['needs_request'] or node['needs_http_connection']:
                 if request_obj is None:
                     request_obj = _make_lightweight_request(
@@ -947,7 +991,7 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict):
             result = node['call'](**dep_kwargs)
             resolved[node['name']] = result
 
-        except HTTPException:
+        except _http_exc_types:
             raise  # Propagate auth/permission errors — C++ handles these
         except Exception as exc:
             errors.append({
@@ -961,7 +1005,12 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict):
 
 async def _resolve_deps_async(dep_nodes, kwargs_dict):
     """Resolve dependencies in topological order (async version)."""
-    from starlette.exceptions import HTTPException
+    from fastapi.exceptions import HTTPException as _FastAPIHTTPExc
+    try:
+        from starlette.exceptions import HTTPException as _StarletteHTTPExc
+        _http_exc_types = (_FastAPIHTTPExc, _StarletteHTTPExc)
+    except ImportError:
+        _http_exc_types = (_FastAPIHTTPExc,)
 
     resolved = {}
     errors = []
@@ -970,10 +1019,39 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict):
     raw_headers = kwargs_dict.pop('__raw_headers__', None)
     raw_method = kwargs_dict.pop('__method__', 'GET')
     raw_path = kwargs_dict.pop('__path__', '/')
+    auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
+    auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
     request_obj = None
 
     for node in dep_nodes:
         try:
+            # C++ native security extraction — no Starlette Request needed
+            if node.get('is_security'):
+                sec_type = node['security_type']
+                if sec_type in ('HTTPBearer', 'HTTPBase'):
+                    if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
+                        if node['auto_error']:
+                            raise _FastAPIHTTPExc(status_code=403, detail="Not authenticated")
+                        resolved[node['name']] = None
+                        continue
+                    from fastapi.security.http import HTTPAuthorizationCredentials
+                    resolved[node['name']] = HTTPAuthorizationCredentials(
+                        scheme=auth_scheme, credentials=auth_credentials)
+                    continue
+                elif sec_type == 'HTTPBasic':
+                    if not auth_scheme or auth_scheme.lower() != 'basic' or not auth_credentials:
+                        if node['auto_error']:
+                            raise _FastAPIHTTPExc(status_code=401, detail="Not authenticated")
+                        resolved[node['name']] = None
+                        continue
+                    import base64
+                    decoded = base64.b64decode(auth_credentials).decode('utf-8')
+                    username, _, password = decoded.partition(':')
+                    from fastapi.security.http import HTTPBasicCredentials
+                    resolved[node['name']] = HTTPBasicCredentials(
+                        username=username, password=password)
+                    continue
+
             dep_kwargs = {}
 
             # Inject resolved child dependencies
@@ -986,7 +1064,7 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict):
                 if pname in kwargs_dict:
                     dep_kwargs[pname] = kwargs_dict[pname]
 
-            # Inject Request object if needed
+            # Inject Request object if needed (fallback for non-security deps)
             if node['needs_request'] or node['needs_http_connection']:
                 if request_obj is None:
                     request_obj = _make_lightweight_request(
@@ -1003,7 +1081,7 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict):
                 result = node['call'](**dep_kwargs)
             resolved[node['name']] = result
 
-        except HTTPException:
+        except _http_exc_types:
             raise  # Propagate auth/permission errors — C++ handles these
         except Exception as exc:
             errors.append({

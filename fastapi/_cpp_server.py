@@ -955,6 +955,10 @@ class CppHttpProtocol(asyncio.Protocol):
             except (OSError, AttributeError):
                 pass
         transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
+        # Pass client IP to C++ for rate limiting
+        peername = transport.get_extra_info("peername")
+        if peername and hasattr(self._core, "set_client_ip"):
+            self._core.set_client_ip(peername[0])
         self._ka_reset()
 
     def connection_lost(self, exc: Exception | None) -> None:
@@ -1557,22 +1561,23 @@ async def run_server(
                     print(f"[cpp-server] CORS sync failed: {exc}", file=sys.stderr)
                 break
 
-    # ── Warn about non-C++ middleware in app.run() path ─────────────────
-    _cpp_mw_names = {"CORSMiddleware", "GZipMiddleware", "TrustedHostMiddleware",
-                     "HTTPSRedirectMiddleware"}
-    non_cpp_mw = []
+    # ── Configure C++ native middleware (silent) ────────────────────────
     for mw in getattr(app, "user_middleware", []):
         cls = getattr(mw, "cls", None) or (mw[0] if isinstance(mw, (list, tuple)) else None)
         cls_name = getattr(cls, "__name__", "") if cls else ""
-        if cls_name and cls_name not in _cpp_mw_names:
-            non_cpp_mw.append(cls_name)
-    if non_cpp_mw:
-        print(
-            f"[cpp-server] Warning: app.run() C++ fast path does not execute "
-            f"these middleware: {non_cpp_mw}. Authentication is handled via "
-            f"Depends(). For full middleware support, use uvicorn.",
-            file=sys.stderr,
-        )
+        kw = getattr(mw, "kwargs", {}) or (mw[2] if isinstance(mw, (list, tuple)) and len(mw) > 2 else {})
+
+        if cls_name == "RateLimitMiddleware":
+            if hasattr(core_app, "configure_rate_limit"):
+                max_req = kw.get("max_requests", 100)
+                window = kw.get("window_seconds", 60)
+                core_app.configure_rate_limit(True, max_req, window)
+
+        elif cls_name == "LoggingMiddleware":
+            if hasattr(core_app, "set_post_response_hook"):
+                def _log_hook(method, path, status_code, duration_ms):
+                    print(f"{method} {path} - {status_code} - {duration_ms/1000:.3f}s")
+                core_app.set_post_response_hook(_log_hook)
 
     # Freeze routes — skip shared_lock in hot path after startup
     if hasattr(core_app, "freeze_routes"):

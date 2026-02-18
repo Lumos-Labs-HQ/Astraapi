@@ -150,6 +150,18 @@ typedef struct {
     std::string openapi_url;        // "/openapi.json" (default)
     std::string docs_url;           // "/docs" (default)
     std::string redoc_url;          // "/redoc" (default)
+
+    // Rate limiting (C++ native)
+    bool rate_limit_enabled = false;
+    int rate_limit_max_requests = 100;
+    int rate_limit_window_seconds = 60;
+    struct RateLimitEntry { int count; int64_t window_start_ns; };
+    std::unordered_map<std::string, RateLimitEntry> rate_limit_counters;
+    std::mutex rate_limit_mutex;
+    std::string current_client_ip;
+
+    // Post-response hook (for logging middleware)
+    PyObject* post_response_hook = nullptr;  // Python callable or NULL
 } CoreAppObject;
 
 // ── MatchResult Python object ───────────────────────────────────────────────

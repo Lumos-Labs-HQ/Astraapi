@@ -6,8 +6,8 @@ from auth import get_current_user
 from database import get_db
 from datetime import datetime
 
-# Protect ALL routes by default
-router = APIRouter(dependencies=[Depends(get_current_user)])
+# Create router without default dependencies
+router = APIRouter()
 
 @router.post("/", response_model=PostResponse, status_code=status.HTTP_201_CREATED)
 async def create_post(post: PostCreate, current_user: dict = Depends(get_current_user)):
