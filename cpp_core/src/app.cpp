@@ -3145,6 +3145,45 @@ static PyObject* CoreApp_handle_http(
 
     // ── Dependency injection (resolve Depends() callables) ──────────────
     if (spec.has_dependencies && spec.dep_solver) {
+        // Inject raw request headers into kwargs for security dependencies
+        // that need a Request object (e.g., HTTPBearer, HTTPBasic).
+        // Uses interned keys for O(1) dict lookup in Python.
+        {
+            PyRef headers_list(PyList_New(req.header_count));
+            if (headers_list) {
+                for (int i = 0; i < req.header_count; i++) {
+                    const auto& hdr = req.headers[i];
+                    PyRef nb(PyBytes_FromStringAndSize(hdr.name.data, (Py_ssize_t)hdr.name.len));
+                    PyRef vb(PyBytes_FromStringAndSize(hdr.value.data, (Py_ssize_t)hdr.value.len));
+                    if (nb && vb) {
+                        PyRef pair(PyTuple_Pack(2, nb.get(), vb.get()));
+                        if (pair) {
+                            PyList_SET_ITEM(headers_list.get(), i, pair.release());
+                        } else {
+                            Py_INCREF(Py_None);
+                            PyList_SET_ITEM(headers_list.get(), i, Py_None);
+                        }
+                    } else {
+                        Py_INCREF(Py_None);
+                        PyList_SET_ITEM(headers_list.get(), i, Py_None);
+                    }
+                }
+                static PyObject* s_rh_key = nullptr;
+                if (!s_rh_key) s_rh_key = PyUnicode_InternFromString("__raw_headers__");
+                PyDict_SetItem(kwargs.get(), s_rh_key, headers_list.get());
+            }
+
+            static PyObject* s_m_key = nullptr;
+            if (!s_m_key) s_m_key = PyUnicode_InternFromString("__method__");
+            PyRef method_str(PyUnicode_FromStringAndSize(req.method.data, (Py_ssize_t)req.method.len));
+            if (method_str) PyDict_SetItem(kwargs.get(), s_m_key, method_str.get());
+
+            static PyObject* s_p_key = nullptr;
+            if (!s_p_key) s_p_key = PyUnicode_InternFromString("__path__");
+            PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
+            if (path_str) PyDict_SetItem(kwargs.get(), s_p_key, path_str.get());
+        }
+
         // dep_solver may be sync (returns tuple) or async (returns coroutine).
         // Detect at runtime: if result is a coroutine, drive it; if tuple, use directly.
         PyRef dep_call_result(PyObject_CallOneArg(spec.dep_solver, kwargs.get()));

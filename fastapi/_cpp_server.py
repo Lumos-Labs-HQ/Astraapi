@@ -1557,6 +1557,23 @@ async def run_server(
                     print(f"[cpp-server] CORS sync failed: {exc}", file=sys.stderr)
                 break
 
+    # ── Warn about non-C++ middleware in app.run() path ─────────────────
+    _cpp_mw_names = {"CORSMiddleware", "GZipMiddleware", "TrustedHostMiddleware",
+                     "HTTPSRedirectMiddleware"}
+    non_cpp_mw = []
+    for mw in getattr(app, "user_middleware", []):
+        cls = getattr(mw, "cls", None) or (mw[0] if isinstance(mw, (list, tuple)) else None)
+        cls_name = getattr(cls, "__name__", "") if cls else ""
+        if cls_name and cls_name not in _cpp_mw_names:
+            non_cpp_mw.append(cls_name)
+    if non_cpp_mw:
+        print(
+            f"[cpp-server] Warning: app.run() C++ fast path does not execute "
+            f"these middleware: {non_cpp_mw}. Authentication is handled via "
+            f"Depends(). For full middleware support, use uvicorn.",
+            file=sys.stderr,
+        )
+
     # Freeze routes — skip shared_lock in hot path after startup
     if hasattr(core_app, "freeze_routes"):
         core_app.freeze_routes()

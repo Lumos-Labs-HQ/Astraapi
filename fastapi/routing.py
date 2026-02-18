@@ -788,84 +788,296 @@ def _collect_deps(
     visited: set[str],
 ) -> None:
     """Recursively collect dependency names and their sub-dependency names."""
-    for sub_dep in dependant.dependencies:
-        name = sub_dep.name or ""
-        if name and name not in visited:
+    for i, sub_dep in enumerate(dependant.dependencies):
+        name = sub_dep.name or getattr(sub_dep.call, '__name__', None) or f'__dep_{i}'
+        if name not in visited:
             visited.add(name)
             sub_names = [
-                d.name for d in sub_dep.dependencies if d.name
+                d.name or getattr(d.call, '__name__', None) or f'__subdep_{j}'
+                for j, d in enumerate(sub_dep.dependencies)
+                if d.call is not None
             ]
             result.append((name, sub_names))
             _collect_deps(sub_dep, result, visited)
+
+
+def _flatten_deps(
+    dependant: Dependant,
+    result: list[dict],
+    visited_ids: set[int],
+) -> None:
+    """Recursively flatten the dependency tree into topological order (leaves first).
+
+    Walks the Dependant tree depth-first: children are appended before parents,
+    ensuring that when we resolve in list order, every dependency's sub-dependencies
+    have already been resolved.
+
+    Raises ValueError if a generator dependency is encountered (not supported
+    in C++ fast path — needs AsyncExitStack).
+    """
+    for i, sub_dep in enumerate(dependant.dependencies):
+        if sub_dep.call is None:
+            continue
+
+        dep_id = id(sub_dep.call)
+        if dep_id in visited_ids:
+            continue
+        visited_ids.add(dep_id)
+
+        # Generator deps need AsyncExitStack — not supported in C++ fast path
+        if getattr(sub_dep, 'is_gen_callable', False) or \
+           getattr(sub_dep, 'is_async_gen_callable', False):
+            raise ValueError("Generator dependencies not supported in C++ fast path")
+
+        # Recurse into children FIRST (ensures topological order: leaves before parents)
+        _flatten_deps(sub_dep, result, visited_ids)
+
+        # Auto-generate name if None (fixes router-level deps with name=None)
+        name = sub_dep.name
+        if not name:
+            name = getattr(sub_dep.call, '__name__', None) or f'__dep_{i}_{dep_id}'
+
+        # Collect child dependency names (these map to parameters in the parent callable)
+        child_names = []
+        for child in sub_dep.dependencies:
+            child_name = child.name
+            if not child_name:
+                child_name = getattr(child.call, '__name__', None) or \
+                    f'__dep_{id(child.call)}'
+            child_names.append(child_name)
+
+        # Collect param names this dep needs from request kwargs
+        param_names: set[str] = set()
+        for f in sub_dep.query_params:
+            param_names.add(f.name)
+        for f in sub_dep.header_params:
+            param_names.add(f.name)
+        for f in sub_dep.cookie_params:
+            param_names.add(f.name)
+        for f in sub_dep.path_params:
+            param_names.add(f.name)
+
+        result.append({
+            'name': name,
+            'call': sub_dep.call,
+            'is_coro': sub_dep.is_coroutine_callable,
+            'needs_request': bool(sub_dep.request_param_name),
+            'request_param_name': sub_dep.request_param_name,
+            'needs_http_connection': bool(sub_dep.http_connection_param_name),
+            'http_connection_param_name': sub_dep.http_connection_param_name,
+            'child_names': child_names,
+            'param_names': param_names,
+        })
+
+
+def _make_lightweight_request(raw_headers, method, path):
+    """Create a lightweight Starlette Request from raw headers for security deps.
+
+    Security dependencies (HTTPBearer, HTTPBasic, etc.) access request.headers
+    to extract Authorization tokens. This builds a minimal Request from the
+    raw header tuples that C++ injected into kwargs.
+    """
+    from starlette.requests import Request
+
+    # raw_headers is list of (name_bytes, value_bytes) from C++.
+    # ASGI requires header names as lowercase bytes. C++ passes them as-is
+    # from the HTTP parser (e.g., b"Authorization"), so we must lowercase here.
+    header_list = []
+    if raw_headers:
+        for item in raw_headers:
+            if item is None:
+                continue
+            name, value = item
+            if isinstance(name, bytes):
+                name = name.lower()
+            elif isinstance(name, str):
+                name = name.lower().encode('latin-1')
+            if isinstance(value, str):
+                value = value.encode('latin-1')
+            header_list.append((name, value))
+
+    scope = {
+        "type": "http",
+        "method": method or "GET",
+        "path": path or "/",
+        "query_string": b"",
+        "headers": header_list,
+        "root_path": "",
+    }
+    return Request(scope)
+
+
+def _resolve_deps_sync(dep_nodes, kwargs_dict):
+    """Resolve dependencies in topological order (sync version)."""
+    from starlette.exceptions import HTTPException
+
+    resolved = {}
+    errors = []
+
+    # Pop C++-injected request info from kwargs (prevent leaking to endpoint)
+    raw_headers = kwargs_dict.pop('__raw_headers__', None)
+    raw_method = kwargs_dict.pop('__method__', 'GET')
+    raw_path = kwargs_dict.pop('__path__', '/')
+    request_obj = None
+
+    for node in dep_nodes:
+        try:
+            dep_kwargs = {}
+
+            # Inject resolved child dependencies
+            for child_name in node['child_names']:
+                if child_name in resolved:
+                    dep_kwargs[child_name] = resolved[child_name]
+
+            # Inject request params from the original kwargs
+            for pname in node['param_names']:
+                if pname in kwargs_dict:
+                    dep_kwargs[pname] = kwargs_dict[pname]
+
+            # Inject Request object if needed
+            if node['needs_request'] or node['needs_http_connection']:
+                if request_obj is None:
+                    request_obj = _make_lightweight_request(
+                        raw_headers, raw_method, raw_path)
+                param_name = node['request_param_name'] or \
+                    node['http_connection_param_name']
+                if param_name:
+                    dep_kwargs[param_name] = request_obj
+
+            result = node['call'](**dep_kwargs)
+            resolved[node['name']] = result
+
+        except HTTPException:
+            raise  # Propagate auth/permission errors — C++ handles these
+        except Exception as exc:
+            errors.append({
+                "loc": ("dependency", node['name']),
+                "msg": str(exc),
+                "type": "dependency_error",
+            })
+
+    return (resolved, errors)
+
+
+async def _resolve_deps_async(dep_nodes, kwargs_dict):
+    """Resolve dependencies in topological order (async version)."""
+    from starlette.exceptions import HTTPException
+
+    resolved = {}
+    errors = []
+
+    # Pop C++-injected request info from kwargs (prevent leaking to endpoint)
+    raw_headers = kwargs_dict.pop('__raw_headers__', None)
+    raw_method = kwargs_dict.pop('__method__', 'GET')
+    raw_path = kwargs_dict.pop('__path__', '/')
+    request_obj = None
+
+    for node in dep_nodes:
+        try:
+            dep_kwargs = {}
+
+            # Inject resolved child dependencies
+            for child_name in node['child_names']:
+                if child_name in resolved:
+                    dep_kwargs[child_name] = resolved[child_name]
+
+            # Inject request params from the original kwargs
+            for pname in node['param_names']:
+                if pname in kwargs_dict:
+                    dep_kwargs[pname] = kwargs_dict[pname]
+
+            # Inject Request object if needed
+            if node['needs_request'] or node['needs_http_connection']:
+                if request_obj is None:
+                    request_obj = _make_lightweight_request(
+                        raw_headers, raw_method, raw_path)
+                param_name = node['request_param_name'] or \
+                    node['http_connection_param_name']
+                if param_name:
+                    dep_kwargs[param_name] = request_obj
+
+            # Call the dependency
+            if node['is_coro']:
+                result = await node['call'](**dep_kwargs)
+            else:
+                result = node['call'](**dep_kwargs)
+            resolved[node['name']] = result
+
+        except HTTPException:
+            raise  # Propagate auth/permission errors — C++ handles these
+        except Exception as exc:
+            errors.append({
+                "loc": ("dependency", node['name']),
+                "msg": str(exc),
+                "type": "dependency_error",
+            })
+
+    return (resolved, errors)
 
 
 def _make_dep_solver(dependant: Dependant):
     """Create a fast dependency solver callable for C++ fast path.
 
     Returns a callable that takes (kwargs_dict) and returns (values_dict, errors_list).
-    If all dependencies are sync, returns a plain function (no coroutine overhead).
-    If any dependency is async, returns an async function (coroutine).
-    The solved dependency values get merged into kwargs by C++.
+    The kwargs_dict may contain C++-injected keys (__raw_headers__, __method__,
+    __path__) for security dependencies that need a Request object.
+
+    Resolves dependencies recursively in depth-first topological order:
+    - Leaf dependencies (e.g., HTTPBearer.__call__) are resolved first
+    - Parent dependencies receive the resolved values of their children
+    - Dependencies that need a Request object get a lightweight Request built
+      from the raw headers injected by C++.
+
     HTTPException is re-raised (not caught) so C++ can return proper status codes.
+    Raises ValueError if a generator dependency is found (not supported in fast path).
     """
-    from starlette.exceptions import HTTPException
+    # Pre-analyze the entire dependency tree at registration time
+    dep_nodes: list[dict] = []
+    _flatten_deps(dependant, dep_nodes, set())
 
-    # Pre-flatten the dependency callables, their names, and their param names
-    dep_callables: list[tuple] = []
-    all_sync = True
+    if not dep_nodes:
+        # No dependencies — return trivial solver (zero overhead)
+        def _solve_empty(kwargs_dict):
+            # Still need to clean up injected keys
+            kwargs_dict.pop('__raw_headers__', None)
+            kwargs_dict.pop('__method__', None)
+            kwargs_dict.pop('__path__', None)
+            return ({}, [])
+        return _solve_empty
+
+    # Only top-level deps with explicit parameter names (from endpoint signature)
+    # should have their resolved values injected into kwargs.
+    # Router-level deps (name=None, auto-generated) are side-effect-only (e.g., auth
+    # checks) — their values must NOT be merged into kwargs or the endpoint will
+    # receive unexpected keyword arguments and raise TypeError.
+    injectable_names: set[str] = set()
     for sub_dep in dependant.dependencies:
-        if sub_dep.call is not None and sub_dep.name:
-            is_coro = getattr(sub_dep, 'is_coroutine_callable', False)
-            # Collect parameter names this dependency needs from the request
-            param_names: set[str] = set()
-            for f in sub_dep.query_params:
-                param_names.add(f.name)
-            for f in sub_dep.header_params:
-                param_names.add(f.name)
-            for f in sub_dep.cookie_params:
-                param_names.add(f.name)
-            for f in sub_dep.path_params:
-                param_names.add(f.name)
-            dep_callables.append((sub_dep.name, sub_dep.call, is_coro, param_names))
-            if is_coro:
-                all_sync = False
+        if sub_dep.name and sub_dep.call is not None:
+            injectable_names.add(sub_dep.name)
 
-    if all_sync:
-        # Fast path: all deps are sync — return plain function, no coroutine overhead
+    # Check if any dep in the tree is async
+    any_async = any(node['is_coro'] for node in dep_nodes)
+
+    if any_async:
+        async def _solve_async(kwargs_dict):
+            resolved, errors = await _resolve_deps_async(dep_nodes, kwargs_dict)
+            if injectable_names:
+                injected = {k: v for k, v in resolved.items()
+                            if k in injectable_names}
+            else:
+                injected = {}
+            return (injected, errors)
+        return _solve_async
+    else:
         def _solve_sync(kwargs_dict):
-            values = {}
-            errors = []
-            for name, call, _, param_names in dep_callables:
-                try:
-                    dep_kwargs = {k: kwargs_dict[k] for k in param_names if k in kwargs_dict}
-                    result = call(**dep_kwargs)
-                    values[name] = result
-                except HTTPException:
-                    raise  # Propagate auth/permission errors — C++ handles these
-                except Exception as exc:
-                    errors.append({"loc": ("dependency", name), "msg": str(exc), "type": "dependency_error"})
-            return (values, errors)
+            resolved, errors = _resolve_deps_sync(dep_nodes, kwargs_dict)
+            if injectable_names:
+                injected = {k: v for k, v in resolved.items()
+                            if k in injectable_names}
+            else:
+                injected = {}
+            return (injected, errors)
         return _solve_sync
-
-    async def _solve(kwargs_dict):
-        """Resolve dependencies and return (values_dict, errors_list)."""
-        values = {}
-        errors = []
-        for name, call, is_coro, param_names in dep_callables:
-            try:
-                dep_kwargs = {k: kwargs_dict[k] for k in param_names if k in kwargs_dict}
-                if is_coro:
-                    result = await call(**dep_kwargs)
-                else:
-                    result = call(**dep_kwargs)
-                values[name] = result
-            except HTTPException:
-                raise  # Propagate auth/permission errors — C++ handles these
-            except Exception as exc:
-                errors.append({"loc": ("dependency", name), "msg": str(exc), "type": "dependency_error"})
-        return (values, errors)
-
-    return _solve
 
 
 class APIRoute(routing.Route):
@@ -1061,10 +1273,15 @@ class APIRoute(routing.Route):
             ))
             and actual_rc is JSONResponse
         )
-        # Build dependency solver if route has dependencies
+        # Build dependency solver if route has dependencies.
+        # If a generator dependency is detected, fall back from fast path
+        # (generator deps need AsyncExitStack which C++ fast path doesn't support).
         self._dep_solver = None
         if self.dependant.dependencies and self._fast_path_eligible:
-            self._dep_solver = _make_dep_solver(self.dependant)
+            try:
+                self._dep_solver = _make_dep_solver(self.dependant)
+            except ValueError:
+                self._fast_path_eligible = False
         self.app = request_response(self.get_route_handler())
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:

@@ -59,7 +59,14 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     return {"id": user[0], "email": user[1], "username": user[2]}
 
 def require_auth(func):
-    """Decorator for protected routes"""
-    async def wrapper(*args, **kwargs):
+    """Decorator for protected routes.
+
+    Prefer using ``APIRouter(dependencies=[Depends(get_current_user)])``
+    for router-level protection instead.
+    """
+    from functools import wraps
+
+    @wraps(func)
+    async def wrapper(*args, current_user: dict = Depends(get_current_user), **kwargs):
         return await func(*args, **kwargs)
     return wrapper
