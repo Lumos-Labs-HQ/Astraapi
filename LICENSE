@@ -1,68 +1,21 @@
-"autocannon -c100 -u30 -t30 http://127.0.0.1:8002
-Running 10s test @ http://127.0.0.1:8002
-100 connections
+The MIT License (MIT)
 
+Copyright (c) 2018 Sebastián Ramírez
 
-┌─────────┬──────┬──────┬───────┬──────┬─────────┬─────────┬────────┐
-│ Stat    │ 2.5% │ 50%  │ 97.5% │ 99%  │ Avg     │ Stdev   │ Max    │
-├─────────┼──────┼──────┼───────┼──────┼─────────┼─────────┼────────┤
-│ Latency │ 0 ms │ 1 ms │ 2 ms  │ 3 ms │ 1.07 ms │ 1.36 ms │ 110 ms │
-└─────────┴──────┴──────┴───────┴──────┴─────────┴─────────┴────────┘
-┌───────────┬─────────┬─────────┬─────────┬─────────┬──────────┬──────────┬─────────┐
-│ Stat      │ 1%      │ 2.5%    │ 50%     │ 97.5%   │ Avg      │ Stdev    │ Min     │
-├───────────┼─────────┼─────────┼─────────┼─────────┼──────────┼──────────┼─────────┤
-│ Req/Sec   │ 55,295  │ 55,295  │ 70,143  │ 76,031  │ 68,851.2 │ 5,916.57 │ 55,285  │
-├───────────┼─────────┼─────────┼─────────┼─────────┼──────────┼──────────┼─────────┤
-│ Bytes/Sec │ 6.64 MB │ 6.64 MB │ 8.41 MB │ 9.13 MB │ 8.26 MB  │ 711 kB   │ 6.63 MB │
-└───────────┴─────────┴─────────┴─────────┴─────────┴──────────┴──────────┴─────────┘
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Req/Bytes counts sampled once per second.
-# of samples: 10
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
 
-689k requests in 10.03s, 82.6 MB read" see this and this "k6 run test.js
-
-         /\      Grafana   /‾‾/
-    /\  /  \     |\  __   /  /
-   /  \/    \    | |/ /  /   ‾‾\
-  /          \   |   (  |  (‾)  |
- / __________ \  |_|\_\  \_____/
-
-     execution: local
-        script: test.js
-        output: -
-
-     scenarios: (100.00%) 1 scenario, 25000 max VUs, 40s max duration (incl. graceful stop):
-              * power_test: 20000.00 iterations/s for 10s (maxVUs: 20000-25000, gracefulStop: 30s)
-
-
-
-  █ TOTAL RESULTS
-
-    checks_total.......: 96705   9289.734147/s
-    checks_succeeded...: 100.00% 96705 out of 96705
-    checks_failed......: 0.00%   0 out of 96705
-
-    ✓ status is 200
-
-    HTTP
-    http_req_duration..............: avg=482.75ms min=387.38µs med=430.69ms max=2.78s p(90)=1.06s p(95)=1.13s
-      { expected_response:true }...: avg=482.75ms min=387.38µs med=430.69ms max=2.78s p(90)=1.06s p(95)=1.13s
-    http_req_failed................: 0.00%  0 out of 96705
-    http_reqs......................: 96705  9289.734147/s
-
-    EXECUTION
-    dropped_iterations.............: 90249  8669.553974/s
-    iteration_duration.............: avg=1.27s    min=85.65ms  med=526.15ms max=5.77s p(90)=4.04s p(95)=4.35s
-    iterations.....................: 96705  9289.734147/s
-    vus............................: 0      min=0          max=20042
-    vus_max........................: 20075  min=8984       max=20075
-
-    NETWORK
-    data_received..................: 12 MB  1.1 MB/s
-    data_sent......................: 6.8 MB 650 kB/s
-
-
-
-                                                                                                                      
-running (10.4s), 00000/20075 VUs, 96705 complete and 0 interrupted iterations                                         
-power_test ✓ [======================================] 00000/20075 VUs  10s  20000.00 iters/s   " is good but request conunte is reduces can we get 1000k+ ? check and make plane to it also the ws is solow also make a complete plane 
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

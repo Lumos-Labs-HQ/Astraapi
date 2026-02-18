@@ -4882,12 +4882,42 @@ class FastAPI(AppBase):
 
         return decorator
 
-    def run(self, host: str = "127.0.0.1", port: int = 8000) -> None:
-        """Run the app with the built-in C++ HTTP server (bypasses uvicorn/ASGI)."""
+    def run(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8000,
+        reload: bool = False,
+        reload_dirs: Optional[Sequence[str]] = None,
+        reload_includes: Optional[Sequence[str]] = None,
+        reload_excludes: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Run the app with the built-in C++ HTTP server.
+
+        Args:
+            host: Bind address.
+            port: Bind port.
+            reload: Enable hot reloading (development only). Watches for
+                file changes and restarts the server automatically.
+                Zero overhead when disabled.
+            reload_dirs: Directories to watch. Defaults to cwd.
+            reload_includes: Extra glob patterns to include (e.g. ``"*.yaml"``).
+            reload_excludes: Paths to exclude from watching.
+        """
         import asyncio
+
+        if reload:
+            from fastapi._reloader import is_reload_worker, run_with_reload
+
+            if not is_reload_worker():
+                run_with_reload(
+                    reload_dirs=reload_dirs,
+                    reload_includes=reload_includes,
+                    reload_excludes=reload_excludes,
+                )
+                return
+            # Worker subprocess — fall through to normal startup
 
         from fastapi._cpp_server import run_server
 
-        # Ensure routes are synced to C++ core
         self._sync_routes_to_core()
         asyncio.run(run_server(self, host, port))

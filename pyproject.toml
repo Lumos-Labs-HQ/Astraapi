@@ -47,6 +47,8 @@ dependencies = [
     "typing-extensions>=4.8.0",
     "typing-inspection>=0.4.2",
     "annotated-doc>=0.0.2",
+    "aiosqlite>=0.22.1",
+    "watchfiles>=1.0.0",
 ]
 
 [project.urls]

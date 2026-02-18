@@ -1514,9 +1514,7 @@ async def run_server(
     router = getattr(app, "router", None)
     lifespan_handler = None
     if router is not None:
-        lifespan_handler = getattr(router, "lifespan_handler", None)
-    if lifespan_handler is None:
-        lifespan_handler = getattr(app, "lifespan", None)
+        lifespan_handler = getattr(router, "lifespan_context", None)
 
     # ── Lifespan context manager or on_startup/on_shutdown ────────────
     lifespan_cm = None
@@ -1534,12 +1532,6 @@ async def run_server(
                     # Fallback: set attributes directly on app.state
                     for k, v in state.items():
                         setattr(app_state, k, v)
-    elif router is not None:
-        for handler in getattr(router, "on_startup", []):
-            if asyncio.iscoroutinefunction(handler):
-                await handler()
-            else:
-                handler()
 
     # ── Track active connections for graceful shutdown ──────────────────
     active_connections: set[CppHttpProtocol] = set()
@@ -1623,11 +1615,5 @@ async def run_server(
         # ── Lifespan: shutdown ─────────────────────────────────────────
         if lifespan_cm is not None:
             await lifespan_cm.__aexit__(None, None, None)
-        elif router is not None:
-            for handler in getattr(router, "on_shutdown", []):
-                if asyncio.iscoroutinefunction(handler):
-                    await handler()
-                else:
-                    handler()
 
         print("Server stopped.")
