@@ -15,7 +15,6 @@
 extern void init_status_line_cache();
 extern PyObject* py_build_response_from_parts(PyObject* self, PyObject* args);
 extern PyObject* py_build_chunked_frame(PyObject* self, PyObject* arg);
-extern PyObject* py_set_http_fd(PyObject* self, PyObject* arg);
 extern PyObject* py_http_buf_create(PyObject* self, PyObject* args);
 extern PyObject* py_http_buf_append(PyObject* self, PyObject* args);
 extern PyObject* py_http_buf_get_view(PyObject* self, PyObject* capsule);
@@ -66,6 +65,8 @@ extern PyObject* py_ws_ring_buffer_readable(PyObject* self, PyObject* args);
 extern PyObject* py_ws_ring_buffer_reset(PyObject* self, PyObject* args);
 extern PyObject* py_ws_echo_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_echo_direct_fd(PyObject* self, PyObject* args);
+extern PyObject* py_ws_echo_direct_fd_v2(PyObject* self, PyObject* args);
+extern PyObject* py_ws_flush_pending(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_get_metrics(PyObject* self, PyObject* capsule);
@@ -281,6 +282,8 @@ static PyMethodDef module_methods[] = {
     {"ws_ring_buffer_reset", (PyCFunction)py_ws_ring_buffer_reset, METH_VARARGS, nullptr},
     {"ws_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
     {"ws_echo_direct_fd", (PyCFunction)py_ws_echo_direct_fd, METH_VARARGS, nullptr},
+    {"ws_echo_direct_fd_v2", (PyCFunction)py_ws_echo_direct_fd_v2, METH_VARARGS, nullptr},
+    {"ws_flush_pending", (PyCFunction)py_ws_flush_pending, METH_VARARGS, nullptr},
     {"ws_handle_direct", (PyCFunction)py_ws_handle_direct, METH_VARARGS, nullptr},
     {"ws_handle_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
     {"ws_handle_json_direct", (PyCFunction)py_ws_handle_json_direct, METH_VARARGS, nullptr},
@@ -347,7 +350,6 @@ static PyMethodDef module_methods[] = {
     // Response building helpers
     {"build_response_from_parts", (PyCFunction)py_build_response_from_parts, METH_VARARGS, nullptr},
     {"build_chunked_frame", (PyCFunction)py_build_chunked_frame, METH_O, nullptr},
-    {"set_http_fd", (PyCFunction)py_set_http_fd, METH_O, nullptr},
     {"http_buf_create", (PyCFunction)py_http_buf_create, METH_NOARGS, nullptr},
     {"http_buf_append", (PyCFunction)py_http_buf_append, METH_VARARGS, nullptr},
     {"http_buf_get_view", (PyCFunction)py_http_buf_get_view, METH_O, nullptr},

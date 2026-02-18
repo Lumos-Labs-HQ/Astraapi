@@ -142,8 +142,6 @@ try:
         ws_handle_direct as _ws_handle_direct,
         ws_handle_echo_direct as _ws_handle_echo_direct,
         ws_handle_json_direct as _ws_handle_json_direct,
-        # Ultra-fast echo: writes directly to socket FD (bypasses asyncio transport)
-        ws_echo_direct_fd as _ws_echo_direct_fd,
         # Frame building (send_text/send_bytes/send_json/close/ping)
         ws_build_frame_bytes as _ws_build_frame_bytes,
         ws_build_ping_frame as _ws_build_ping_frame,
@@ -157,14 +155,15 @@ try:
         # Ring buffer lifecycle
         ws_ring_buffer_create as _ws_ring_buffer_create,
         ws_ring_buffer_reset as _ws_ring_buffer_reset,
+        # Direct socket echo v2 (exclusive FD writes, EAGAIN buffering)
+        ws_echo_direct_fd_v2 as _ws_echo_direct_fd_v2,
+        ws_flush_pending as _ws_flush_pending,
         # HTTP response helpers
         build_response_from_parts as _build_response_from_parts,
         build_chunked_frame as _build_chunked_frame,
         # Metrics (tracked in C++ to avoid per-frame Python attribute stores)
         ws_get_metrics as _ws_get_metrics,
         ws_update_send_metrics as _ws_update_send_metrics,
-        # Direct socket write for HTTP (bypasses asyncio transport)
-        set_http_fd as _set_http_fd,
         # Direct channel feed (bypasses intermediate Python list)
         ws_handle_and_feed as _ws_handle_and_feed,
         # HTTP connection buffer (replaces Python bytearray + memmove)
@@ -507,8 +506,9 @@ class CppWebSocket:
                 if self._echo_detect_count >= 1:
                     proto = self._protocol
                     if proto is not None:
-                        # Use direct FD write if socket FD available
-                        if proto._ws_fd >= 0:
+                        # Use direct socket echo v2 when FD available (exclusive
+                        # writes with EAGAIN buffering — no interleaving)
+                        if proto._ws_fd >= 0 and _ws_echo_direct_fd_v2 is not None:
                             proto._ws_handler = proto._handle_ws_frames_echo_fd
                         else:
                             proto._ws_handler = proto._handle_ws_frames_echo
@@ -546,7 +546,7 @@ class CppWebSocket:
                 if self._echo_detect_count >= 1:
                     proto = self._protocol
                     if proto is not None:
-                        if proto._ws_fd >= 0:
+                        if proto._ws_fd >= 0 and _ws_echo_direct_fd_v2 is not None:
                             proto._ws_handler = proto._handle_ws_frames_echo_fd
                         else:
                             proto._ws_handler = proto._handle_ws_frames_echo
@@ -866,7 +866,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_http_buf", "_ka", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set")
+    __slots__ = ("_core", "_transport", "_http_buf", "_ka", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -888,6 +888,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle: asyncio.TimerHandle | None = None
         self._ws_pong_received = True
         self._ws_task: asyncio.Task | None = None  # TS-2: tracked for cancellation
+        self._pending_tasks: set = set()  # Track async HTTP tasks for cancellation
 
     def _reinit(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
                 ka_timeout: float, connections_set: set | None) -> None:
@@ -908,6 +909,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle = None
         self._ws_pong_received = True
         self._ws_task = None
+        self._pending_tasks = set()
 
     # ── Connection lifecycle ─────────────────────────────────────────────
 
@@ -920,16 +922,15 @@ class CppHttpProtocol(asyncio.Protocol):
                 sock.setsockopt(socket.IPPROTO_TCP, 12, 1)  # TCP_QUICKACK = 12
             except (OSError, AttributeError):
                 pass
-            # Cache socket FD for direct C++ writes (bypasses asyncio transport)
-            try:
-                _set_http_fd(sock.fileno())
-            except (OSError, AttributeError):
-                _set_http_fd(-1)
         transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
         self._ka_reset()
 
     def connection_lost(self, exc: Exception | None) -> None:
-        _set_http_fd(-1)  # Clear direct write FD
+        # Cancel all pending async HTTP tasks to prevent writes to stale transport
+        for t in self._pending_tasks:
+            if not t.done():
+                t.cancel()
+        self._pending_tasks.clear()
         self._ka_cancel()
         self._stop_ws_heartbeat()
         # TS-2: Cancel tracked WebSocket task to prevent hanging
@@ -962,103 +963,88 @@ class CppHttpProtocol(asyncio.Protocol):
     def data_received(self, data: bytes) -> None:
         # WebSocket frame handling (after upgrade) — dispatch to mode-specific handler
         if self._ws is not None:
-            # Any incoming data means the connection is alive (PONG tracking)
             self._ws_pong_received = True
-            # Hot path: no try/except for echo handlers (C++ handles errors internally).
-            # Exception handling moved into individual non-echo handlers.
             self._ws_handler(data)
             return
 
-        # Append to C++ HTTP buffer (O(1) amortized, no Python bytearray concat)
-        if not _http_buf_append(self._http_buf, data):
-            # Buffer exceeded 1MB max — reject with 413
-            transport = self._transport
-            if transport and not transport.is_closing():
-                transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                transport.close()
-            _http_buf_clear(self._http_buf)
-            return
-
+        # Back-pressure: buffer data but don't process until writes resume
         if self._wr_paused:
+            if not _http_buf_append(self._http_buf, data):
+                transport = self._transport
+                if transport and not transport.is_closing():
+                    transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    transport.close()
+                _http_buf_clear(self._http_buf)
             return
 
         transport = self._transport
         if not transport or transport.is_closing():
             return
 
-        core = self._core
-        IR = _InlineResult
+        # ── Append + parse loop: 6 individual C++ calls ──────────────────
+        http_buf = self._http_buf
+        if not _http_buf_append(http_buf, data):
+            transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+            transport.close()
+            _http_buf_clear(http_buf)
+            return
 
-        # Get memoryview into C++ buffer's readable region (zero-copy)
-        mv = _http_buf_get_view(self._http_buf)
+        mv = _http_buf_get_view(http_buf)
         if mv is None:
             return
-        total_consumed = 0
-        buf_len = len(mv)
 
-        while total_consumed < buf_len:
-            # ── C++ handle_http: parse + route + dispatch + write ──────
-            # OPT-7: Pass offset to C++ instead of creating memoryview slices.
-            # Avoids N-1 PyMemoryView_FromObject calls for N pipelined requests.
-            try:
-                consumed, result = core.handle_http(mv, transport, total_consumed)
-            except Exception:
-                mv.release()
-                _http_buf_clear(self._http_buf)
-                transport.write(_500_RESP)
-                transport.close()
-                return
+        core = self._core
+        offset = 0
+        IR = _InlineResult
+
+        while True:
+            result = core.handle_http(mv, transport, offset)
+            consumed, result_obj = result
 
             if consumed == 0:
                 break  # need more data
-
             if consumed < 0:
-                # Parse error — 400 already sent by C++
+                # Parse error (400 sent by C++)
                 mv.release()
-                _http_buf_clear(self._http_buf)
                 transport.close()
+                _http_buf_clear(http_buf)
                 return
 
-            total_consumed += consumed
+            offset += consumed
 
-            # ── Dispatch based on result type ────────────────────────
-            if result is True:
-                # Sync endpoint handled entirely by C++ — response already written
+            if result_obj is True or result_obj is None:
+                # Sync endpoint handled — response already written
                 continue
 
-            if result is None:
-                continue
-
-            if isinstance(result, tuple):
-                tag = result[0]
+            # ── Async / WS dispatch ──────────────────────────────────
+            if isinstance(result_obj, tuple):
+                tag = result_obj[0]
                 if tag == "ws":
-                    # WebSocket upgrade: ("ws", endpoint, path_params, path, headers_list, query_bytes)
-                    rlen = len(result)
-                    ws_path = result[3] if rlen >= 4 else "/"
-                    ws_headers = result[4] if rlen >= 5 else []
-                    ws_query_string = result[5] if rlen >= 6 else b""
-                    _, endpoint, path_params = result[0], result[1], result[2]
-                    # print(f"[WS-DEBUG] upgrade detected: path={ws_path} params={path_params} endpoint={endpoint}", file=sys.stderr)
+                    rlen = len(result_obj)
+                    ws_path = result_obj[3] if rlen >= 4 else "/"
+                    ws_headers = result_obj[4] if rlen >= 5 else []
+                    ws_query_string = result_obj[5] if rlen >= 6 else b""
+                    endpoint, path_params = result_obj[1], result_obj[2]
                     if endpoint is None:
-                        # No matching WS route — 101 already sent, just close
-                        # print("[WS-DEBUG] endpoint is None — closing", file=sys.stderr)
+                        mv.release()
                         if transport and not transport.is_closing():
                             transport.close()
-                        mv.release()
-                        _http_buf_clear(self._http_buf)
+                        _http_buf_clear(http_buf)
                         return
+                    # Consume bytes processed so far before switching to WS
+                    mv.release()
+                    _http_buf_consume(http_buf, offset)
                     ws = CppWebSocket(
                         transport, self._loop,
                         path=ws_path, path_params=path_params,
                         headers=ws_headers, query_string=ws_query_string,
                     )
-                    ws._protocol = self  # back-ref for echo mode switching
-                    ws._channel._protocol = self  # back-ref for backpressure
+                    ws._protocol = self
+                    ws._channel._protocol = self
                     self._ws = ws
                     _server_ws_metrics.active_connections += 1
                     _server_ws_metrics.total_connections += 1
-                    self._ka_cancel()  # WS connections are long-lived
-                    # TCP_NODELAY: disable Nagle's algorithm for low-latency WS
+                    self._ka_cancel()
                     self._ws_fd = -1
                     try:
                         sock = transport.get_extra_info("socket")
@@ -1067,51 +1053,48 @@ class CppHttpProtocol(asyncio.Protocol):
                             self._ws_fd = sock.fileno()
                     except (OSError, AttributeError):
                         pass
-                    # WS connections need higher write buffer limits to avoid
-                    # premature backpressure during high-throughput echo/broadcast
                     transport.set_write_buffer_limits(high=524288, low=131072)
-                    # Initialize ring buffer for WebSocket frame accumulation
                     if _ws_pool is not None:
                         self._ws_ring_buf = _ws_pool.acquire()
                     elif _ws_ring_buffer_create is not None:
                         self._ws_ring_buf = _ws_ring_buffer_create()
                     self._ws_handler = self._handle_ws_frames
-                    # Start heartbeat to detect dead connections
                     self._start_ws_heartbeat()
-                    # TS-2: Track WS task for cancellation on connection_lost
                     self._ws_task = self._loop.create_task(
                         self._handle_websocket(endpoint, path_params))
                     # Remaining buffer data (if any) is WebSocket frames
-                    remaining = bytes(mv[total_consumed:])
-                    mv.release()
-                    _http_buf_clear(self._http_buf)
+                    remaining_mv = _http_buf_get_view(http_buf)
+                    remaining = bytes(remaining_mv) if remaining_mv is not None else b""
+                    if remaining_mv is not None:
+                        remaining_mv.release()
+                    _http_buf_clear(http_buf)
                     if remaining:
                         self._ws_handler(remaining)
                     return  # connection is now WebSocket
 
                 elif tag == "async":
-                    # Async endpoint: ("async", coro, status_code, keep_alive)
-                    _, coro, status_code, keep_alive = result
-                    self._loop.create_task(
+                    _, coro, status_code, keep_alive = result_obj
+                    task = self._loop.create_task(
                         self._handle_async(coro, status_code, keep_alive))
+                    self._pending_tasks.add(task)
+                    task.add_done_callback(self._pending_tasks.discard)
 
                 elif tag == "async_di":
-                    # Async DI: ("async_di", di_coro, endpoint, kwargs, sc, ka)
-                    _, di_coro, endpoint, kwargs, sc, ka = result
-                    self._loop.create_task(
+                    _, di_coro, endpoint, kwargs, sc, ka = result_obj
+                    task = self._loop.create_task(
                         self._handle_async_di(di_coro, endpoint, kwargs, sc, ka))
+                    self._pending_tasks.add(task)
+                    task.add_done_callback(self._pending_tasks.discard)
 
-            elif IR and isinstance(result, IR):
-                # Pydantic body validation needed
-                self._loop.create_task(self._handle_pydantic(result))
+            elif IR and type(result_obj) is IR:
+                task = self._loop.create_task(self._handle_pydantic(result_obj))
+                self._pending_tasks.add(task)
+                task.add_done_callback(self._pending_tasks.discard)
 
-        # O(1) consume — just advances read pointer in C++ buffer (no memmove)
         mv.release()
-        if total_consumed > 0:
-            _http_buf_consume(self._http_buf, total_consumed)
-
-        # ── Flush ─────────────────────────────────────────────────────
-        if _http_buf_len(self._http_buf) == 0:
+        if offset > 0:
+            _http_buf_consume(http_buf, offset)
+        if _http_buf_len(http_buf) == 0:
             self._ka_reset()
 
     # ── WebSocket frame handling ─────────────────────────────────────────
@@ -1166,27 +1149,26 @@ class CppHttpProtocol(asyncio.Protocol):
                 _send_close_response(transport, close_payload)
 
     def _handle_ws_frames_echo_fd(self, data: bytes) -> None:
-        """Ultra-fast echo — C++ writes directly to socket FD, bypassing asyncio."""
-        result = _ws_echo_direct_fd(self._ws_ring_buf, data, self._ws_fd)
-        if result is None:
-            return  # Happy path — all echoed via writev()
-        if isinstance(result, tuple):
-            # writev() failed — fallback: write echo bytes via transport + handle close
-            fallback_bytes, close_payload = result
-            transport = self._transport
-            if fallback_bytes is not None and transport and not transport.is_closing():
-                transport.write(fallback_bytes)
-            if close_payload is not None:
-                ws = self._ws
-                if ws:
-                    ws.feed_frame(0x8, close_payload)
-                    _send_close_response(transport, close_payload)
-        elif isinstance(result, bytes):
-            # Close frame only (bytes) — normal close path
+        """Echo via direct socket write — bypasses asyncio transport entirely.
+        On EAGAIN, buffers unsent data for retry via _flush_ws_echo_pending."""
+        status = _ws_echo_direct_fd_v2(self._ws_ring_buf, data, self._ws_fd)
+        if status == 0:
+            return  # Happy path — echoed via direct socket
+        if status == -1:
+            # EAGAIN — data buffered in C++, schedule retry
+            self._loop.call_soon(self._flush_ws_echo_pending)
+        elif isinstance(status, tuple) and status[0] == 2:
             ws = self._ws
             if ws:
-                ws.feed_frame(0x8, result)
-                _send_close_response(self._transport, result)
+                ws.feed_frame(0x8, status[1])
+                _send_close_response(self._transport, status[1])
+
+    def _flush_ws_echo_pending(self) -> None:
+        """Retry sending buffered WS echo data via direct socket."""
+        if self._ws_fd < 0:
+            return
+        if _ws_flush_pending(self._ws_ring_buf, self._ws_fd) == -1:
+            self._loop.call_soon(self._flush_ws_echo_pending)  # retry next tick
 
     def _handle_ws_frames_json(self, data: bytes) -> None:
         """JSON mode — single C++ call does ring + parse + unmask + JSON decode."""
@@ -1306,12 +1288,18 @@ class CppHttpProtocol(asyncio.Protocol):
                         header_bytes += f"{name}: {value}\r\n"
                     header_bytes += "\r\n"
                     transport.write(header_bytes.encode())
-                    async for chunk in raw.body_iterator:
-                        if isinstance(chunk, str):
-                            chunk = chunk.encode("utf-8")
-                        if chunk:
-                            transport.write(_build_chunked_frame(chunk))
-                    transport.write(b"0\r\n\r\n")
+                    try:
+                        async for chunk in raw.body_iterator:
+                            if isinstance(chunk, str):
+                                chunk = chunk.encode("utf-8")
+                            if chunk:
+                                transport.write(_build_chunked_frame(chunk))
+                        transport.write(b"0\r\n\r\n")
+                    except Exception:
+                        try:
+                            transport.write(b"0\r\n\r\n")
+                        except Exception:
+                            pass
                 # Handle Starlette Response objects (HTMLResponse, etc.)
                 elif hasattr(raw, "body") and hasattr(raw, "status_code"):
                     self._write_response_obj(raw, keep_alive)
@@ -1422,10 +1410,16 @@ class CppHttpProtocol(asyncio.Protocol):
             ws._metrics.errors += 1
             raise
         finally:
-            if not ws._closed:
-                await ws.close(1000)
-            if self._transport and not self._transport.is_closing():
-                self._transport.close()
+            try:
+                if not ws._closed:
+                    await ws.close(1000)
+            except Exception:
+                pass
+            try:
+                if self._transport and not self._transport.is_closing():
+                    self._transport.close()
+            except Exception:
+                pass
 
     # ── Keep-alive timer ─────────────────────────────────────────────────
 

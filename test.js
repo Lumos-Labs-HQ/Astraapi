@@ -6,12 +6,12 @@ export const options = {
   scenarios: {
     power_test: {
       executor: 'constant-arrival-rate',
-      rate: 300000,        
+      rate: 20000,        
       timeUnit: '1s',
       duration: '10s',
 
       preAllocatedVUs: 20000,
-      maxVUs: 300000,
+      maxVUs: 25000,
     },
   },
 };

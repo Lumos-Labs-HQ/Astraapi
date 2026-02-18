@@ -684,11 +684,257 @@ PyObject* py_ws_echo_direct_fd(PyObject* /*self*/, PyObject* args) {
         state->ring.consume(eres.total_consumed);
     }
 
-    // writev() failed — return unsent bytes for Python transport.write() fallback
+    // writev() failed — return (fallback_bytes, None) tuple for Python transport.write()
     PyObject* fallback = build_fallback_bytes();
-    if (fallback) return fallback;
+    if (fallback) {
+        PyObject* tup = PyTuple_Pack(2, fallback, Py_None);
+        Py_DECREF(fallback);
+        return tup;
+    }
 
     Py_RETURN_NONE;  // Happy path: zero allocations, zero copies!
+}
+
+// ── ws_echo_direct_fd_v2: Exclusive direct socket echo with EAGAIN buffering ──
+// Like ws_echo_direct_fd but NEVER falls back to transport.write().
+// On EAGAIN/partial write: buffers unsent data in WsConnectionState::output_pending
+// for later retry via py_ws_flush_pending().
+// Returns: 0 (success) | -1 (EAGAIN, data buffered) | (2, close_payload) for close
+
+PyObject* py_ws_echo_direct_fd_v2(PyObject* /*self*/, PyObject* args) {
+    PyObject* capsule;
+    Py_buffer py_buf;
+    int fd;
+
+    if (!PyArg_ParseTuple(args, "Oy*i", &capsule, &py_buf, &fd)) {
+        return nullptr;
+    }
+
+    WsConnectionState* state = get_conn_state(capsule);
+    if (!state) {
+        PyBuffer_Release(&py_buf);
+        PyErr_SetString(PyExc_ValueError, "Invalid ws_connection_state capsule");
+        return nullptr;
+    }
+
+    // Step 1: Append incoming data to ring buffer
+    bool appended = state->ring.append(
+        static_cast<const uint8_t*>(py_buf.buf), py_buf.len);
+    PyBuffer_Release(&py_buf);
+
+    if (!appended) {
+        return PyLong_FromLong(0);  // Ring buffer full — treat as success (backpressure)
+    }
+
+    // Step 2: Get contiguous readable data
+    auto [data, data_len] = state->ring.readable_contiguous();
+    if (data == nullptr || data_len == 0) {
+        return PyLong_FromLong(0);  // No complete frames yet
+    }
+
+    // Step 3: Parse frames, build scatter-gather echo — same as v1
+    static constexpr int MAX_WRITEV_FRAMES = 256;
+    static thread_local uint8_t tl_hdr_buf[MAX_WRITEV_FRAMES * 10];
+    static thread_local PlatformIoVec tl_iov[MAX_WRITEV_FRAMES * 2];
+
+    EchoResult eres;
+    bool write_ok = true;
+    bool write_eagain = false;
+    size_t total_consumed = 0;
+    int iov_count = 0;
+    size_t hdr_offset = 0;
+    int remaining_iovs = 0;
+    PlatformIoVec* iov_ptr = tl_iov;
+
+    auto do_echo = [&]() {
+        // First: flush any pending output from previous EAGAIN
+        if (state->output_pending_len > 0) {
+            ssize_t n = platform_socket_write(fd,
+                state->output_pending, state->output_pending_len);
+            if (n <= 0) {
+                write_ok = false;
+                write_eagain = true;
+                return;  // Still can't write — buffer new data too
+            }
+            if ((size_t)n < state->output_pending_len) {
+                // Partial write of pending — shift remaining
+                size_t rem = state->output_pending_len - (size_t)n;
+                memmove(state->output_pending,
+                        state->output_pending + n, rem);
+                state->output_pending_len = rem;
+                write_ok = false;
+                write_eagain = true;
+                return;  // Can't write more yet
+            }
+            state->output_pending_len = 0;  // Fully flushed
+        }
+
+        // Parse frames and build iovecs
+        while (total_consumed < data_len && iov_count < MAX_WRITEV_FRAMES * 2 - 1) {
+            WsFrame frame;
+            int consumed = ws_parse_frame(data + total_consumed,
+                                          data_len - total_consumed, &frame);
+            if (consumed <= 0) break;
+
+            uint8_t opcode = (uint8_t)frame.opcode;
+
+            if (opcode == WS_CLOSE) {
+                eres.has_close = true;
+                if (frame.masked && frame.payload_len > 0) {
+                    ws_unmask((uint8_t*)frame.payload,
+                              (size_t)frame.payload_len, frame.mask_key);
+                }
+                eres.close_payload_offset = (size_t)(frame.payload - data);
+                eres.close_payload_len = (size_t)frame.payload_len;
+                total_consumed += (size_t)consumed;
+                break;
+            }
+
+            if (opcode == WS_PONG) {
+                total_consumed += (size_t)consumed;
+                continue;
+            }
+
+            // Unmask payload in-place
+            if (frame.masked && frame.payload_len > 0) {
+                ws_unmask((uint8_t*)frame.payload,
+                          (size_t)frame.payload_len, frame.mask_key);
+            }
+
+            // Response opcode: PING → PONG, else echo same
+            WsOpcode resp_opcode = (opcode == WS_PING)
+                ? WS_PONG : (WsOpcode)opcode;
+
+            // Write frame header into scratch buffer
+            size_t hdr_len = ws_write_frame_header(
+                tl_hdr_buf + hdr_offset, resp_opcode,
+                (size_t)frame.payload_len);
+
+            // Header iovec
+            tl_iov[iov_count].base = tl_hdr_buf + hdr_offset;
+            tl_iov[iov_count].len = hdr_len;
+            iov_count++;
+            hdr_offset += hdr_len;
+
+            // Payload iovec — zero-copy from ring buffer
+            if (frame.payload_len > 0) {
+                tl_iov[iov_count].base = (void*)frame.payload;
+                tl_iov[iov_count].len = (size_t)frame.payload_len;
+                iov_count++;
+            }
+
+            total_consumed += (size_t)consumed;
+        }
+        eres.total_consumed = total_consumed;
+
+        // Single scatter-gather write
+        if (iov_count > 0 && fd >= 0) {
+            remaining_iovs = iov_count;
+            iov_ptr = tl_iov;
+            while (remaining_iovs > 0) {
+                ssize_t n = platform_socket_writev(fd, iov_ptr, remaining_iovs);
+                if (n <= 0) {
+                    write_ok = false;
+                    write_eagain = true;
+                    break;
+                }
+                // Advance past fully-written iovecs
+                size_t written = (size_t)n;
+                while (remaining_iovs > 0 && written > 0) {
+                    if (written >= iov_ptr->len) {
+                        written -= iov_ptr->len;
+                        iov_ptr++;
+                        remaining_iovs--;
+                    } else {
+                        iov_ptr->base = (uint8_t*)iov_ptr->base + written;
+                        iov_ptr->len -= written;
+                        written = 0;
+                    }
+                }
+            }
+        }
+    };
+
+    // Release GIL for writev() syscall
+    Py_BEGIN_ALLOW_THREADS
+    do_echo();
+    Py_END_ALLOW_THREADS
+
+    // Buffer any unsent iovecs into output_pending (instead of transport.write fallback)
+    if (!write_ok && remaining_iovs > 0) {
+        for (int i = 0; i < remaining_iovs; i++) {
+            state->buffer_output(iov_ptr[i].base, iov_ptr[i].len);
+        }
+    }
+
+    // Handle close frame
+    if (eres.has_close) {
+        PyObject* close_bytes = PyBytes_FromStringAndSize(
+            (const char*)(data + eres.close_payload_offset),
+            (Py_ssize_t)eres.close_payload_len);
+        if (eres.total_consumed > 0) {
+            state->ring.consume(eres.total_consumed);
+        }
+        // Return (2, close_payload)
+        PyObject* two = PyLong_FromLong(2);
+        if (!two) { Py_XDECREF(close_bytes); return nullptr; }
+        PyObject* tup = PyTuple_Pack(2, two, close_bytes ? close_bytes : Py_None);
+        Py_DECREF(two);
+        Py_XDECREF(close_bytes);
+        return tup;
+    }
+
+    // Consume processed bytes
+    if (eres.total_consumed > 0) {
+        state->ring.consume(eres.total_consumed);
+    }
+
+    // Return 0 (success) or -1 (EAGAIN, data buffered for later flush)
+    return PyLong_FromLong(write_eagain ? -1 : 0);
+}
+
+// ── ws_flush_pending: Retry sending buffered output via direct socket ────────
+// Returns: 0 (all flushed) | -1 (still pending, retry later)
+
+PyObject* py_ws_flush_pending(PyObject* /*self*/, PyObject* args) {
+    PyObject* capsule;
+    int fd;
+
+    if (!PyArg_ParseTuple(args, "Oi", &capsule, &fd)) {
+        return nullptr;
+    }
+
+    WsConnectionState* state = get_conn_state(capsule);
+    if (!state) {
+        PyErr_SetString(PyExc_ValueError, "Invalid ws_connection_state capsule");
+        return nullptr;
+    }
+
+    if (state->output_pending_len == 0) {
+        return PyLong_FromLong(0);  // Nothing pending
+    }
+
+    ssize_t n;
+    Py_BEGIN_ALLOW_THREADS
+    n = platform_socket_write(fd,
+        state->output_pending, state->output_pending_len);
+    Py_END_ALLOW_THREADS
+
+    if (n <= 0) {
+        return PyLong_FromLong(-1);  // Still can't write
+    }
+
+    if ((size_t)n >= state->output_pending_len) {
+        state->output_pending_len = 0;  // Fully flushed
+        return PyLong_FromLong(0);
+    }
+
+    // Partial write — shift remaining data
+    size_t rem = state->output_pending_len - (size_t)n;
+    memmove(state->output_pending,
+            state->output_pending + n, rem);
+    state->output_pending_len = rem;
+    return PyLong_FromLong(-1);  // Still pending
 }
 
 // ── ws_handle_direct: Single-call text/binary handler ───────────────────────

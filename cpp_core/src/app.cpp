@@ -2056,6 +2056,10 @@ static bool cors_origin_allowed(const CorsConfig* cors, const char* origin, size
 static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
                                   const char* origin, size_t origin_len) {
     if (!cors || !origin || origin_len == 0) return 0;
+    // Reject origins containing CRLF to prevent header injection
+    for (size_t i = 0; i < origin_len; i++) {
+        if (origin[i] == '\r' || origin[i] == '\n') return 0;
+    }
     size_t start = buf.size();
 
     // Access-Control-Allow-Origin
@@ -2099,6 +2103,11 @@ static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
 static PyObject* build_cors_preflight_response(
     const CorsConfig* cors, const char* origin, size_t origin_len, bool keep_alive)
 {
+    // Reject origins containing CRLF to prevent header injection
+    for (size_t i = 0; i < origin_len; i++) {
+        if (origin[i] == '\r' || origin[i] == '\n') Py_RETURN_NONE;
+    }
+
     auto buf = acquire_buffer();
     buf.reserve(512);
 
@@ -2267,8 +2276,25 @@ static PyObject* build_http_response_bytes(
     // Reserve total size upfront — eliminates ALL reallocations
     buf.reserve(256 + body_len);
 
+    if (status_code == 200 && !cors && !content_encoding && keep_alive) {
+        // Ultra-fast path: single resize + 4 memcpy for 200 JSON keep-alive
+        // (eliminates multiple buf.insert calls + branch overhead)
+        char cl_buf[20];
+        int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
+        static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
+        size_t total = sizeof(HDR_200_JSON) - 1 + cl_len + sizeof(SUFFIX_KA) - 1 + body_len;
+        buf.resize(total);
+        char* dst = buf.data();
+        memcpy(dst, HDR_200_JSON, sizeof(HDR_200_JSON) - 1); dst += sizeof(HDR_200_JSON) - 1;
+        memcpy(dst, cl_buf, cl_len); dst += cl_len;
+        memcpy(dst, SUFFIX_KA, sizeof(SUFFIX_KA) - 1); dst += sizeof(SUFFIX_KA) - 1;
+        memcpy(dst, body_data, body_len);
+        PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+        release_buffer(std::move(buf));
+        return result;
+    }
+
     if (status_code == 200 && !cors && !content_encoding) {
-        // Fast path: single insert for entire header prefix (no CORS, no compression)
         buf.insert(buf.end(), HDR_200_JSON, HDR_200_JSON + sizeof(HDR_200_JSON) - 1);
     } else if (status_code == 200) {
         // 200 with CORS or compression
@@ -2362,32 +2388,16 @@ static PyObject* build_http_error_response(int status_code, const char* message,
     return result;
 }
 
-// Cached socket FD for direct write (set per-connection from Python side)
-// -1 = not available, use transport.write() fallback
-static thread_local int s_http_fd = -1;
+// Fast variant: skip is_closing() check for sync path where transport is already validated
+static int write_to_transport_fast(PyObject* transport, PyObject* data) {
+    if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
+    PyRef result(PyObject_CallMethodOneArg(transport, g_str_write, data));
+    if (!result) { PyErr_Clear(); return -1; }
+    return 0;
+}
 
 static int write_to_transport(PyObject* transport, PyObject* data) {
     if (!transport || transport == Py_None) return -1;
-
-    // Fast path: direct socket write bypasses asyncio transport overhead
-    // (2 Python method calls: is_closing() + write() → 1 syscall)
-    if (s_http_fd >= 0 && PyBytes_Check(data)) {
-        const char* buf = PyBytes_AS_STRING(data);
-        Py_ssize_t len = PyBytes_GET_SIZE(data);
-        ssize_t written = 0;
-        while (written < len) {
-            ssize_t n = platform_socket_write(s_http_fd,
-                buf + written, (size_t)(len - written));
-            if (n <= 0) {
-                // Socket error — fall through to transport.write() which handles buffering
-                break;
-            }
-            written += n;
-        }
-        if (written == len) return 0;
-        // Partial write — fall through to transport for remaining data
-        // (transport handles write buffering and backpressure)
-    }
 
     if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
     if (!g_str_is_closing) g_str_is_closing = PyUnicode_InternFromString("is_closing");
@@ -2402,16 +2412,6 @@ static int write_to_transport(PyObject* transport, PyObject* data) {
         return -1;
     }
     return 0;
-}
-
-// Set the HTTP socket FD for direct write (called from Python at connection_made)
-PyObject* py_set_http_fd(PyObject* /*self*/, PyObject* arg) {
-    s_http_fd = (int)PyLong_AsLong(arg);
-    if (s_http_fd == -1 && PyErr_Occurred()) {
-        PyErr_Clear();
-        s_http_fd = -1;
-    }
-    Py_RETURN_NONE;
 }
 
 // ── HttpConnectionBuffer — replaces Python bytearray + memmove ──────────────
@@ -2617,7 +2617,7 @@ static PyObject* CoreApp_handle_http(
     Py_ssize_t buf_len = view.len - offset;
 
     // ── Parse HTTP request ───────────────────────────────────────────────
-    ParsedHttpRequest req;
+    ParsedHttpRequest req = {};
     int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
 
     if (parse_result == 0) {
@@ -2644,30 +2644,34 @@ static PyObject* CoreApp_handle_http(
     StringView host_sv;
     StringView accept_encoding_sv;
     StringView content_type_sv;
-    for (int i = 0; i < req.header_count; i++) {
-        const auto& hdr = req.headers[i];
-        size_t nlen = hdr.name.len;
-        char fb = nlen > 0 ? (hdr.name.data[0] | 0x20) : 0;
-        switch (nlen) {
-            case 4:
-                if (host_sv.empty() && fb == 'h' && hdr.name.iequals("host", 4))
-                    host_sv = hdr.value;
-                break;
-            case 6:
-                if (origin_sv.empty() && fb == 'o' && hdr.name.iequals("origin", 6))
-                    origin_sv = hdr.value;
-                break;
-            case 12:
-                if (content_type_sv.empty() && fb == 'c' && hdr.name.iequals("content-type", 12))
-                    content_type_sv = hdr.value;
-                break;
-            case 15:
-                if (accept_encoding_sv.empty() && fb == 'a' && hdr.name.iequals("accept-encoding", 15))
-                    accept_encoding_sv = hdr.value;
-                break;
+    {
+        // Only look for origin if CORS is configured (skip if not)
+        bool want_origin = (self->cors_config.load().get() != nullptr);
+        int found = 0;
+        const int need = want_origin ? 4 : 3;
+        for (int i = 0; i < req.header_count && found < need; i++) {
+            const auto& hdr = req.headers[i];
+            size_t nlen = hdr.name.len;
+            char fb = nlen > 0 ? (hdr.name.data[0] | 0x20) : 0;
+            switch (nlen) {
+                case 4:
+                    if (host_sv.empty() && fb == 'h' && hdr.name.iequals("host", 4))
+                        { host_sv = hdr.value; found++; }
+                    break;
+                case 6:
+                    if (want_origin && origin_sv.empty() && fb == 'o' && hdr.name.iequals("origin", 6))
+                        { origin_sv = hdr.value; found++; }
+                    break;
+                case 12:
+                    if (content_type_sv.empty() && fb == 'c' && hdr.name.iequals("content-type", 12))
+                        { content_type_sv = hdr.value; found++; }
+                    break;
+                case 15:
+                    if (accept_encoding_sv.empty() && fb == 'a' && hdr.name.iequals("accept-encoding", 15))
+                        { accept_encoding_sv = hdr.value; found++; }
+                    break;
+            }
         }
-        if (!origin_sv.empty() && !host_sv.empty() &&
-            !accept_encoding_sv.empty() && !content_type_sv.empty()) break;
     }
 
     // ── Trusted host check ──────────────────────────────────────────────
@@ -2900,12 +2904,17 @@ static PyObject* CoreApp_handle_http(
 
     const auto& spec = *spec_ptr;
 
-    // ── Build kwargs dict ────────────────────────────────────────────────
-    PyRef kwargs(PyDict_New());
-    if (!kwargs) return nullptr;
+    // ── OPT: Skip kwargs for zero-param endpoints (e.g. GET /) ──────────
+    bool needs_kwargs = (match->param_count > 0) ||
+        spec.has_query_params || spec.has_header_params ||
+        spec.has_cookie_params || has_body_params_local ||
+        spec.has_dependencies || !req.query_string.empty();
+
+    PyRef kwargs(needs_kwargs ? PyDict_New() : nullptr);
+    if (needs_kwargs && !kwargs) return nullptr;
 
     // ── Path parameters — O(1) hash map lookup ────────────────────────
-    if (match->param_count > 0) {
+    if (needs_kwargs && match->param_count > 0) {
         for (int pi = 0; pi < match->param_count; pi++) {
             auto pname = match->params[pi].name;
             auto pval = match->params[pi].value;
@@ -3403,7 +3412,7 @@ body_done:
     // Use PyObject_VectorcallDict for endpoints with params (avoids tuple creation).
     PyRef coro(nullptr);
     {
-        Py_ssize_t nkw = PyDict_GET_SIZE(kwargs.get());
+        Py_ssize_t nkw = kwargs ? PyDict_GET_SIZE(kwargs.get()) : 0;
         if (nkw == 0) {
             // Zero params — fastest path: no args tuple, no kwargs dict
             coro = PyRef(PyObject_CallNoArgs(endpoint_local));
@@ -3427,6 +3436,7 @@ body_done:
                 PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
                 PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
                 int scode = sc ? (int)PyLong_AsLong(sc.get()) : 500;
+                if (scode == -1 && PyErr_Occurred()) { PyErr_Clear(); scode = 500; }
 
                 // Check custom exception handlers first
                 auto eh_it = self->exception_handlers.find((uint16_t)scode);
@@ -3443,12 +3453,14 @@ body_done:
                             PyBytes_AsStringAndSize(body_attr.get(), &hbody, &hbody_len);
                             PyRef sc_attr(PyObject_GetAttrString(handler_result.get(), "status_code"));
                             int hsc = sc_attr ? (int)PyLong_AsLong(sc_attr.get()) : scode;
+                            if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = scode; }
                             PyRef resp(build_http_response_bytes(hsc, hbody, (size_t)hbody_len, req.keep_alive,
                                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                             if (resp) write_to_transport(transport, resp.get());
                         }
                     }
                     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                    if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(req.total_consumed);
                 }
 
@@ -3461,6 +3473,7 @@ body_done:
                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                     if (resp) write_to_transport(transport, resp.get());
                     self->active_requests.fetch_sub(1, std::memory_order_relaxed);
+                    if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(req.total_consumed);
                 }
             }
@@ -3472,6 +3485,7 @@ body_done:
         if (resp) write_to_transport(transport, resp.get());
         self->active_requests.fetch_sub(1, std::memory_order_relaxed);
         self->total_errors.fetch_add(1, std::memory_order_relaxed);
+        if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
         return make_consumed_true(req.total_consumed);
     }
 
@@ -3971,7 +3985,7 @@ static PyObject* CoreApp_parse_and_route(
     Py_ssize_t buf_len = view.len;
 
     // ── Parse HTTP request ───────────────────────────────────────────────
-    ParsedHttpRequest req;
+    ParsedHttpRequest req = {};
     int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
 
     if (parse_result == 0) {
