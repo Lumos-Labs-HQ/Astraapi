@@ -59,6 +59,12 @@ def wrap_app_handling_exceptions(
     except KeyError:
         exception_handlers, status_handlers = {}, {}
 
+    # Cache HTTPException import once at wrapping time, not per-exception
+    try:
+        from fastapi.exceptions import HTTPException as _HTTPException
+    except ImportError:
+        _HTTPException = None  # type: ignore[misc, assignment]
+
     async def wrapped_app(scope: Scope, receive: Receive, send: Send) -> None:
         response_started = False
 
@@ -73,12 +79,7 @@ def wrap_app_handling_exceptions(
         except Exception as exc:
             handler = None
 
-            # First, try to match by status code for HTTPException
-            # Import lazily to avoid circular dependencies
-            try:
-                from fastapi.exceptions import HTTPException
-            except ImportError:
-                HTTPException = None  # type: ignore[misc, assignment]
+            HTTPException = _HTTPException
 
             if HTTPException is not None and isinstance(exc, HTTPException):
                 handler = status_handlers.get(exc.status_code)

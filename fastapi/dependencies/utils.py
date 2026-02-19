@@ -3,7 +3,7 @@ import inspect
 import sys
 from collections.abc import Coroutine, Mapping, Sequence
 from contextlib import AsyncExitStack, contextmanager
-from copy import copy, deepcopy
+from copy import copy
 from dataclasses import dataclass
 from typing import (
     Annotated,
@@ -742,6 +742,7 @@ async def solve_dependencies(
                 _qp = parse_query_string(_qs)
             if _qp is None:
                 _qp = {}
+            _hdrs = None
             if dependant.header_params:
                 # Parse headers WITHOUT convert_underscores — the core batch
                 # extractor handles per-field conversion at lookup time.
@@ -895,6 +896,16 @@ async def solve_dependencies(
     )
 
 
+_IMMUTABLE_TYPES = (type(None), str, int, float, bool, tuple, frozenset, bytes)
+
+
+def _safe_default(val: Any) -> Any:
+    """Return field default efficiently: skip copy for immutable types."""
+    if isinstance(val, _IMMUTABLE_TYPES):
+        return val
+    return copy(val)
+
+
 def _validate_value_with_model_field(
     *, field: ModelField, value: Any, values: dict[str, Any], loc: tuple[str, ...]
 ) -> tuple[Any, list[Any]]:
@@ -902,7 +913,7 @@ def _validate_value_with_model_field(
         if field.required:
             return None, [get_missing_field_error(loc=loc)]
         else:
-            return deepcopy(field.default), []
+            return _safe_default(field.default), []
     return field.validate(value, values, loc=loc)
 
 
@@ -934,7 +945,7 @@ def _get_multidict_value(
         if field.required:
             return
         else:
-            return deepcopy(field.default)
+            return _safe_default(field.default)
     return value
 
 
@@ -1003,7 +1014,7 @@ def _core_query_params_to_args(
             if field.required:
                 value = None
             else:
-                value = deepcopy(field.default)
+                value = _safe_default(field.default)
                 values[field.name] = value
                 continue
 
@@ -1123,7 +1134,7 @@ def _core_header_params_to_args(
             if field.required:
                 value = None  # Will be caught as missing by validator
             else:
-                value = deepcopy(field.default)
+                value = _safe_default(field.default)
                 values[field.name] = value
                 continue
 
@@ -1186,7 +1197,7 @@ def _core_cookie_params_to_args(
             if field.required:
                 value = None  # Will be caught as missing by validator
             else:
-                value = deepcopy(field.default)
+                value = _safe_default(field.default)
                 values[field.name] = value
                 continue
 

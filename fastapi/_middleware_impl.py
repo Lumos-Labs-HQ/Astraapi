@@ -48,6 +48,18 @@ from fastapi._response import (
 )
 
 
+
+def _decode_scope_headers(scope: Scope) -> Dict[str, str]:
+    """Decode ASGI scope headers into a str→str dict.
+
+    ASGI guarantees headers are bytes, so we skip isinstance checks.
+    """
+    return {
+        k.decode("latin-1"): v.decode("latin-1")
+        for k, v in scope.get("headers", [])
+    }
+
+
 # ---------------------------------------------------------------------------
 # Middleware descriptor
 # ---------------------------------------------------------------------------
@@ -489,11 +501,7 @@ class CORSMiddleware:
             await self.app(scope, receive, send)
             return
 
-        headers = dict(
-            (k.decode("latin-1") if isinstance(k, bytes) else k,
-             v.decode("latin-1") if isinstance(v, bytes) else v)
-            for k, v in scope.get("headers", [])
-        )
+        headers = _decode_scope_headers(scope)
         origin = headers.get("origin")
 
         if origin is None:
@@ -615,11 +623,7 @@ class GZipMiddleware:
             return
 
         # Check if client accepts gzip
-        headers = dict(
-            (k.decode("latin-1") if isinstance(k, bytes) else k,
-             v.decode("latin-1") if isinstance(v, bytes) else v)
-            for k, v in scope.get("headers", [])
-        )
+        headers = _decode_scope_headers(scope)
         accept_encoding = headers.get("accept-encoding", "")
         if "gzip" not in accept_encoding:
             await self.app(scope, receive, send)
@@ -684,16 +688,20 @@ class _GZipResponder:
             )
             return
 
-        # Check content-type -- skip compression for already-compressed types
+        # Single-pass: extract content-type and filter content-length
         resp_headers = list(self.initial_message.get("headers", []))
         content_type = ""
+        filtered_headers: list[tuple[bytes, bytes]] = []
         for name, value in resp_headers:
-            n = name.decode("latin-1") if isinstance(name, bytes) else name
-            if n.lower() == "content-type":
-                content_type = (
-                    value.decode("latin-1") if isinstance(value, bytes) else value
-                )
-                break
+            n = name.decode("latin-1")
+            n_lower = n.lower()
+            if n_lower == "content-type":
+                content_type = value.decode("latin-1")
+                filtered_headers.append((name, value))
+            elif n_lower == "content-length":
+                continue  # Will replace after compression
+            else:
+                filtered_headers.append((name, value))
 
         skip_types = (
             "image/", "audio/", "video/",
@@ -710,14 +718,8 @@ class _GZipResponder:
         # Compress with gzip
         compressed = gzip.compress(full_body, compresslevel=self.compresslevel)
 
-        # Update headers: content-encoding, content-length, remove old
-        # content-length, add vary
-        new_headers: list[tuple[bytes, bytes]] = []
-        for name, value in resp_headers:
-            n = name.decode("latin-1") if isinstance(name, bytes) else name
-            if n.lower() == "content-length":
-                continue  # Will replace
-            new_headers.append((name, value))
+        # Add compression headers to already-filtered list
+        new_headers = filtered_headers
 
         new_headers.append((b"content-encoding", b"gzip"))
         new_headers.append(
@@ -787,11 +789,7 @@ class TrustedHostMiddleware:
             return
 
         # Extract host header
-        headers = dict(
-            (k.decode("latin-1") if isinstance(k, bytes) else k,
-             v.decode("latin-1") if isinstance(v, bytes) else v)
-            for k, v in scope.get("headers", [])
-        )
+        headers = _decode_scope_headers(scope)
         host = headers.get("host", "")
 
         if not self._is_host_allowed(host):

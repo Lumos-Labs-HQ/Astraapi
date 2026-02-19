@@ -25,17 +25,6 @@ extern PyObject* py_http_buf_len(PyObject* self, PyObject* capsule);
 // ws_ring_buffer.cpp
 extern void init_ws_opcode_cache();
 
-// request_parser.cpp
-extern PyObject* py_parse_request_full(PyObject* self, PyObject* args, PyObject* kwargs);
-
-// middleware_engine.cpp
-extern PyObject* py_gzip_compress(PyObject* self, PyObject* args);
-extern PyObject* py_gzip_decompress(PyObject* self, PyObject* args);
-extern PyObject* py_brotli_compress(PyObject* self, PyObject* args);
-extern PyObject* py_negotiate_encoding(PyObject* self, PyObject* arg);
-extern PyObject* py_should_compress(PyObject* self, PyObject* args);
-extern PyObject* py_compress_response(PyObject* self, PyObject* args);
-
 // security.cpp
 extern PyObject* py_extract_bearer_token(PyObject* self, PyObject* arg);
 extern PyObject* py_extract_basic_credentials(PyObject* self, PyObject* arg);
@@ -73,43 +62,22 @@ extern PyObject* py_ws_get_metrics(PyObject* self, PyObject* capsule);
 extern PyObject* py_ws_update_send_metrics(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_and_feed(PyObject* self, PyObject* args);
 
-// dep_engine.cpp
-extern PyObject* py_compile_dep_plan(PyObject* self, PyObject* args, PyObject* kwargs);
-extern PyObject* py_unregister_dep_plan(PyObject* self, PyObject* arg);
-extern PyObject* py_get_dep_plan(PyObject* self, PyObject* arg);
-extern PyObject* py_prepare_dep_execution(PyObject* self, PyObject* args, PyObject* kwargs);
-extern PyObject* py_dep_plan_count(PyObject* self, PyObject* args);
-
 // openapi_gen.cpp
-extern PyObject* py_build_openapi_schema(PyObject* self, PyObject* args, PyObject* kwargs);
-extern PyObject* py_build_openapi_schema_pretty(PyObject* self, PyObject* args, PyObject* kwargs);
 extern PyObject* py_openapi_dict_to_json_bytes(PyObject* self, PyObject* arg);
 
 // params.cpp (v0.1 compat — implemented in utils.cpp)
 extern PyObject* py_parse_query_string(PyObject* self, PyObject* args);
-extern PyObject* py_parse_headers_to_dict(PyObject* self, PyObject* args);
 extern PyObject* py_parse_scope_headers(PyObject* self, PyObject* args);
-extern PyObject* py_batch_extract_params(PyObject* self, PyObject* args, PyObject* kwargs);
 extern PyObject* py_parse_cookie_header(PyObject* self, PyObject* arg);
 
 // json_encoder.cpp
 extern PyObject* py_fast_jsonable_encode(PyObject* self, PyObject* arg);
-
-// body_parser.cpp
-extern PyObject* py_parse_json_body(PyObject* self, PyObject* arg);
-extern PyObject* py_serialize_to_json_bytes(PyObject* self, PyObject* arg);
-extern PyObject* py_serialize_to_json_bytes_pretty(PyObject* self, PyObject* arg);
-
-// content_type (utils.cpp)
-extern PyObject* py_parse_content_type(PyObject* self, PyObject* arg);
-extern PyObject* py_is_json_content_type(PyObject* self, PyObject* arg);
 
 // dependency_resolver.cpp
 extern PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg);
 
 // response_pipeline.cpp
 extern PyObject* py_encode_to_json_bytes(PyObject* self, PyObject* args, PyObject* kwargs);
-extern PyObject* py_encode_to_json_bytes_pretty(PyObject* self, PyObject* args, PyObject* kwargs);
 
 // request_pipeline.cpp
 extern PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs);
@@ -127,9 +95,7 @@ extern PyObject* py_serialize_error_list(PyObject* self, PyObject* arg);
 
 // param_extractor.cpp
 extern PyObject* py_register_route_params(PyObject* self, PyObject* args, PyObject* kwargs);
-extern PyObject* py_batch_extract_all_params(PyObject* self, PyObject* args, PyObject* kwargs);
 extern PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObject* kwargs);
-extern PyObject* py_unregister_route_params(PyObject* self, PyObject* arg);
 
 // ══════════════════════════════════════════════════════════════════════════════
 // CoreRouter — standalone trie router (v0.1 compat)
@@ -244,17 +210,6 @@ static PyObject* py_ws_unmask(PyObject* /*self*/, PyObject* args) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 static PyMethodDef module_methods[] = {
-    // v2.0: Request parser
-    {"parse_request_full", (PyCFunction)py_parse_request_full, METH_VARARGS | METH_KEYWORDS, nullptr},
-
-    // v2.0: Middleware engine
-    {"gzip_compress", (PyCFunction)py_gzip_compress, METH_VARARGS, nullptr},
-    {"gzip_decompress", (PyCFunction)py_gzip_decompress, METH_VARARGS, nullptr},
-    {"brotli_compress", (PyCFunction)py_brotli_compress, METH_VARARGS, nullptr},
-    {"negotiate_encoding", (PyCFunction)py_negotiate_encoding, METH_O, nullptr},
-    {"should_compress", (PyCFunction)py_should_compress, METH_VARARGS, nullptr},
-    {"compress_response", (PyCFunction)py_compress_response, METH_VARARGS, nullptr},
-
     // v2.0: Security
     {"extract_bearer_token", (PyCFunction)py_extract_bearer_token, METH_O, nullptr},
     {"extract_basic_credentials", (PyCFunction)py_extract_basic_credentials, METH_O, nullptr},
@@ -285,49 +240,27 @@ static PyMethodDef module_methods[] = {
     {"ws_echo_direct_fd_v2", (PyCFunction)py_ws_echo_direct_fd_v2, METH_VARARGS, nullptr},
     {"ws_flush_pending", (PyCFunction)py_ws_flush_pending, METH_VARARGS, nullptr},
     {"ws_handle_direct", (PyCFunction)py_ws_handle_direct, METH_VARARGS, nullptr},
-    {"ws_handle_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
     {"ws_handle_json_direct", (PyCFunction)py_ws_handle_json_direct, METH_VARARGS, nullptr},
     {"ws_get_metrics", (PyCFunction)py_ws_get_metrics, METH_O, nullptr},
     {"ws_update_send_metrics", (PyCFunction)py_ws_update_send_metrics, METH_VARARGS, nullptr},
     {"ws_handle_and_feed", (PyCFunction)py_ws_handle_and_feed, METH_VARARGS, nullptr},
 
-    // v2.0: Dependency engine
-    {"compile_dep_plan", (PyCFunction)py_compile_dep_plan, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"unregister_dep_plan", (PyCFunction)py_unregister_dep_plan, METH_O, nullptr},
-    {"get_dep_plan", (PyCFunction)py_get_dep_plan, METH_O, nullptr},
-    {"prepare_dep_execution", (PyCFunction)py_prepare_dep_execution, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"dep_plan_count", (PyCFunction)py_dep_plan_count, METH_NOARGS, nullptr},
-
     // v2.0: OpenAPI
-    {"build_openapi_schema", (PyCFunction)py_build_openapi_schema, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"build_openapi_schema_pretty", (PyCFunction)py_build_openapi_schema_pretty, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"openapi_dict_to_json_bytes", (PyCFunction)py_openapi_dict_to_json_bytes, METH_O, nullptr},
 
-    // v0.1–v1.0: Params
+    // Params
     {"parse_query_string", (PyCFunction)py_parse_query_string, METH_VARARGS, nullptr},
-    {"parse_headers_to_dict", (PyCFunction)py_parse_headers_to_dict, METH_VARARGS, nullptr},
     {"parse_scope_headers", (PyCFunction)py_parse_scope_headers, METH_VARARGS, nullptr},
-    {"batch_extract_params", (PyCFunction)py_batch_extract_params, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"parse_cookie_header", (PyCFunction)py_parse_cookie_header, METH_O, nullptr},
 
-    // v0.1–v1.0: JSON encoding
+    // JSON encoding
     {"fast_jsonable_encode", (PyCFunction)py_fast_jsonable_encode, METH_O, nullptr},
 
-    // v0.1–v1.0: Body parsing
-    {"parse_json_body", (PyCFunction)py_parse_json_body, METH_O, nullptr},
-    {"serialize_to_json_bytes", (PyCFunction)py_serialize_to_json_bytes, METH_O, nullptr},
-    {"serialize_to_json_bytes_pretty", (PyCFunction)py_serialize_to_json_bytes_pretty, METH_O, nullptr},
-
-    // v0.1–v1.0: Content type
-    {"parse_content_type", (PyCFunction)py_parse_content_type, METH_O, nullptr},
-    {"is_json_content_type", (PyCFunction)py_is_json_content_type, METH_O, nullptr},
-
-    // v0.1–v1.0: Dependency resolver
+    // Dependency resolver
     {"compute_dependency_order", (PyCFunction)py_compute_dependency_order, METH_O, nullptr},
 
-    // v0.3: Pipeline
+    // Pipeline
     {"encode_to_json_bytes", (PyCFunction)py_encode_to_json_bytes, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"encode_to_json_bytes_pretty", (PyCFunction)py_encode_to_json_bytes_pretty, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"process_request", (PyCFunction)py_process_request, METH_VARARGS | METH_KEYWORDS, nullptr},
 
     // Form parsing
@@ -343,9 +276,7 @@ static PyMethodDef module_methods[] = {
 
     // Param extractor
     {"register_route_params", (PyCFunction)py_register_route_params, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"batch_extract_all_params", (PyCFunction)py_batch_extract_all_params, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"batch_extract_params_inline", (PyCFunction)py_batch_extract_params_inline, METH_VARARGS | METH_KEYWORDS, nullptr},
-    {"unregister_route_params", (PyCFunction)py_unregister_route_params, METH_O, nullptr},
 
     // Response building helpers
     {"build_response_from_parts", (PyCFunction)py_build_response_from_parts, METH_VARARGS, nullptr},
@@ -366,7 +297,6 @@ static PyMethodDef module_methods[] = {
 
 // Extern cleanup functions from other translation units
 extern void cleanup_param_registry();
-extern void cleanup_dep_plans();
 
 static void module_free(void* /*module*/) {
     // Clean up json_writer.cpp cached type objects
@@ -375,9 +305,8 @@ static void module_free(void* /*module*/) {
     // Clean up ASGI constants
     cleanup_asgi_constants();
 
-    // Clean up global registries (LEAK-2 fix)
+    // Clean up global registries
     cleanup_param_registry();
-    cleanup_dep_plans();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

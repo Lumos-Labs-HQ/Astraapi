@@ -140,7 +140,7 @@ try:
     from fastapi._fastapi_core import (
         # Single-call frame handlers (ring buffer + parse + decode + consume)
         ws_handle_direct as _ws_handle_direct,
-        ws_handle_echo_direct as _ws_handle_echo_direct,
+        ws_echo_direct as _ws_handle_echo_direct,
         ws_handle_json_direct as _ws_handle_json_direct,
         # Frame building (send_text/send_bytes/send_json/close/ping)
         ws_build_frame_bytes as _ws_build_frame_bytes,
@@ -834,7 +834,7 @@ class _ProtocolPool:
     """Fixed-size pool of CppHttpProtocol objects for reuse."""
     __slots__ = ("_pool", "_max_size")
 
-    def __init__(self, max_size: int = 256):
+    def __init__(self, max_size: int = 4096):
         self._pool: list = []
         self._max_size = max_size
 
@@ -851,6 +851,22 @@ class _ProtocolPool:
             self._pool.append(proto)
 
 _protocol_pool = _ProtocolPool()
+
+# Per-worker connection limit — fast 503 under overload instead of cascading slowdown
+_MAX_CONNECTIONS = 10000
+
+
+class _RejectProtocol(asyncio.Protocol):
+    """Instantly respond 503 and close when server is at capacity."""
+    __slots__ = ()
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        transport.write(  # type: ignore[union-attr]
+            b"HTTP/1.1 503 Service Unavailable\r\n"
+            b"Content-Length: 0\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        transport.close()  # type: ignore[union-attr]
 
 
 # ── Coroutine driver — properly forwards exceptions via throw() ──────────────
@@ -899,7 +915,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_http_buf", "_ka", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks")
+    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -911,7 +927,6 @@ class CppHttpProtocol(asyncio.Protocol):
         self._transport: asyncio.Transport | None = None
         # C++ HTTP connection buffer (O(1) consume vs O(N) memmove)
         self._http_buf = _http_buf_create()
-        self._ka: asyncio.TimerHandle | None = None
         self._ka_deadline: float = 0.0
         self._wr_paused = False
         self._ws_handler = None  # Will be set to echo/json/normal handler after upgrade
@@ -932,7 +947,6 @@ class CppHttpProtocol(asyncio.Protocol):
         self._connections_set = connections_set
         self._transport = None
         _http_buf_clear(self._http_buf)  # reuse existing C++ buffer
-        self._ka = None
         self._ka_deadline = 0.0
         self._wr_paused = False
         self._ws_handler = None
@@ -955,7 +969,11 @@ class CppHttpProtocol(asyncio.Protocol):
                 sock.setsockopt(socket.IPPROTO_TCP, 12, 1)  # TCP_QUICKACK = 12
             except (OSError, AttributeError):
                 pass
-        transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_DEFER_ACCEPT, 1)
+            except (OSError, AttributeError):
+                pass
+        transport.set_write_buffer_limits(high=1048576, low=262144)  # type: ignore[union-attr]
         # Pass client IP to C++ for rate limiting
         peername = transport.get_extra_info("peername")
         if peername and hasattr(self._core, "set_client_ip"):
@@ -1090,7 +1108,7 @@ class CppHttpProtocol(asyncio.Protocol):
                             self._ws_fd = sock.fileno()
                     except (OSError, AttributeError):
                         pass
-                    transport.set_write_buffer_limits(high=524288, low=131072)
+                    transport.set_write_buffer_limits(high=2097152, low=524288)
                     if _ws_pool is not None:
                         self._ws_ring_buf = _ws_pool.acquire()
                     elif _ws_ring_buffer_create is not None:
@@ -1495,30 +1513,15 @@ class CppHttpProtocol(asyncio.Protocol):
             except Exception:
                 pass
 
-    # ── Keep-alive timer ─────────────────────────────────────────────────
+    # ── Keep-alive (batch sweep — no per-connection timers) ─────────────
 
     def _ka_reset(self) -> None:
-        # Update deadline (O(1) — no timer cancel/create)
-        timeout = self._ka_timeout
-        self._ka_deadline = time.monotonic() + timeout
-        if not self._ka and self._transport and not self._transport.is_closing():
-            self._ka = self._loop.call_later(timeout, self._ka_check)
+        # Update deadline only — batch sweep handles expiry checking
+        self._ka_deadline = time.monotonic() + self._ka_timeout
 
     def _ka_cancel(self) -> None:
-        h = self._ka
-        if h is not None:
-            h.cancel()
-            self._ka = None
-
-    def _ka_check(self) -> None:
-        """Check if deadline passed; reschedule if not."""
-        self._ka = None
-        remaining = self._ka_deadline - time.monotonic()
-        if remaining <= 0:
-            if self._transport and not self._transport.is_closing():
-                self._transport.close()
-        elif self._transport and not self._transport.is_closing():
-            self._ka = self._loop.call_later(remaining, self._ka_check)
+        # Mark as not subject to keep-alive timeout
+        self._ka_deadline = 0.0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1527,7 +1530,7 @@ class CppHttpProtocol(asyncio.Protocol):
 
 async def run_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
-    keep_alive_timeout: float = 15.0,
+    keep_alive_timeout: float = 75.0,
 ) -> None:
     """Start the C++ HTTP server with optimal event loop configuration."""
     try:
@@ -1628,33 +1631,27 @@ async def run_server(
     # ── Track active connections for graceful shutdown ──────────────────
     active_connections: set[CppHttpProtocol] = set()
 
-    def _protocol_factory() -> CppHttpProtocol:
+    def _protocol_factory() -> asyncio.Protocol:
+        # Fast 503 reject when at capacity — prevents cascading slowdown
+        if len(active_connections) >= _MAX_CONNECTIONS:
+            return _RejectProtocol()
         # OPT-14: Reuse protocol objects from pool to reduce __init__ + GC overhead
         proto = _protocol_pool.acquire(
             core_app, loop, keep_alive_timeout, active_connections)
         active_connections.add(proto)
         return proto
 
-    # SO_REUSEPORT: allows multiple processes to bind the same port (kernel load-balances)
-    reuse_port = (sys.platform != "win32")
-    try:
-        server = await loop.create_server(
-            _protocol_factory,
-            host,
-            port,
-            reuse_address=True,
-            reuse_port=reuse_port,
-            backlog=2048,
-        )
-    except OSError:
-        # SO_REUSEPORT not supported on this kernel — fall back
-        server = await loop.create_server(
-            _protocol_factory,
-            host,
-            port,
-            reuse_address=True,
-            backlog=2048,
-        )
+    server = await loop.create_server(
+        _protocol_factory, host, port,
+        reuse_address=True, backlog=65535,
+    )
+
+    # TCP_FASTOPEN: allow data in SYN packet, reducing handshake latency
+    for s in server.sockets or []:
+        try:
+            s.setsockopt(socket.IPPROTO_TCP, 23, 5)  # TCP_FASTOPEN = 23
+        except (OSError, AttributeError):
+            pass
 
     print(f"C++ HTTP server running on http://{host}:{port}")
     print("Press Ctrl+C to stop")
@@ -1669,6 +1666,21 @@ async def run_server(
         loop.add_signal_handler(signal.SIGINT, _signal_handler)
         loop.add_signal_handler(signal.SIGTERM, _signal_handler)
 
+    # Batch keep-alive sweep — one task checks all connections every 5s
+    # instead of per-connection call_later() timers (eliminates ~1K+ callbacks/sec)
+    async def _ka_sweep() -> None:
+        while not stop_event.is_set():
+            await asyncio.sleep(5.0)
+            now = time.monotonic()
+            to_close = [p for p in active_connections
+                        if p._ka_deadline > 0 and now > p._ka_deadline]
+            for proto in to_close:
+                t = proto._transport
+                if t and not t.is_closing():
+                    t.close()
+
+    sweep_task = loop.create_task(_ka_sweep())
+
     try:
         async with server:
             if sys.platform == "win32":
@@ -1678,6 +1690,7 @@ async def run_server(
     except KeyboardInterrupt:
         pass
     finally:
+        sweep_task.cancel()
         # ── Graceful shutdown: stop accepting, drain active connections ─
         server.close()
         await server.wait_closed()

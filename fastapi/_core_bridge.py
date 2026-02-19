@@ -2,14 +2,13 @@
 C++ core-accelerated FastAPI internals (v2.0).
 
 Core extension is REQUIRED — no Python fallback.
-Exported: 18 functions + 2 classes.
+Exported: 18 functions + 3 classes.
 """
 
 from fastapi._fastapi_core import (  # type: ignore[import-not-found]
     # ── CoreApp ASGI core ──────────────────────────────────────────────
     CoreApp,
     InlineResult,
-    PreparedRequest,
     ResponseData,
     # ── OpenAPI ──────────────────────────────────────────────────────────
     openapi_dict_to_json_bytes,

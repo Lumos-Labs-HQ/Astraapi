@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Coroutine, Sequence
 from enum import Enum
 from typing import (
@@ -45,6 +46,10 @@ from typing_extensions import deprecated
 from fastapi._core_bridge import CoreApp, openapi_dict_to_json_bytes
 
 AppType = TypeVar("AppType", bound="FastAPI")
+
+# Module-level constants for batch spec conversion (avoid dict recreation per call)
+_BATCH_SPEC_LOC = {"query": 0, "header": 1, "cookie": 2, "path": 3}
+_BATCH_SPEC_TYPE = {"": 0, "str": 0, "int": 1, "float": 2, "bool": 3}
 
 
 class FastAPI(AppBase):
@@ -1162,8 +1167,6 @@ class FastAPI(AppBase):
         Tuple format: (location, alias, type_tag, field_name, is_seq, is_json, convert_underscores)
         Dict format: {field_name, alias, header_lookup_key, location, type_tag, required, default_value}
         """
-        _LOC = {"query": 0, "header": 1, "cookie": 2, "path": 3}
-        _TYPE = {"": 0, "str": 0, "int": 1, "float": 2, "bool": 3}
         result = []
         for spec in batch_specs:
             loc_str, alias, tag_str, field_name = spec[0], spec[1], spec[2], spec[3]
@@ -1173,8 +1176,8 @@ class FastAPI(AppBase):
                 "field_name": field_name,
                 "alias": alias,
                 "header_lookup_key": header_key,
-                "location": _LOC.get(loc_str, 0),
-                "type_tag": _TYPE.get(tag_str, 0),
+                "location": _BATCH_SPEC_LOC.get(loc_str, 0),
+                "type_tag": _BATCH_SPEC_TYPE.get(tag_str, 0),
                 "required": False,
                 "default_value": None,
             })
@@ -1192,7 +1195,6 @@ class FastAPI(AppBase):
             return
         self._routes_synced = True
 
-        import asyncio
         from fastapi.routing import APIRoute, APIWebSocketRoute
 
         for route in self.routes:
@@ -1242,8 +1244,8 @@ class FastAPI(AppBase):
                         dep_solver,
                     )
                     self._core_asgi._fast_routes_registered = True
-            except Exception:
-                pass  # Non-fatal: Starlette still handles this route
+            except Exception as exc:
+                logger.debug("C++ core route registration failed for %s: %s", route.path, exc)
 
         # Register WebSocket routes in C++ core for app.run() fast-path
         for route in self.routes:
@@ -1262,8 +1264,8 @@ class FastAPI(AppBase):
                     exclude_defaults=False,
                     exclude_none=False,
                 )
-            except Exception:
-                pass  # Non-fatal: Starlette still handles this route
+            except Exception as exc:
+                logger.debug("C++ core WebSocket registration failed for %s: %s", route.path, exc)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if self.root_path:
@@ -1337,62 +1339,8 @@ class FastAPI(AppBase):
             openapi_extra=openapi_extra,
             generate_unique_id_function=generate_unique_id_function,
         )
-
-        # v2.0: Also register with CoreApp for core fast-path
-        if self._core_app is not None:
-            try:
-                import asyncio
-                _is_coro = asyncio.iscoroutinefunction(endpoint)
-                _methods = [m.upper() for m in (methods or ["GET"])]
-                _tags = [str(t) for t in (tags or [])]
-                _has_body = any(
-                    m in ("POST", "PUT", "PATCH") for m in _methods
-                )
-                route_id = self._core_app.add_route(
-                    path,
-                    _methods,
-                    endpoint,
-                    _is_coro,
-                    status_code=status_code or 200,
-                    tags=_tags,
-                    summary=summary,
-                    description=description,
-                    operation_id=operation_id,
-                    has_body=_has_body,
-                    exclude_unset=response_model_exclude_unset,
-                    exclude_defaults=response_model_exclude_defaults,
-                    exclude_none=response_model_exclude_none,
-                )
-                # Store fast-path metadata for eligible routes
-                route = self.router.routes[-1] if self.router.routes else None
-                if (
-                    route is not None
-                    and hasattr(route, '_fast_path_eligible')
-                    and route._fast_path_eligible
-                ):
-                    route_index = self._core_app.route_count() - 1
-                    dep = route.dependant
-                    body_param_name = (
-                        dep.body_params[0].name if dep.body_params else None
-                    )
-                    raw_specs = getattr(route, '_batch_specs', [])
-                    field_specs = (
-                        self._convert_batch_specs(raw_specs) if raw_specs
-                        else None
-                    )
-                    dep_solver = getattr(route, '_dep_solver', None)
-                    self._core_app.register_fast_spec(
-                        route_index,
-                        body_param_name,
-                        field_specs,
-                        dep.body_params if dep.body_params else None,
-                        getattr(route, '_embed_body_fields', False),
-                        dep if dep.dependencies else None,
-                        dep_solver,
-                    )
-                    self._core_asgi._fast_routes_registered = True
-            except Exception:
-                pass  # Non-fatal: Starlette path still works
+        # C++ core registration is handled by _sync_routes_to_core() during
+        # build_middleware_stack() — no need to register here (avoids double registration).
 
     def api_route(
         self,
@@ -4891,6 +4839,13 @@ class FastAPI(AppBase):
             reload_excludes: Paths to exclude from watching.
         """
         import asyncio
+
+        # Use uvloop for 2-4x faster event loop (libuv-based, C)
+        try:
+            import uvloop
+            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        except ImportError:
+            pass  # Graceful fallback to stdlib asyncio
 
         if reload:
             from fastapi._reloader import is_reload_worker, run_with_reload

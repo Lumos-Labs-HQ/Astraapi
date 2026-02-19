@@ -2,6 +2,7 @@
 #include <Python.h>
 #include "asgi_constants.hpp"
 #include "json_parser.hpp"
+#include "percent_decode.hpp"
 #include "pyref.hpp"
 #include <cstring>
 #include <string>
@@ -14,29 +15,6 @@
 //                                path_params, body, is_form, form_boundary)
 // Returns: dict with query_params, headers, cookies, is_json, json_body, etc.
 // ══════════════════════════════════════════════════════════════════════════════
-
-// Forward: percent_decode from utils.cpp
-static std::string percent_decode_rp(const char* s, size_t len) {
-    std::string result;
-    result.reserve(len);
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '%' && i + 2 < len) {
-            int hi = (s[i+1] >= '0' && s[i+1] <= '9') ? s[i+1] - '0' :
-                     (s[i+1] >= 'a' && s[i+1] <= 'f') ? 10 + s[i+1] - 'a' :
-                     (s[i+1] >= 'A' && s[i+1] <= 'F') ? 10 + s[i+1] - 'A' : -1;
-            int lo = (s[i+2] >= '0' && s[i+2] <= '9') ? s[i+2] - '0' :
-                     (s[i+2] >= 'a' && s[i+2] <= 'f') ? 10 + s[i+2] - 'a' :
-                     (s[i+2] >= 'A' && s[i+2] <= 'F') ? 10 + s[i+2] - 'A' : -1;
-            if (hi >= 0 && lo >= 0) {
-                result.push_back((char)((hi << 4) | lo));
-                i += 2;
-                continue;
-            }
-        }
-        result.push_back(s[i] == '+' ? ' ' : s[i]);
-    }
-    return result;
-}
 
 PyObject* py_parse_request_full(PyObject* self, PyObject* args, PyObject* kwargs) {
     static const char* kwlist[] = {
@@ -79,10 +57,10 @@ PyObject* py_parse_request_full(PyObject* self, PyObject* args, PyObject* kwargs
             }
             std::string key, val;
             if (eq) {
-                key = percent_decode_rp(key_start, eq - key_start);
-                val = percent_decode_rp(eq + 1, p - eq - 1);
+                key = percent_decode(key_start, eq - key_start);
+                val = percent_decode(eq + 1, p - eq - 1);
             } else {
-                key = percent_decode_rp(key_start, p - key_start);
+                key = percent_decode(key_start, p - key_start);
             }
             PyRef pk(PyUnicode_FromStringAndSize(key.c_str(), key.size()));
             PyRef pv(PyUnicode_FromStringAndSize(val.c_str(), val.size()));

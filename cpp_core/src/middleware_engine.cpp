@@ -85,6 +85,7 @@ PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
 
     std::vector<uint8_t> output;
     int zret;
+    static constexpr size_t MAX_DECOMPRESSED = 256 * 1024 * 1024;  // 256 MB
 
     Py_BEGIN_ALLOW_THREADS
 
@@ -92,7 +93,10 @@ PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
     // windowBits = 15 + 32 for auto-detect gzip/zlib
     zret = inflateInit2(&strm, 15 + 32);
     if (zret == Z_OK) {
-        output.resize(data_len * 4);  // initial guess
+        // Smarter initial size: cap at 16MB to avoid overalloc on small inputs
+        size_t initial = std::min((size_t)data_len * 4, (size_t)(16 * 1024 * 1024));
+        if (initial < 4096) initial = 4096;
+        output.resize(initial);
         strm.next_in = (Bytef*)data;
         strm.avail_in = (uInt)data_len;
 
@@ -104,7 +108,12 @@ PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
             if (zret == Z_STREAM_END) break;
             if (zret != Z_OK) break;
             if (strm.avail_out == 0) {
-                output.resize(output.size() * 2);
+                size_t new_size = output.size() * 2;
+                if (new_size > MAX_DECOMPRESSED) {
+                    zret = Z_MEM_ERROR;
+                    break;
+                }
+                output.resize(new_size);
             }
         }
         output.resize(strm.total_out);

@@ -1164,12 +1164,7 @@ static PyObject* CoreApp_handle_and_respond(
         if (json_body_obj != Py_None && spec.body_param_name) {
             if (spec.embed_body_fields) {
                 if (PyDict_Check(json_body_obj)) {
-                    PyObject* bk;
-                    PyObject* bv;
-                    Py_ssize_t bpos = 0;
-                    while (PyDict_Next(json_body_obj, &bpos, &bk, &bv)) {
-                        PyDict_SetItem(kwargs.get(), bk, bv);
-                    }
+                    PyDict_Update(kwargs.get(), json_body_obj);
                 }
             } else {
                 PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
@@ -1245,8 +1240,7 @@ static PyObject* CoreApp_handle_and_respond(
         if (json_body_obj != Py_None) {
             result->json_body = json_body_obj;
         } else {
-            Py_INCREF(Py_None);
-            result->json_body = Py_None;
+            result->json_body = Py_NewRef(Py_None);
         }
         result->endpoint = har_endpoint;  // transfer our strong ref
         result->body_params = har_body_params;  // transfer our strong ref
@@ -1595,10 +1589,7 @@ static PyObject* CoreApp_handle_request_inline(
         if (json_body_obj != Py_None && spec.body_param_name) {
             if (spec.embed_body_fields) {
                 if (PyDict_Check(json_body_obj)) {
-                    PyObject* bk; PyObject* bv; Py_ssize_t bpos = 0;
-                    while (PyDict_Next(json_body_obj, &bpos, &bk, &bv)) {
-                        PyDict_SetItem(kwargs.get(), bk, bv);
-                    }
+                    PyDict_Update(kwargs.get(), json_body_obj);
                 }
             } else {
                 PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
@@ -1617,26 +1608,17 @@ static PyObject* CoreApp_handle_request_inline(
     result->status_code_obj = (route.status_code == 200)
         ? (Py_INCREF(g_status_200), g_status_200)
         : PyLong_FromLong(route.status_code);
-    result->has_body_params = spec.has_body_params ? Py_True : Py_False;
-    Py_INCREF(result->has_body_params);
-    result->embed_body_fields = spec.embed_body_fields ? Py_True : Py_False;
-    Py_INCREF(result->embed_body_fields);
+    result->has_body_params = Py_NewRef(spec.has_body_params ? Py_True : Py_False);
+    result->embed_body_fields = Py_NewRef(spec.embed_body_fields ? Py_True : Py_False);
     result->kwargs = kwargs.release();
     if (json_body_obj != Py_None) {
         result->json_body = json_body_obj;
     } else {
-        Py_INCREF(Py_None);
-        result->json_body = Py_None;
+        result->json_body = Py_NewRef(Py_None);
     }
     Py_INCREF(route.endpoint);
     result->endpoint = route.endpoint;
-    if (spec.body_params) {
-        Py_INCREF(spec.body_params);
-        result->body_params = spec.body_params;
-    } else {
-        Py_INCREF(Py_None);
-        result->body_params = Py_None;
-    }
+    result->body_params = Py_NewRef(spec.body_params ? spec.body_params : Py_None);
 
     return (PyObject*)result;
 }
@@ -1901,6 +1883,7 @@ static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyO
         std::vector<std::string> result;
         if (obj && obj != Py_None && PyList_Check(obj)) {
             Py_ssize_t n = PyList_GET_SIZE(obj);
+            result.reserve(static_cast<size_t>(n));
             for (Py_ssize_t i = 0; i < n; i++) {
                 const char* s = PyUnicode_AsUTF8(PyList_GET_ITEM(obj, i));
                 if (s) result.emplace_back(s);
@@ -1988,11 +1971,11 @@ static PyObject* CoreApp_get_route_info(CoreAppObject* self, PyObject* arg) {
     PyDict_SetItemString(dict.get(), "tags", tags_list.get());
 
     PyDict_SetItemString(dict.get(), "summary",
-        route.summary ? PyUnicode_FromString(route.summary->c_str()) : (Py_INCREF(Py_None), Py_None));
+        route.summary ? PyUnicode_FromString(route.summary->c_str()) : Py_NewRef(Py_None));
     PyDict_SetItemString(dict.get(), "description",
-        route.description ? PyUnicode_FromString(route.description->c_str()) : (Py_INCREF(Py_None), Py_None));
+        route.description ? PyUnicode_FromString(route.description->c_str()) : Py_NewRef(Py_None));
     PyDict_SetItemString(dict.get(), "operation_id",
-        route.operation_id ? PyUnicode_FromString(route.operation_id->c_str()) : (Py_INCREF(Py_None), Py_None));
+        route.operation_id ? PyUnicode_FromString(route.operation_id->c_str()) : Py_NewRef(Py_None));
 
     return dict.release();
 }
@@ -2103,15 +2086,25 @@ static bool cors_origin_allowed(const CorsConfig* cors, const char* origin, size
     return false;
 }
 
+// Check for CRLF injection in origin strings
+static inline bool contains_crlf(const char* s, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '\r' || s[i] == '\n') return true;
+    }
+    return false;
+}
+
 // Build CORS headers string into a buffer. Returns number of bytes written.
 static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
                                   const char* origin, size_t origin_len) {
     if (!cors || !origin || origin_len == 0) return 0;
-    // Reject origins containing CRLF to prevent header injection
-    for (size_t i = 0; i < origin_len; i++) {
-        if (origin[i] == '\r' || origin[i] == '\n') return 0;
-    }
+    if (contains_crlf(origin, origin_len)) return 0;
     size_t start = buf.size();
+
+    // Pre-reserve for typical CORS headers to avoid reallocations
+    size_t estimate = 200 + origin_len;
+    for (const auto& h : cors->expose_headers) estimate += h.size() + 2;
+    buf.reserve(buf.size() + estimate);
 
     // Access-Control-Allow-Origin
     static const char ACAO[] = "\r\naccess-control-allow-origin: ";
@@ -2154,13 +2147,15 @@ static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
 static PyObject* build_cors_preflight_response(
     const CorsConfig* cors, const char* origin, size_t origin_len, bool keep_alive)
 {
-    // Reject origins containing CRLF to prevent header injection
-    for (size_t i = 0; i < origin_len; i++) {
-        if (origin[i] == '\r' || origin[i] == '\n') Py_RETURN_NONE;
-    }
+    if (contains_crlf(origin, origin_len)) Py_RETURN_NONE;
 
     auto buf = acquire_buffer();
-    buf.reserve(512);
+    // Pre-reserve for preflight response
+    size_t estimate = 512;
+    for (const auto& m : cors->allow_methods) estimate += m.size() + 2;
+    for (const auto& h : cors->allow_headers) estimate += h.size() + 2;
+    estimate += origin_len;
+    buf.reserve(estimate);
 
     static const char STATUS[] = "HTTP/1.1 204 No Content\r\naccess-control-allow-origin: ";
     buf.insert(buf.end(), STATUS, STATUS + sizeof(STATUS) - 1);
@@ -3266,10 +3261,7 @@ static PyObject* CoreApp_handle_http(
             if (json_body_obj != Py_None && spec.body_param_name) {
                 if (spec.embed_body_fields) {
                     if (PyDict_Check(json_body_obj)) {
-                        PyObject* bk; PyObject* bv; Py_ssize_t bpos = 0;
-                        while (PyDict_Next(json_body_obj, &bpos, &bk, &bv)) {
-                            PyDict_SetItem(kwargs.get(), bk, bv);
-                        }
+                        PyDict_Update(kwargs.get(), json_body_obj);
                     }
                 } else {
                     PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
@@ -4477,10 +4469,7 @@ static PyObject* CoreApp_parse_and_route(
         if (json_body_obj != Py_None && spec.body_param_name) {
             if (spec.embed_body_fields) {
                 if (PyDict_Check(json_body_obj)) {
-                    PyObject* bk; PyObject* bv; Py_ssize_t bpos = 0;
-                    while (PyDict_Next(json_body_obj, &bpos, &bk, &bv)) {
-                        PyDict_SetItem(kwargs.get(), bk, bv);
-                    }
+                    PyDict_Update(kwargs.get(), json_body_obj);
                 }
             } else {
                 PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));

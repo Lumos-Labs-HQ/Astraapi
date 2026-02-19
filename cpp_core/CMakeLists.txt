@@ -16,7 +16,6 @@ set(SOURCES
     src/json_writer.cpp
     src/utils.cpp
     src/router.cpp
-    src/response_builder.cpp
     src/request_parser.cpp
     src/http_parser.cpp
     src/app.cpp

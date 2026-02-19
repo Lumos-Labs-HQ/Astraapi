@@ -1,6 +1,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "asgi_constants.hpp"
+#include "percent_decode.hpp"
 #include "pyref.hpp"
 #include <cstring>
 #include <vector>
@@ -8,17 +9,10 @@
 #include <algorithm>
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Percent-decoding
+// Percent-decoding (shared implementation — declared in percent_decode.hpp)
 // ══════════════════════════════════════════════════════════════════════════════
 
-static inline int hex_val(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-    return -1;
-}
-
-static std::string percent_decode(const char* s, size_t len) {
+std::string percent_decode(const char* s, size_t len) {
     std::string result;
     result.reserve(len);
     for (size_t i = 0; i < len; i++) {
@@ -324,10 +318,7 @@ PyObject* py_is_json_content_type(PyObject* self, PyObject* arg) {
         if (c >= 'A' && c <= 'Z') c += 32;
     }
 
-    if (lower.find("json") != std::string::npos ||
-        lower == "application/json" ||
-        lower.find("application/json") == 0 ||
-        lower.find("+json") != std::string::npos) {
+    if (lower.find("json") != std::string::npos) {
         Py_RETURN_TRUE;
     }
     Py_RETURN_FALSE;

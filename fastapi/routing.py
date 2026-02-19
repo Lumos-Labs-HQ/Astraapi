@@ -322,15 +322,21 @@ async def serialize_response(
                     )
                 if not errors:
                     return value  # Skip field.serialize() — already JSON-safe
+                # errors found — fall through to standard path with cached result
             except Exception:
-                pass  # Fall through to standard path
+                # Validation itself failed — re-validate in standard path
+                value, errors = None, None
 
-        if is_coroutine:
-            value, errors = field.validate(response_content, {}, loc=("response",))
         else:
-            value, errors = await run_in_threadpool(
-                field.validate, response_content, {}, loc=("response",)
-            )
+            value, errors = None, None
+
+        if value is None and errors is None:
+            if is_coroutine:
+                value, errors = field.validate(response_content, {}, loc=("response",))
+            else:
+                value, errors = await run_in_threadpool(
+                    field.validate, response_content, {}, loc=("response",)
+                )
         if errors:
             ctx = endpoint_ctx or EndpointContext()
             raise ResponseValidationError(
@@ -584,14 +590,13 @@ def get_request_handler(
                     "background": solved_result.background_tasks
                 }
                 # If status_code was set, use it, otherwise use the default from the
-                # response class, in the case of redirect it's 307
+                # response class, in the case of redirect it's 307.
+                # Response-level status takes priority over route-level.
                 current_status_code = (
-                    status_code if status_code else solved_result.response.status_code
+                    solved_result.response.status_code or status_code
                 )
                 if current_status_code is not None:
                     response_args["status_code"] = current_status_code
-                if solved_result.response.status_code:
-                    response_args["status_code"] = solved_result.response.status_code
                 # Fast path: skip serialize_response for simple types
                 # when no response model filtering is needed
                 if (
@@ -1309,14 +1314,13 @@ class APIRoute(routing.Route):
                 self._dependency_order = None
         # Pre-compute field specs and register with Core param extractor.
         self._core_route_id: Optional[int] = None
+        specs = _build_field_specs(self._flat_dependant)
         try:
-            route_id = next(_route_id_counter)
-            specs = _build_field_specs(self._flat_dependant)
             if specs:
+                route_id = next(_route_id_counter)
                 register_route_params(route_id, specs)
                 self._core_route_id = route_id
         except Exception:
-            specs = None
             self._core_route_id = None
         # Pre-compute batch specs for solve_dependencies (avoid per-request rebuild)
         # Reuse specs from above if available, otherwise compute only if needed

@@ -1,5 +1,6 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include "percent_decode.hpp"
 #include "pyref.hpp"
 #include <cstring>
 #include <string>
@@ -21,31 +22,6 @@ static const void* safe_memmem(const void* haystack, size_t haystacklen,
 // ══════════════════════════════════════════════════════════════════════════════
 // parse_urlencoded_body(body: bytes) → PyList of (str, str) tuples
 // ══════════════════════════════════════════════════════════════════════════════
-
-static inline int hex_val_fp(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-    return -1;
-}
-
-static std::string percent_decode_fp(const char* s, size_t len) {
-    std::string result;
-    result.reserve(len);
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '%' && i + 2 < len) {
-            int hi = hex_val_fp(s[i + 1]);
-            int lo = hex_val_fp(s[i + 2]);
-            if (hi >= 0 && lo >= 0) {
-                result.push_back((char)((hi << 4) | lo));
-                i += 2;
-                continue;
-            }
-        }
-        result.push_back(s[i] == '+' ? ' ' : s[i]);
-    }
-    return result;
-}
 
 PyObject* py_parse_urlencoded_body(PyObject* self, PyObject* arg) {
     char* data;
@@ -78,10 +54,10 @@ PyObject* py_parse_urlencoded_body(PyObject* self, PyObject* arg) {
 
         std::string key, val;
         if (eq) {
-            key = percent_decode_fp(key_start, eq - key_start);
-            val = percent_decode_fp(eq + 1, p - eq - 1);
+            key = percent_decode(key_start, eq - key_start);
+            val = percent_decode(eq + 1, p - eq - 1);
         } else {
-            key = percent_decode_fp(key_start, p - key_start);
+            key = percent_decode(key_start, p - key_start);
         }
 
         PyRef pk(PyUnicode_FromStringAndSize(key.c_str(), key.size()));
