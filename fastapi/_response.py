@@ -15,7 +15,7 @@ from email.utils import formatdate
 from typing import Any, AsyncIterator, Iterator, Mapping, Optional, Sequence, Union
 from urllib.parse import quote
 
-from fastapi._types import Receive, Scope, Send
+from fastapi._types import Scope
 
 # Optional C++ accelerated JSON serialization
 try:
@@ -295,19 +295,6 @@ class Response:
             samesite=samesite,
         )
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI interface."""
-        await send(
-            {
-                "type": "http.response.start",
-                "status": self.status_code,
-                "headers": self._raw_headers,
-            }
-        )
-        await send({"type": "http.response.body", "body": self.body})
-        if self.background is not None:
-            await self.background()
-
 
 # ---------------------------------------------------------------------------
 # JSONResponse
@@ -431,31 +418,6 @@ class StreamingResponse(Response):
                 content_type += f"; charset={self.charset}"
             self._set_raw_header(b"content-type", content_type.encode("latin-1"))
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        await send(
-            {
-                "type": "http.response.start",
-                "status": self.status_code,
-                "headers": self._raw_headers,
-            }
-        )
-
-        if hasattr(self.body_iterator, "__aiter__"):
-            async for chunk in self.body_iterator:
-                if not isinstance(chunk, bytes):
-                    chunk = chunk.encode(self.charset)
-                await send({"type": "http.response.body", "body": chunk, "more_body": True})
-        else:
-            for chunk in self.body_iterator:
-                if not isinstance(chunk, bytes):
-                    chunk = chunk.encode(self.charset)
-                await send({"type": "http.response.body", "body": chunk, "more_body": True})
-
-        await send({"type": "http.response.body", "body": b""})
-
-        if self.background is not None:
-            await self.background()
-
 
 # ---------------------------------------------------------------------------
 # FileResponse
@@ -537,47 +499,6 @@ class FileResponse(Response):
             self._set_raw_header(
                 b"content-disposition", content_disp.encode("latin-1")
             )
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        self._populate_file_headers()
-
-        await send(
-            {
-                "type": "http.response.start",
-                "status": self.status_code,
-                "headers": self._raw_headers,
-            }
-        )
-
-        if self.send_header_only:
-            await send({"type": "http.response.body", "body": b""})
-        else:
-            # Stream file contents
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._send_file_sync, send, loop)
-
-        if self.background is not None:
-            await self.background()
-
-    def _send_file_sync(self, send: Send, loop: asyncio.AbstractEventLoop) -> None:
-        """Read and send file chunks (runs in executor)."""
-        with open(self.path, "rb") as f:
-            while True:
-                chunk = f.read(self.chunk_size)
-                more = len(chunk) == self.chunk_size
-                future = asyncio.run_coroutine_threadsafe(
-                    send(
-                        {
-                            "type": "http.response.body",
-                            "body": chunk,
-                            "more_body": more,
-                        }
-                    ),
-                    loop,
-                )
-                future.result()  # Block until sent
-                if not more:
-                    break
 
 
 def _guess_media_type(path: str) -> str:

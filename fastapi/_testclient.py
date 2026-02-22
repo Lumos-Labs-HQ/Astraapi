@@ -1,21 +1,28 @@
-"""Native TestClient — replaces starlette.testclient.
+"""Native TestClient — starts C++ server on ephemeral port, uses httpx HTTP.
 
-Uses httpx directly with its built-in ASGITransport.
+Tests the real production path (C++ server) instead of ASGI transport.
 """
 from __future__ import annotations
 
+import asyncio
+import socket
+import threading
 from typing import Any
 
 
 class TestClient:
-    """ASGI test client backed by httpx.
+    """Test client backed by the C++ HTTP server.
+
+    Starts the server on an ephemeral port in a background thread and
+    sends real HTTP requests via httpx.
 
     Parameters
     ----------
-    app : ASGIApp
-        The ASGI application to test.
+    app : FastAPI
+        The FastAPI application to test.
     base_url : str
-        Base URL for requests (default: "http://testserver").
+        Ignored (kept for API compatibility). The actual URL is
+        ``http://127.0.0.1:<ephemeral_port>``.
     """
 
     def __init__(
@@ -32,19 +39,55 @@ class TestClient:
                 "httpx must be installed to use TestClient. "
                 "Install it with: pip install httpx"
             )
-        transport = httpx.ASGITransport(app=app, raise_app_exceptions=raise_server_exceptions)
-        self._client = httpx.Client(
-            transport=transport,
-            base_url=base_url,
-            **kwargs,
-        )
+
         self.app = app
 
-    def __enter__(self) -> "TestClient":
-        return self
+        # Find a free port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            self._port = s.getsockname()[1]
 
-    def __exit__(self, *args: Any) -> None:
-        self._client.close()
+        self._base_url = f"http://127.0.0.1:{self._port}"
+        self._started = threading.Event()
+        self._stop = threading.Event()
+        self._server_error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run_server, daemon=True)
+        self._thread.start()
+
+        if not self._started.wait(timeout=10.0):
+            raise RuntimeError("C++ test server failed to start within 10s")
+        if self._server_error is not None:
+            raise RuntimeError(f"Server startup failed: {self._server_error}")
+
+        self._client = httpx.Client(base_url=self._base_url, **kwargs)
+
+    def _run_server(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._serve(loop))
+        except Exception as exc:
+            self._server_error = exc
+            self._started.set()
+        finally:
+            loop.close()
+
+    async def _serve(self, loop: asyncio.AbstractEventLoop) -> None:
+        from fastapi._cpp_server import _create_server
+
+        server = await _create_server(
+            self.app, "127.0.0.1", self._port,
+        )
+        self._started.set()
+
+        # Wait until close() is called
+        while not self._stop.is_set():
+            await asyncio.sleep(0.05)
+
+        server.close()
+        await server.wait_closed()
+
+    # -- HTTP methods --------------------------------------------------------
 
     def get(self, url: str, **kwargs: Any) -> Any:
         return self._client.get(url, **kwargs)
@@ -70,20 +113,15 @@ class TestClient:
     def request(self, method: str, url: str, **kwargs: Any) -> Any:
         return self._client.request(method, url, **kwargs)
 
-    def websocket_connect(self, url: str, **kwargs: Any) -> Any:
-        """Create a WebSocket connection (requires httpx-ws)."""
-        try:
-            from httpx_ws import WebSocketSession
-            from httpx_ws.transport import ASGIWebSocketTransport
-        except ImportError:
-            raise RuntimeError(
-                "httpx-ws must be installed for WebSocket testing. "
-                "Install it with: pip install httpx-ws"
-            )
-        raise NotImplementedError(
-            "WebSocket testing requires httpx-ws. "
-            "Use httpx_ws.WebSocketSession directly."
-        )
+    # -- Lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
         self._client.close()
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+
+    def __enter__(self) -> "TestClient":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()

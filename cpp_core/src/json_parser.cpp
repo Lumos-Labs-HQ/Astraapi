@@ -105,3 +105,27 @@ PyObject* yyjson_parse_to_pyobject(const char* data, size_t len) {
     yyjson_doc_free(doc);  // Always free — data is now in Python objects
     return result;
 }
+
+// ── 2-phase API for GIL release ─────────────────────────────────────────────
+// Phase 1: Pure C parse — safe to call without the GIL held.
+// Returns yyjson_doc* on success, nullptr on error.
+// No Python exceptions set (caller must check and handle).
+
+yyjson_doc* yyjson_parse_raw(const char* data, size_t len) {
+    if (!data || len == 0) return nullptr;
+    return yyjson_read_opts((char*)data, len, YYJSON_READ_NOFLAG, nullptr, nullptr);
+}
+
+// Phase 2: Convert parsed yyjson_doc to Python objects — requires GIL.
+// Frees the doc internally. Returns new reference or NULL with exception set.
+
+PyObject* yyjson_doc_to_pyobject(yyjson_doc* doc) {
+    if (!doc) {
+        PyErr_SetString(PyExc_ValueError, "NULL yyjson_doc");
+        return nullptr;
+    }
+    yyjson_val* root = yyjson_doc_get_root(doc);
+    PyObject* result = val_to_pyobject(root);
+    yyjson_doc_free(doc);
+    return result;
+}

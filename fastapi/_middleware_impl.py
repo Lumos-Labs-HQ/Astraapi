@@ -18,12 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import gzip
-import html
 import io
 import re
 import sys
-import traceback
 from typing import (
     Any,
     Callable,
@@ -38,26 +35,12 @@ from typing import (
 )
 
 from fastapi._types import ASGIApp, Receive, Scope, Send
-from fastapi._concurrency import run_in_threadpool, is_async_callable
 from fastapi._request import Request
 from fastapi._response import (
     Response,
     PlainTextResponse,
-    HTMLResponse,
-    RedirectResponse,
 )
 
-
-
-def _decode_scope_headers(scope: Scope) -> Dict[str, str]:
-    """Decode ASGI scope headers into a str→str dict.
-
-    ASGI guarantees headers are bytes, so we skip isinstance checks.
-    """
-    return {
-        k.decode("latin-1"): v.decode("latin-1")
-        for k, v in scope.get("headers", [])
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -96,25 +79,6 @@ class Middleware:
 # ---------------------------------------------------------------------------
 
 
-_500_PLAIN = "Internal Server Error"
-
-_500_DEBUG_HTML = """<!DOCTYPE html>
-<html>
-<head><title>500 Internal Server Error</title>
-<style>
-body {{ font-family: monospace; padding: 2em; }}
-pre {{ background: #f4f4f4; padding: 1em; overflow-x: auto; }}
-h1 {{ color: #c00; }}
-</style>
-</head>
-<body>
-<h1>500 Internal Server Error</h1>
-<pre>{traceback}</pre>
-</body>
-</html>
-"""
-
-
 class ServerErrorMiddleware:
     """ASGI middleware that catches unhandled exceptions and returns a
     500 Internal Server Error response.
@@ -138,40 +102,6 @@ class ServerErrorMiddleware:
         self.app = app
         self.handler = handler
         self.debug = debug
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        response_started = False
-        original_send = send
-
-        async def sender(message: Any) -> None:
-            nonlocal response_started
-            if message["type"] == "http.response.start":
-                response_started = True
-            await original_send(message)
-
-        try:
-            await self.app(scope, receive, sender)
-        except Exception as exc:
-            if response_started:
-                raise
-            request = Request(scope, receive, send)
-            if self.handler is not None:
-                if is_async_callable(self.handler):
-                    response = await self.handler(request, exc)
-                else:
-                    response = await run_in_threadpool(self.handler, request, exc)
-            elif self.debug:
-                tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
-                tb_text = html.escape("".join(tb))
-                content = _500_DEBUG_HTML.format(traceback=tb_text)
-                response = HTMLResponse(content, status_code=500)
-            else:
-                response = PlainTextResponse(_500_PLAIN, status_code=500)
-            await response(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------
@@ -236,52 +166,6 @@ class ExceptionMiddleware:
                 return self._exception_handlers[cls]
         return None
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        response_started = False
-        original_send = send
-
-        async def sender(message: Any) -> None:
-            nonlocal response_started
-            if message["type"] == "http.response.start":
-                response_started = True
-            await original_send(message)
-
-        try:
-            await self.app(scope, receive, sender)
-        except Exception as exc:
-            if response_started:
-                raise
-
-            request = Request(scope, receive, send)
-
-            # Check for status-code based handler (HTTPException pattern)
-            status_code = getattr(exc, "status_code", None)
-            if status_code is not None and status_code in self._status_handlers:
-                handler = self._status_handlers[status_code]
-                if is_async_callable(handler):
-                    response = await handler(request, exc)
-                else:
-                    response = await run_in_threadpool(handler, request, exc)
-                await response(scope, receive, send)
-                return
-
-            # Walk MRO for exception class handler
-            handler = self._lookup_handler(exc)
-            if handler is not None:
-                if is_async_callable(handler):
-                    response = await handler(request, exc)
-                else:
-                    response = await run_in_threadpool(handler, request, exc)
-                await response(scope, receive, send)
-                return
-
-            # No handler found -- re-raise
-            raise
-
 
 # ---------------------------------------------------------------------------
 # BaseHTTPMiddleware
@@ -310,58 +194,6 @@ class BaseHTTPMiddleware:
         self.app = app
         if dispatch is not None:
             self.dispatch = dispatch  # type: ignore[assignment]
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        request = Request(scope, receive, send)
-
-        async def call_next(request: Request) -> Response:
-            """Invoke the inner app and capture its response."""
-            app_exc: Optional[Exception] = None
-            status_code = 500
-            headers_raw: list = []
-            body_parts: list[bytes] = []
-            body_complete = asyncio.Event()
-
-            async def receive_wrapper() -> Any:
-                return await request.receive()
-
-            async def send_wrapper(message: Any) -> None:
-                nonlocal status_code, headers_raw
-                if message["type"] == "http.response.start":
-                    status_code = message["status"]
-                    headers_raw = message.get("headers", [])
-                elif message["type"] == "http.response.body":
-                    body_chunk = message.get("body", b"")
-                    if body_chunk:
-                        body_parts.append(body_chunk)
-                    if not message.get("more_body", False):
-                        body_complete.set()
-
-            try:
-                await self.app(scope, receive_wrapper, send_wrapper)
-            except Exception as exc:
-                app_exc = exc
-                body_complete.set()
-
-            await body_complete.wait()
-
-            if app_exc is not None:
-                raise app_exc
-
-            body = b"".join(body_parts)
-            response = Response(
-                content=body,
-                status_code=status_code,
-            )
-            response._raw_headers = list(headers_raw)
-            return response
-
-        response = await self.dispatch(request, call_next)
-        await response(scope, receive, send)
 
     async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Response:
         """Override this method to implement middleware logic.
@@ -496,29 +328,6 @@ class CORSMiddleware:
             return True
         return False
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        headers = _decode_scope_headers(scope)
-        origin = headers.get("origin")
-
-        if origin is None:
-            # Not a CORS request
-            await self.app(scope, receive, send)
-            return
-
-        method = scope.get("method", "GET")
-        if method == "OPTIONS" and "access-control-request-method" in headers:
-            # Preflight request
-            response = self._preflight_response(origin, headers)
-            await response(scope, receive, send)
-            return
-
-        # Simple / actual request -- run app then inject headers
-        await self._simple_response(scope, receive, send, origin)
-
     def _preflight_response(
         self, origin: str, headers: Dict[str, str]
     ) -> Response:
@@ -560,33 +369,6 @@ class CORSMiddleware:
         resp.body = b""
         return resp
 
-    async def _simple_response(
-        self, scope: Scope, receive: Receive, send: Send, origin: str
-    ) -> None:
-        """Run the app and inject CORS headers into the response."""
-        headers_to_add: list[tuple[bytes, bytes]] = list(self.simple_headers)
-
-        if not self.allow_all_origins:
-            if self._is_origin_allowed(origin):
-                headers_to_add.append(
-                    (b"access-control-allow-origin", origin.encode("latin-1"))
-                )
-                headers_to_add.append((b"vary", b"Origin"))
-            else:
-                # Origin not allowed -- run app without CORS headers
-                await self.app(scope, receive, send)
-                return
-
-        async def send_with_cors(message: Any) -> None:
-            if message["type"] == "http.response.start":
-                existing = list(message.get("headers", []))
-                existing.extend(headers_to_add)
-                message = dict(message)
-                message["headers"] = existing
-            await send(message)
-
-        await self.app(scope, receive, send_with_cors)
-
 
 # ---------------------------------------------------------------------------
 # GZipMiddleware
@@ -616,123 +398,6 @@ class GZipMiddleware:
         self.app = app
         self.minimum_size = minimum_size
         self.compresslevel = compresslevel
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        # Check if client accepts gzip
-        headers = _decode_scope_headers(scope)
-        accept_encoding = headers.get("accept-encoding", "")
-        if "gzip" not in accept_encoding:
-            await self.app(scope, receive, send)
-            return
-
-        responder = _GZipResponder(
-            self.app, self.minimum_size, self.compresslevel
-        )
-        await responder(scope, receive, send)
-
-
-class _GZipResponder:
-    """Internal helper that intercepts response messages for gzip
-    compression."""
-
-    def __init__(self, app: ASGIApp, minimum_size: int, compresslevel: int) -> None:
-        self.app = app
-        self.minimum_size = minimum_size
-        self.compresslevel = compresslevel
-        self.initial_message: Optional[dict] = None
-        self.body_parts: list[bytes] = []
-        self.started = False
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        self._send = send
-        await self.app(scope, receive, self.send_wrapper)
-
-        # If we buffered everything (streaming not started), flush now
-        if not self.started and self.initial_message is not None:
-            await self._flush_buffered()
-
-    async def send_wrapper(self, message: Any) -> None:
-        if message["type"] == "http.response.start":
-            self.initial_message = message
-            return
-
-        if message["type"] == "http.response.body":
-            body = message.get("body", b"")
-            more_body = message.get("more_body", False)
-
-            if not self.started:
-                self.body_parts.append(body)
-                if more_body:
-                    # Keep buffering -- we might need to check total size
-                    return
-                # End of body: flush everything at once
-                return
-            else:
-                # Already streaming (decided not to compress or already sent)
-                await self._send(message)
-
-    async def _flush_buffered(self) -> None:
-        """Compress (if large enough) and send the buffered response."""
-        full_body = b"".join(self.body_parts)
-        self.started = True
-
-        if len(full_body) < self.minimum_size:
-            # Too small -- send uncompressed
-            await self._send(self.initial_message)
-            await self._send(
-                {"type": "http.response.body", "body": full_body}
-            )
-            return
-
-        # Single-pass: extract content-type and filter content-length
-        resp_headers = list(self.initial_message.get("headers", []))
-        content_type = ""
-        filtered_headers: list[tuple[bytes, bytes]] = []
-        for name, value in resp_headers:
-            n = name.decode("latin-1")
-            n_lower = n.lower()
-            if n_lower == "content-type":
-                content_type = value.decode("latin-1")
-                filtered_headers.append((name, value))
-            elif n_lower == "content-length":
-                continue  # Will replace after compression
-            else:
-                filtered_headers.append((name, value))
-
-        skip_types = (
-            "image/", "audio/", "video/",
-            "application/zip", "application/gzip",
-            "application/x-gzip", "application/octet-stream",
-        )
-        if any(content_type.startswith(t) for t in skip_types):
-            await self._send(self.initial_message)
-            await self._send(
-                {"type": "http.response.body", "body": full_body}
-            )
-            return
-
-        # Compress with gzip
-        compressed = gzip.compress(full_body, compresslevel=self.compresslevel)
-
-        # Add compression headers to already-filtered list
-        new_headers = filtered_headers
-
-        new_headers.append((b"content-encoding", b"gzip"))
-        new_headers.append(
-            (b"content-length", str(len(compressed)).encode("latin-1"))
-        )
-        new_headers.append((b"vary", b"Accept-Encoding"))
-
-        start_message = dict(self.initial_message)
-        start_message["headers"] = new_headers
-        await self._send(start_message)
-        await self._send(
-            {"type": "http.response.body", "body": compressed}
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -783,22 +448,6 @@ class TrustedHostMiddleware:
                     return True
         return False
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if self.allow_any or scope["type"] not in ("http", "websocket"):
-            await self.app(scope, receive, send)
-            return
-
-        # Extract host header
-        headers = _decode_scope_headers(scope)
-        host = headers.get("host", "")
-
-        if not self._is_host_allowed(host):
-            response = PlainTextResponse("Invalid host header", status_code=400)
-            await response(scope, receive, send)
-            return
-
-        await self.app(scope, receive, send)
-
 
 # ---------------------------------------------------------------------------
 # HTTPSRedirectMiddleware
@@ -816,55 +465,6 @@ class HTTPSRedirectMiddleware:
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] not in ("http", "websocket"):
-            await self.app(scope, receive, send)
-            return
-
-        scheme = scope.get("scheme", "")
-        if scheme in ("https", "wss"):
-            await self.app(scope, receive, send)
-            return
-
-        # Build the redirect URL
-        if scope["type"] == "websocket":
-            redirect_scheme = "wss"
-        else:
-            redirect_scheme = "https"
-
-        server = scope.get("server")
-        path = scope.get("root_path", "") + scope.get("path", "/")
-        query_string = scope.get("query_string", b"")
-
-        if server:
-            host_str, port = server
-            default_secure_ports = {"https": 443, "wss": 443}
-            if port == default_secure_ports.get(redirect_scheme):
-                netloc = host_str
-            else:
-                netloc = f"{host_str}:{port}"
-            url = f"{redirect_scheme}://{netloc}{path}"
-        else:
-            # Fallback: try host header
-            headers = dict(
-                (k.decode("latin-1") if isinstance(k, bytes) else k,
-                 v.decode("latin-1") if isinstance(v, bytes) else v)
-                for k, v in scope.get("headers", [])
-            )
-            host = headers.get("host", "localhost")
-            url = f"{redirect_scheme}://{host}{path}"
-
-        if query_string:
-            qs = (
-                query_string.decode("latin-1")
-                if isinstance(query_string, bytes)
-                else query_string
-            )
-            url = f"{url}?{qs}"
-
-        response = RedirectResponse(url, status_code=307)
-        await response(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------

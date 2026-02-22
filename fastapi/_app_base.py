@@ -2,39 +2,23 @@
 Application base class -- replaces starlette.applications.Starlette.
 
 Provides the ``AppBase`` class, which wires up routing, middleware,
-exception handling, and ASGI lifespan with zero starlette imports.
+exception handling, and lifespan with zero starlette imports.
 """
 from __future__ import annotations
 
 from typing import Any, Callable, Optional, Sequence, Type, Union
 
-from fastapi._types import ASGIApp, Receive, Scope, Send
-from fastapi._middleware_impl import (
-    Middleware,
-    ServerErrorMiddleware,
-    ExceptionMiddleware,
-)
+from fastapi._middleware_impl import Middleware
 from fastapi._routing_base import Router
 from fastapi._datastructures_impl import State
 
 
 class AppBase:
-    """Minimal ASGI application base that mirrors ``starlette.applications.Starlette``.
+    """Application base that mirrors ``starlette.applications.Starlette``.
 
-    Composes a ``Router`` with a middleware stack (ServerErrorMiddleware at the
-    outermost layer, user middleware in between, and ExceptionMiddleware closest
-    to the router) and provides convenience helpers for route and middleware
-    registration.
-
-    Subclasses (e.g. ``FastAPI``) are expected to set the following instance
-    attributes in their own ``__init__``:
-
-    - ``debug``: bool
-    - ``state``: State
-    - ``router``: Router
-    - ``routes``: list
-    - ``exception_handlers``: dict
-    - ``middleware_stack``: ASGIApp | None
+    Composes a ``Router`` with middleware config and exception handlers,
+    and provides convenience helpers for route and middleware registration.
+    The C++ server reads middleware config directly from ``user_middleware``.
     """
 
     def __init__(
@@ -62,7 +46,6 @@ class AppBase:
         )
 
         self.user_middleware: list[Middleware] = list(middleware) if middleware else []
-        self.middleware_stack: Union[ASGIApp, None] = None
 
     @property
     def routes(self) -> list:
@@ -87,7 +70,6 @@ class AppBase:
             path, route, methods=methods, name=name,
             include_in_schema=include_in_schema,
         )
-        self.middleware_stack = None
 
     def add_websocket_route(
         self,
@@ -97,17 +79,15 @@ class AppBase:
     ) -> None:
         """Add a WebSocket route."""
         self.router.add_websocket_route(path, route, name=name)
-        self.middleware_stack = None
 
     def mount(
         self,
         path: str,
-        app: ASGIApp,
+        app: Any,
         name: Optional[str] = None,
     ) -> None:
         """Mount a sub-application at the given path."""
         self.router.mount(path, app=app, name=name)
-        self.middleware_stack = None
 
     # -- Middleware registration ----------------------------------------------
 
@@ -122,7 +102,6 @@ class AppBase:
             self.user_middleware.insert(0, Middleware(middleware_class, *args, **kwargs))
         else:
             self.user_middleware.insert(0, Middleware(middleware_class, **kwargs))
-        self.middleware_stack = None
 
     # -- Exception handler registration --------------------------------------
 
@@ -134,42 +113,6 @@ class AppBase:
         """Register an exception handler for the given exception class or
         HTTP status code."""
         self.exception_handlers[exc_class_or_status] = handler
-        self.middleware_stack = None
-
-    # -- Middleware stack construction ----------------------------------------
-
-    def build_middleware_stack(self) -> ASGIApp:
-        """Build the ASGI middleware chain."""
-        debug = self.debug
-        error_handler = None
-        exception_handlers: dict[Any, Callable[..., Any]] = {}
-
-        for key, value in self.exception_handlers.items():
-            if key in (500, Exception):
-                error_handler = value
-            else:
-                exception_handlers[key] = value
-
-        app: ASGIApp = self.router
-
-        app = ExceptionMiddleware(app, handlers=exception_handlers, debug=debug)
-
-        for middleware in reversed(self.user_middleware):
-            cls, args, kwargs = middleware
-            app = cls(app, *args, **kwargs)
-
-        app = ServerErrorMiddleware(app, handler=error_handler, debug=debug)
-
-        return app
-
-    # -- ASGI interface ------------------------------------------------------
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI entry point -- delegates to the middleware stack."""
-        scope["app"] = self
-        if self.middleware_stack is None:
-            self.middleware_stack = self.build_middleware_stack()
-        await self.middleware_stack(scope, receive, send)
 
     # -- Event handler convenience (legacy) ----------------------------------
 

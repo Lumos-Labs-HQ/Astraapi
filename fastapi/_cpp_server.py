@@ -1525,6 +1525,87 @@ class CppHttpProtocol(asyncio.Protocol):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Server creation (reusable by TestClient)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+async def _create_server(
+    app: Any, host: str = "127.0.0.1", port: int = 8000,
+    keep_alive_timeout: float = 75.0,
+) -> asyncio.AbstractServer:
+    """Create and return a C++ HTTP server without blocking.
+
+    Used by ``run_server()`` and ``TestClient``. The caller is responsible
+    for ``server.close()`` / ``server.wait_closed()``.
+    """
+    loop = asyncio.get_event_loop()
+    core_app = app._core_app
+
+    # Sync routes if not yet done
+    if hasattr(app, "_sync_routes_to_core"):
+        app._sync_routes_to_core()
+
+    # Sync CORS config to C++ core
+    if hasattr(core_app, "configure_cors"):
+        for mw in getattr(app, "user_middleware", []):
+            cls = getattr(mw, "cls", None) or (mw[0] if isinstance(mw, (list, tuple)) else None)
+            if cls and getattr(cls, "__name__", "") == "CORSMiddleware":
+                kw = getattr(mw, "kwargs", {}) or (mw[2] if isinstance(mw, (list, tuple)) and len(mw) > 2 else {})
+                try:
+                    core_app.configure_cors(
+                        allow_origins=kw.get("allow_origins", []),
+                        allow_origin_regex=kw.get("allow_origin_regex"),
+                        allow_methods=kw.get("allow_methods", ["GET"]),
+                        allow_headers=kw.get("allow_headers", []),
+                        allow_credentials=kw.get("allow_credentials", False),
+                        expose_headers=kw.get("expose_headers", []),
+                        max_age=kw.get("max_age", 600),
+                    )
+                except Exception:
+                    pass
+                break
+
+    # Freeze routes
+    if hasattr(core_app, "freeze_routes"):
+        core_app.freeze_routes()
+
+    # Cache OpenAPI schema
+    if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
+        try:
+            import json
+            schema = app.openapi()
+            if schema:
+                schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+                core_app.set_openapi_schema(schema_json)
+        except Exception:
+            pass
+
+    active_connections: set[CppHttpProtocol] = set()
+
+    def _protocol_factory() -> asyncio.Protocol:
+        if len(active_connections) >= _MAX_CONNECTIONS:
+            return _RejectProtocol()
+        proto = _protocol_pool.acquire(
+            core_app, loop, keep_alive_timeout, active_connections)
+        active_connections.add(proto)
+        return proto
+
+    server = await loop.create_server(
+        _protocol_factory, host, port,
+        reuse_address=True, backlog=65535,
+    )
+
+    # TCP_FASTOPEN
+    for s in server.sockets or []:
+        try:
+            s.setsockopt(socket.IPPROTO_TCP, 23, 5)
+        except (OSError, AttributeError):
+            pass
+
+    return server
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Server startup
 # ═════════════════════════════════════════════════════════════════════════════
 

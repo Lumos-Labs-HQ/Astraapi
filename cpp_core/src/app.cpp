@@ -937,753 +937,6 @@ static inline PyObject* build_error_response(PyObject* detail, int status_code) 
     return PyTuple_Pack(2, start.get(), body_msg.get());
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// handle_and_respond — THE MEGA HOT PATH (METH_FASTCALL)
-//
-// ONE C++ call replaces: handle_request_inline + build_asgi_response
-// Also calls endpoint from C++ via PyIter_Send for simple coroutines.
-//
-// Returns:
-//   tuple(start, body)   — fully handled, Python just sends
-//   InlineResult         — needs Pydantic body validation
-//   tuple(sentinel, coro_wrapper, status_code) — endpoint suspended (len==3)
-//   Response object      — Starlette Response
-//   None                 — no route match
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static PyObject* CoreApp_handle_and_respond(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
-    if (nargs != 2) {
-        PyErr_SetString(PyExc_TypeError, "handle_and_respond requires 2 args (scope, body)");
-        return nullptr;
-    }
-
-    PyObject* scope = args[0];
-    PyObject* body_obj = args[1];  // bytes or None
-
-    // ── Extract scope fields using pre-interned keys ─────────────────────
-    PyObject* method_obj = PyDict_GetItem(scope, g_str_method);
-    PyObject* path_obj = PyDict_GetItem(scope, g_str_path);
-    PyObject* qs_obj = PyDict_GetItem(scope, g_str_query_string);
-    PyObject* headers_obj = PyDict_GetItem(scope, g_str_headers);
-
-    if (!method_obj || !path_obj) Py_RETURN_NONE;
-
-    const char* method_str = PyUnicode_AsUTF8(method_obj);
-    Py_ssize_t path_len;
-    const char* path_str = PyUnicode_AsUTF8AndSize(path_obj, &path_len);
-    if (!method_str || !path_str) return nullptr;
-
-    // ── Route matching ───────────────────────────────────────────────────
-    // Skip lock when routes are frozen (after startup) — atomic check first
-    bool frozen = self->routes_frozen.load(std::memory_order_acquire);
-    std::shared_lock lock(self->routes_mutex, std::defer_lock);
-    if (!frozen) lock.lock();
-
-    auto match = self->router.at(path_str, (size_t)path_len);
-    if (!match) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
-
-    int idx = match->route_index;
-    if (idx < 0 || idx >= (int)self->routes.size()) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
-
-    const auto& route = self->routes[idx];
-
-    // Method check — O(1) bitmask
-    if (route.method_mask) {
-        uint8_t req_method = method_str_to_bit(method_str, strlen(method_str));
-        if (!(route.method_mask & req_method)) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
-    }
-
-    if (!route.fast_spec) { if (!frozen) lock.unlock(); Py_RETURN_NONE; }
-
-    const auto& spec = *route.fast_spec;
-
-    // ── Build kwargs dict ────────────────────────────────────────────────
-    PyRef kwargs(PyDict_New());
-    if (!kwargs) return nullptr;
-
-    // ── Path parameters — O(1) hash map lookup ──────────────────────────
-    if (match->param_count > 0) {
-        for (int pi = 0; pi < match->param_count; pi++) {
-            auto pname = match->params[pi].name;
-            auto pval = match->params[pi].value;
-            auto pit = spec.path_map.find(pname);
-            if (pit != spec.path_map.end()) {
-                const auto& fs = spec.path_specs[pit->second];
-                PyObject* py_val = coerce_param(pval, fs.type_tag);
-                if (!py_val) return nullptr;
-                PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
-                Py_DECREF(py_val);
-            } else {
-                PyRef key(PyUnicode_FromStringAndSize(pname.data(), pname.size()));
-                PyRef val(PyUnicode_FromStringAndSize(pval.data(), pval.size()));
-                PyDict_SetItem(kwargs.get(), key.get(), val.get());
-            }
-        }
-    }
-
-    // ── Query parameters (string_view, zero heap alloc) ──────────────────
-    if (spec.has_query_params && qs_obj && PyBytes_Check(qs_obj)) {
-        char* qs_data;
-        Py_ssize_t qs_len;
-        PyBytes_AsStringAndSize(qs_obj, &qs_data, &qs_len);
-        if (qs_len > 0) {
-            const char* p = qs_data;
-            const char* end = qs_data + qs_len;
-            while (p < end) {
-                const char* key_start = p;
-                const char* eq = nullptr;
-                while (p < end && *p != '&') {
-                    if (*p == '=' && !eq) eq = p;
-                    p++;
-                }
-                if (eq) {
-                    std::string_view key_sv(key_start, eq - key_start);
-                    std::string_view val_sv(eq + 1, p - eq - 1);
-
-                    // O(1) hash map lookup instead of O(n) linear scan
-                    auto qit = spec.query_map.find(key_sv);
-                    if (qit != spec.query_map.end()) {
-                        const auto& fs = spec.query_specs[qit->second];
-                        PyObject* py_val = coerce_param(val_sv, fs.type_tag);
-                        if (!py_val) return nullptr;
-                        PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
-                        Py_DECREF(py_val);
-                    }
-                }
-                if (p < end) p++;  // skip '&'
-            }
-        }
-    }
-
-    // ── Header + Cookie extraction (single pass, stack buffer) ───────────
-    if ((spec.has_header_params || spec.has_cookie_params) && headers_obj && PyList_Check(headers_obj)) {
-        Py_ssize_t nheaders = PyList_GET_SIZE(headers_obj);
-        for (Py_ssize_t i = 0; i < nheaders; i++) {
-            PyObject* item = PyList_GET_ITEM(headers_obj, i);
-
-            PyObject* name_obj;
-            PyObject* value_obj;
-            if (PyTuple_Check(item)) {
-                name_obj = PyTuple_GET_ITEM(item, 0);
-                value_obj = PyTuple_GET_ITEM(item, 1);
-            } else if (PyList_Check(item)) {
-                name_obj = PyList_GET_ITEM(item, 0);
-                value_obj = PyList_GET_ITEM(item, 1);
-            } else continue;
-
-            char* name_data;
-            Py_ssize_t name_len;
-            char* val_data;
-            Py_ssize_t val_len;
-            if (PyBytes_AsStringAndSize(name_obj, &name_data, &name_len) < 0) continue;
-            if (PyBytes_AsStringAndSize(value_obj, &val_data, &val_len) < 0) continue;
-
-            // Cookie header
-            if (spec.has_cookie_params && name_len == 6 &&
-                memcmp(name_data, "cookie", 6) == 0) {
-                const char* cp = val_data;
-                const char* cend = val_data + val_len;
-                while (cp < cend) {
-                    while (cp < cend && (*cp == ' ' || *cp == ';')) cp++;
-                    const char* ck_start = cp;
-                    while (cp < cend && *cp != '=') cp++;
-                    if (cp >= cend) break;
-                    std::string_view cookie_name(ck_start, cp - ck_start);
-                    cp++;  // skip '='
-                    const char* cv_start = cp;
-                    while (cp < cend && *cp != ';') cp++;
-                    std::string_view cookie_val(cv_start, cp - cv_start);
-
-                    // O(1) hash map lookup instead of O(n) linear scan
-                    auto cit = spec.cookie_map.find(cookie_name);
-                    if (cit != spec.cookie_map.end()) {
-                        const auto& fs = spec.cookie_specs[cit->second];
-                        PyRef py_val(PyUnicode_FromStringAndSize(cookie_val.data(), cookie_val.size()));
-                        PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
-                    }
-                }
-                continue;
-            }
-
-            // Header params — stack buffer normalization
-            if (spec.has_header_params) {
-                // PERF-8: Stack buffer for common case, heap for oversized headers
-                constexpr Py_ssize_t STACK_LIMIT = 255;
-                char stack_buf[256];
-                std::unique_ptr<char[]> heap_buf;
-                char* norm_buf = stack_buf;
-                if (name_len > STACK_LIMIT) {
-                    heap_buf = std::make_unique<char[]>(name_len + 1);
-                    norm_buf = heap_buf.get();
-                }
-                for (Py_ssize_t j = 0; j < name_len; j++) {
-                    char c = name_data[j];
-                    norm_buf[j] = (c >= 'A' && c <= 'Z') ? c + 32 : (c == '-') ? '_' : c;
-                }
-                std::string_view normalized(norm_buf, name_len);
-                // O(1) hash map lookup instead of O(n) linear scan
-                auto hit = spec.header_map.find(normalized);
-                if (hit != spec.header_map.end()) {
-                    const auto& fs = spec.header_specs[hit->second];
-                    PyRef py_val(PyUnicode_FromStringAndSize(val_data, val_len));
-                    PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
-                }
-            }
-        }
-    }
-
-    // ── Fill defaults for missing params ─────────────────────────────────
-    auto fill_defaults = [&](const std::vector<FieldSpec>& specs) {
-        for (const auto& fs : specs) {
-            if (fs.default_value && !PyDict_Contains(kwargs.get(), fs.py_field_name)) {
-                PyDict_SetItem(kwargs.get(), fs.py_field_name, fs.default_value);
-            }
-        }
-    };
-    fill_defaults(spec.query_specs);
-    fill_defaults(spec.header_specs);
-    fill_defaults(spec.cookie_specs);
-
-    // ── JSON body parsing ────────────────────────────────────────────────
-    PyObject* json_body_obj = Py_None;
-    if (spec.has_body_params && body_obj != Py_None && PyBytes_Check(body_obj)) {
-        char* body_data;
-        Py_ssize_t body_len;
-        if (PyBytes_AsStringAndSize(body_obj, &body_data, &body_len) == 0 && body_len > 0) {
-            PyRef parsed(yyjson_parse_to_pyobject(body_data, (size_t)body_len));
-            if (parsed) {
-                json_body_obj = parsed.release();
-            } else {
-                log_and_clear_pyerr("JSON body parse failed");
-            }
-        }
-
-        // Inject body into kwargs
-        if (json_body_obj != Py_None && spec.body_param_name) {
-            if (spec.embed_body_fields) {
-                if (PyDict_Check(json_body_obj)) {
-                    PyDict_Update(kwargs.get(), json_body_obj);
-                }
-            } else {
-                PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
-                PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
-            }
-        }
-    }
-
-    // ── Copy route data to locals before releasing lock ────────────────────
-    PyObject* har_endpoint = route.endpoint;
-    Py_INCREF(har_endpoint);
-    uint16_t har_status_code = route.status_code;
-    bool har_has_body_params = spec.has_body_params;
-    PyObject* har_body_params = spec.body_params;
-    if (har_body_params) Py_INCREF(har_body_params);
-    bool har_embed_body = spec.embed_body_fields;
-    std::optional<std::string> har_body_param_name = spec.body_param_name;
-
-    // Pydantic model fast-path flags
-    bool asgi_body_is_dict = spec.body_is_plain_dict;
-    PyObject* asgi_model_validate = spec.model_validate;
-    if (asgi_model_validate) Py_INCREF(asgi_model_validate);
-
-    // Release lock — no more references to route/spec after this point
-    if (!frozen) lock.unlock();
-
-    // ── Body params fast paths ──────────────────────────────────────────
-    // FAST PATH 1: Plain dict body → inject directly, skip Pydantic
-    if (har_has_body_params && har_body_params && asgi_body_is_dict
-        && json_body_obj != Py_None && har_body_param_name) {
-        PyRef bp_key(PyUnicode_FromString(har_body_param_name->c_str()));
-        PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
-        if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-        Py_XDECREF(asgi_model_validate);
-        goto asgi_call_endpoint;
-    }
-
-    // FAST PATH 2: Single Pydantic model → call model_validate directly
-    if (har_has_body_params && har_body_params && asgi_model_validate
-        && json_body_obj != Py_None && har_body_param_name) {
-        PyRef validated(PyObject_CallOneArg(asgi_model_validate, json_body_obj));
-        Py_DECREF(asgi_model_validate);
-        asgi_model_validate = nullptr;
-        if (validated) {
-            PyRef bp_key(PyUnicode_FromString(har_body_param_name->c_str()));
-            PyDict_SetItem(kwargs.get(), bp_key.get(), validated.get());
-            if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-            goto asgi_call_endpoint;
-        }
-        // Validation error
-        log_and_clear_pyerr("parameter validation failed");
-        // Fall through to InlineResult path
-    }
-    Py_XDECREF(asgi_model_validate);
-
-    // ── If route has body params needing Pydantic → return InlineResult ──
-    if (har_has_body_params && har_body_params) {
-        InlineResultObject* result = PyObject_New(InlineResultObject, &InlineResultType);
-        if (!result) {
-            if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-            Py_DECREF(har_endpoint);
-            Py_DECREF(har_body_params);
-            return nullptr;
-        }
-
-        result->status_code_obj = (har_status_code == 200)
-            ? (Py_INCREF(g_status_200), g_status_200)
-            : PyLong_FromLong(har_status_code);
-        result->has_body_params = Py_True; Py_INCREF(Py_True);
-        result->embed_body_fields = har_embed_body ? Py_True : Py_False;
-        Py_INCREF(result->embed_body_fields);
-        result->kwargs = kwargs.release();
-        if (json_body_obj != Py_None) {
-            result->json_body = json_body_obj;
-        } else {
-            result->json_body = Py_NewRef(Py_None);
-        }
-        result->endpoint = har_endpoint;  // transfer our strong ref
-        result->body_params = har_body_params;  // transfer our strong ref
-
-        return (PyObject*)result;
-    }
-
-asgi_call_endpoint:
-    // Clean up body_params if not used in InlineResult
-    Py_XDECREF(har_body_params);
-
-    // ── CALL ENDPOINT FROM C++ ───────────────────────────────────────────
-    // For simple async endpoints: PyObject_Call → coro, PyIter_Send → result
-    // If endpoint completes immediately (PYGEN_RETURN), we serialize + return.
-    // If it suspends (PYGEN_NEXT), we wrap and return to Python for awaiting.
-
-    PyRef coro(PyObject_Call(har_endpoint, g_empty_tuple, kwargs.get()));
-    Py_DECREF(har_endpoint);  // release our strong ref
-    if (!coro) {
-        // Exception in endpoint call
-        if (PyErr_Occurred()) {
-            PyObject *exc_type, *exc_val, *exc_tb;
-            PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
-            if (is_http_exception(exc_type)) {
-                PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
-                PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
-                PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
-                Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-                exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
-                if (detail && sc) {
-                    int scode = (int)PyLong_AsLong(sc.get());
-                    return build_error_response(detail.get(), scode);
-                }
-            }
-            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-        }
-        return build_500_tuple();
-    }
-
-    // Drive the coroutine — PyIter_Send is stable C API since Python 3.10
-    PyObject* raw_result = nullptr;
-    PySendResult send_status = PyIter_Send(coro.get(), Py_None, &raw_result);
-
-    if (send_status == PYGEN_RETURN) {
-        // ✅ Common case: endpoint completed immediately (no real I/O)
-        // Check if result is a serializable Python type
-        if (PyDict_Check(raw_result) || PyList_Check(raw_result) ||
-            PyUnicode_Check(raw_result) || PyLong_Check(raw_result) ||
-            PyFloat_Check(raw_result) || PyBool_Check(raw_result) ||
-            PyTuple_Check(raw_result) || raw_result == Py_None) {
-
-            // Serialize to JSON
-            PyRef body_bytes(serialize_to_json_pybytes(raw_result));
-            Py_DECREF(raw_result);
-            if (!body_bytes) return build_500_tuple();
-
-            Py_ssize_t body_len = PyBytes_GET_SIZE(body_bytes.get());
-
-            // Start dict (direct construction — no PyDict_Copy overhead)
-            PyRef start(PyDict_New());
-            if (!start) return build_500_tuple();
-            if (PyDict_SetItem(start.get(), g_str_type, g_str_http_response_start) < 0) return build_500_tuple();
-
-            PyObject* status_obj = get_cached_status(har_status_code);
-            if (PyDict_SetItem(start.get(), g_str_status, status_obj) < 0) {
-                Py_DECREF(status_obj);
-                return build_500_tuple();
-            }
-            Py_DECREF(status_obj);
-
-            // Headers: [[ct, json], [cl, len]]
-            char len_buf[21];
-            int len_n = fast_i64_to_buf(len_buf, body_len);
-
-            PyRef headers_list(PyList_New(2));
-            Py_INCREF(g_ct_json_header_pair);
-            PyList_SET_ITEM(headers_list.get(), 0, g_ct_json_header_pair);
-
-            PyRef cl_pair(PyList_New(2));
-            Py_INCREF(g_bytes_content_length);
-            PyList_SET_ITEM(cl_pair.get(), 0, g_bytes_content_length);
-            PyObject* cl_val_bytes = PyBytes_FromStringAndSize(len_buf, len_n);
-            if (!cl_val_bytes) return build_500_tuple();
-            PyList_SET_ITEM(cl_pair.get(), 1, cl_val_bytes);
-            PyList_SET_ITEM(headers_list.get(), 1, cl_pair.release());
-
-            if (PyDict_SetItem(start.get(), g_str_headers, headers_list.get()) < 0) return build_500_tuple();
-
-            // Body dict (direct construction — no PyDict_Copy overhead)
-            PyRef body_msg(PyDict_New());
-            if (!body_msg) return build_500_tuple();
-            if (PyDict_SetItem(body_msg.get(), g_str_type, g_str_http_response_body) < 0) return build_500_tuple();
-            if (PyDict_SetItem(body_msg.get(), g_str_body, body_bytes.get()) < 0) return build_500_tuple();
-
-            return PyTuple_Pack(2, start.get(), body_msg.get());
-        }
-
-        // Non-serializable (e.g. Starlette Response) → return directly
-        return raw_result;  // new ref from PyIter_Send
-    }
-
-    if (send_status == PYGEN_NEXT) {
-        // Endpoint suspended — needs real async I/O
-        // Build wrapper coroutine for Python to await
-        if (!s_resume_func) {
-            PyRef mod(PyImport_ImportModule("fastapi._core_app"));
-            if (mod)
-                s_resume_func = PyObject_GetAttrString(mod.get(), "_resume_coro");
-        }
-        if (s_resume_func) {
-            PyRef wrapper(PyObject_CallFunctionObjArgs(
-                s_resume_func, coro.get(), raw_result, nullptr));
-            Py_XDECREF(raw_result);
-            if (wrapper) {
-                PyRef sentinel(PyLong_FromLong(-1));
-                PyRef sc(PyLong_FromLong(har_status_code));
-                return PyTuple_Pack(3, sentinel.get(), wrapper.get(), sc.get());
-            }
-        }
-        Py_XDECREF(raw_result);
-        return build_500_tuple();
-    }
-
-    // PYGEN_ERROR: exception in coroutine
-    if (PyErr_Occurred()) {
-        PyObject *exc_type, *exc_val, *exc_tb;
-        PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
-        if (is_http_exception(exc_type)) {
-            PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
-            PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
-            PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
-            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-            exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
-            if (detail && sc) {
-                int scode = (int)PyLong_AsLong(sc.get());
-                return build_error_response(detail.get(), scode);
-            }
-        }
-        Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-    }
-    return build_500_tuple();
-}
-
-// ── handle_request_inline (kept for compatibility) ──────────────────────────
-
-static PyObject* CoreApp_handle_request_inline(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
-    if (nargs != 2) {
-        PyErr_SetString(PyExc_TypeError, "handle_request_inline requires 2 args");
-        return nullptr;
-    }
-
-    PyObject* scope = args[0];
-    PyObject* body_obj = args[1];
-
-    PyObject* method_obj = PyDict_GetItem(scope, g_str_method);
-    PyObject* path_obj = PyDict_GetItem(scope, g_str_path);
-    PyObject* qs_obj = PyDict_GetItem(scope, g_str_query_string);
-    PyObject* headers_obj = PyDict_GetItem(scope, g_str_headers);
-
-    if (!method_obj || !path_obj) Py_RETURN_NONE;
-
-    const char* method_str = PyUnicode_AsUTF8(method_obj);
-    Py_ssize_t path_len;
-    const char* path_str = PyUnicode_AsUTF8AndSize(path_obj, &path_len);
-    if (!method_str || !path_str) return nullptr;
-
-    std::shared_lock lock(self->routes_mutex);
-    auto match = self->router.at(path_str, (size_t)path_len);
-    if (!match) { lock.unlock(); Py_RETURN_NONE; }
-
-    int idx = match->route_index;
-    if (idx < 0 || idx >= (int)self->routes.size()) { lock.unlock(); Py_RETURN_NONE; }
-
-    const auto& route = self->routes[idx];
-
-    if (route.method_mask) {
-        uint8_t req_method = method_str_to_bit(method_str, strlen(method_str));
-        if (!(route.method_mask & req_method)) { lock.unlock(); Py_RETURN_NONE; }
-    }
-
-    if (!route.fast_spec) { lock.unlock(); Py_RETURN_NONE; }
-
-    const auto& spec = *route.fast_spec;
-
-    PyRef kwargs(PyDict_New());
-    if (!kwargs) return nullptr;
-
-    // Path params
-    if (match->param_count > 0) {
-        for (int pi = 0; pi < match->param_count; pi++) {
-            auto pname = match->params[pi].name;
-            auto pval = match->params[pi].value;
-            bool coerced = false;
-            for (const auto& fs : spec.path_specs) {
-                if (fs.field_name == pname) {
-                    PyObject* py_val = coerce_param(pval, fs.type_tag);
-                    if (!py_val) return nullptr;
-                    PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
-                    Py_DECREF(py_val);
-                    coerced = true;
-                    break;
-                }
-            }
-            if (!coerced) {
-                PyRef key(PyUnicode_FromStringAndSize(pname.data(), pname.size()));
-                PyRef val(PyUnicode_FromStringAndSize(pval.data(), pval.size()));
-                PyDict_SetItem(kwargs.get(), key.get(), val.get());
-            }
-        }
-    }
-
-    // Query params
-    if (spec.has_query_params && qs_obj && PyBytes_Check(qs_obj)) {
-        char* qs_data;
-        Py_ssize_t qs_len;
-        PyBytes_AsStringAndSize(qs_obj, &qs_data, &qs_len);
-        if (qs_len > 0) {
-            const char* p = qs_data;
-            const char* end = qs_data + qs_len;
-            while (p < end) {
-                const char* key_start = p;
-                const char* eq = nullptr;
-                while (p < end && *p != '&') {
-                    if (*p == '=' && !eq) eq = p;
-                    p++;
-                }
-                if (eq) {
-                    std::string_view key_sv(key_start, eq - key_start);
-                    std::string_view val_sv(eq + 1, p - eq - 1);
-
-                    // O(1) hash map lookup instead of O(n) linear scan
-                    auto qit = spec.query_map.find(key_sv);
-                    if (qit != spec.query_map.end()) {
-                        const auto& fs = spec.query_specs[qit->second];
-                        PyObject* py_val = coerce_param(val_sv, fs.type_tag);
-                        if (!py_val) return nullptr;
-                        PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
-                        Py_DECREF(py_val);
-                    }
-                }
-                if (p < end) p++;
-            }
-        }
-    }
-
-    // Headers + Cookies
-    if ((spec.has_header_params || spec.has_cookie_params) && headers_obj && PyList_Check(headers_obj)) {
-        Py_ssize_t nheaders = PyList_GET_SIZE(headers_obj);
-        for (Py_ssize_t i = 0; i < nheaders; i++) {
-            PyObject* item = PyList_GET_ITEM(headers_obj, i);
-
-            PyObject* name_obj_h;
-            PyObject* value_obj_h;
-            if (PyTuple_Check(item)) {
-                name_obj_h = PyTuple_GET_ITEM(item, 0);
-                value_obj_h = PyTuple_GET_ITEM(item, 1);
-            } else if (PyList_Check(item)) {
-                name_obj_h = PyList_GET_ITEM(item, 0);
-                value_obj_h = PyList_GET_ITEM(item, 1);
-            } else continue;
-
-            char* name_data;
-            Py_ssize_t name_len;
-            char* val_data;
-            Py_ssize_t val_len;
-            if (PyBytes_AsStringAndSize(name_obj_h, &name_data, &name_len) < 0) continue;
-            if (PyBytes_AsStringAndSize(value_obj_h, &val_data, &val_len) < 0) continue;
-
-            if (spec.has_cookie_params && name_len == 6 &&
-                memcmp(name_data, "cookie", 6) == 0) {
-                const char* cp = val_data;
-                const char* cend = val_data + val_len;
-                while (cp < cend) {
-                    while (cp < cend && (*cp == ' ' || *cp == ';')) cp++;
-                    const char* ck_start = cp;
-                    while (cp < cend && *cp != '=') cp++;
-                    if (cp >= cend) break;
-                    std::string_view cookie_name(ck_start, cp - ck_start);
-                    cp++;
-                    const char* cv_start = cp;
-                    while (cp < cend && *cp != ';') cp++;
-                    std::string_view cookie_val(cv_start, cp - cv_start);
-
-                    // O(1) hash map lookup instead of O(n) linear scan
-                    auto cit = spec.cookie_map.find(cookie_name);
-                    if (cit != spec.cookie_map.end()) {
-                        const auto& fs = spec.cookie_specs[cit->second];
-                        PyRef py_val(PyUnicode_FromStringAndSize(cookie_val.data(), cookie_val.size()));
-                        PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
-                    }
-                }
-                continue;
-            }
-
-            if (spec.has_header_params) {
-                // PERF-8: Stack buffer for common case, heap for oversized headers
-                constexpr Py_ssize_t STACK_LIMIT = 255;
-                char stack_buf[256];
-                std::unique_ptr<char[]> heap_buf;
-                char* norm_buf = stack_buf;
-                if (name_len > STACK_LIMIT) {
-                    heap_buf = std::make_unique<char[]>(name_len + 1);
-                    norm_buf = heap_buf.get();
-                }
-                for (Py_ssize_t j = 0; j < name_len; j++) {
-                    char c = name_data[j];
-                    norm_buf[j] = (c >= 'A' && c <= 'Z') ? c + 32 : (c == '-') ? '_' : c;
-                }
-                std::string_view normalized(norm_buf, name_len);
-                // O(1) hash map lookup instead of O(n) linear scan
-                auto hit = spec.header_map.find(normalized);
-                if (hit != spec.header_map.end()) {
-                    const auto& fs = spec.header_specs[hit->second];
-                    PyRef py_val(PyUnicode_FromStringAndSize(val_data, val_len));
-                    PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
-                }
-            }
-        }
-    }
-
-    // Fill defaults
-    auto fill_defaults = [&](const std::vector<FieldSpec>& specs) {
-        for (const auto& fs : specs) {
-            if (fs.default_value && !PyDict_Contains(kwargs.get(), fs.py_field_name)) {
-                PyDict_SetItem(kwargs.get(), fs.py_field_name, fs.default_value);
-            }
-        }
-    };
-    fill_defaults(spec.query_specs);
-    fill_defaults(spec.header_specs);
-    fill_defaults(spec.cookie_specs);
-
-    // JSON body
-    PyObject* json_body_obj = Py_None;
-    if (spec.has_body_params && body_obj != Py_None && PyBytes_Check(body_obj)) {
-        char* body_data;
-        Py_ssize_t body_len;
-        if (PyBytes_AsStringAndSize(body_obj, &body_data, &body_len) == 0 && body_len > 0) {
-            PyRef parsed(yyjson_parse_to_pyobject(body_data, (size_t)body_len));
-            if (parsed) json_body_obj = parsed.release();
-            else PyErr_Clear();
-        }
-
-        if (json_body_obj != Py_None && spec.body_param_name) {
-            if (spec.embed_body_fields) {
-                if (PyDict_Check(json_body_obj)) {
-                    PyDict_Update(kwargs.get(), json_body_obj);
-                }
-            } else {
-                PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
-                PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
-            }
-        }
-    }
-
-    // Build InlineResult (all PyObject* fields)
-    InlineResultObject* result = PyObject_New(InlineResultObject, &InlineResultType);
-    if (!result) {
-        if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-        return nullptr;
-    }
-
-    result->status_code_obj = (route.status_code == 200)
-        ? (Py_INCREF(g_status_200), g_status_200)
-        : PyLong_FromLong(route.status_code);
-    result->has_body_params = Py_NewRef(spec.has_body_params ? Py_True : Py_False);
-    result->embed_body_fields = Py_NewRef(spec.embed_body_fields ? Py_True : Py_False);
-    result->kwargs = kwargs.release();
-    if (json_body_obj != Py_None) {
-        result->json_body = json_body_obj;
-    } else {
-        result->json_body = Py_NewRef(Py_None);
-    }
-    Py_INCREF(route.endpoint);
-    result->endpoint = route.endpoint;
-    result->body_params = Py_NewRef(spec.body_params ? spec.body_params : Py_None);
-
-    return (PyObject*)result;
-}
-
-// ── build_asgi_response (METH_FASTCALL — fallback for suspended coro path) ──
-
-static PyObject* CoreApp_build_asgi_response(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
-    if (nargs < 1 || nargs > 2) {
-        PyErr_SetString(PyExc_TypeError, "build_asgi_response(content[, status_code])");
-        return nullptr;
-    }
-
-    PyObject* content = args[0];
-    int status_code = (nargs >= 2) ? (int)PyLong_AsLong(args[1]) : 200;
-    if (status_code == -1 && PyErr_Occurred()) return nullptr;
-
-    PyRef body_bytes(serialize_to_json_pybytes(content));
-    if (!body_bytes) return nullptr;
-
-    Py_ssize_t body_len = PyBytes_GET_SIZE(body_bytes.get());
-
-    // Start dict (direct construction — no PyDict_Copy)
-    PyRef start(PyDict_New());
-    if (!start) return nullptr;
-    if (PyDict_SetItem(start.get(), g_str_type, g_str_http_response_start) < 0) return nullptr;
-
-    PyObject* status_obj = get_cached_status(status_code);
-    if (PyDict_SetItem(start.get(), g_str_status, status_obj) < 0) {
-        Py_DECREF(status_obj);
-        return nullptr;
-    }
-    Py_DECREF(status_obj);
-
-    // Headers
-    char len_buf[21];
-    int len_n = fast_i64_to_buf(len_buf, body_len);
-
-    PyRef headers_list(PyList_New(2));
-    if (!headers_list) return nullptr;
-
-    Py_INCREF(g_ct_json_header_pair);
-    PyList_SET_ITEM(headers_list.get(), 0, g_ct_json_header_pair);
-
-    PyRef cl_pair(PyList_New(2));
-    if (!cl_pair) return nullptr;
-    Py_INCREF(g_bytes_content_length);
-    PyList_SET_ITEM(cl_pair.get(), 0, g_bytes_content_length);
-    PyObject* cl_val_bytes = PyBytes_FromStringAndSize(len_buf, len_n);
-    if (!cl_val_bytes) return nullptr;
-    PyList_SET_ITEM(cl_pair.get(), 1, cl_val_bytes);
-    PyList_SET_ITEM(headers_list.get(), 1, cl_pair.release());
-
-    if (PyDict_SetItem(start.get(), g_str_headers, headers_list.get()) < 0) return nullptr;
-
-    // Body dict (direct construction — no PyDict_Copy)
-    PyRef body_msg(PyDict_New());
-    if (!body_msg) return nullptr;
-    if (PyDict_SetItem(body_msg.get(), g_str_type, g_str_http_response_body) < 0) return nullptr;
-    if (PyDict_SetItem(body_msg.get(), g_str_body, body_bytes.get()) < 0) return nullptr;
-
-    return PyTuple_Pack(2, start.get(), body_msg.get());
-}
-
 // ── register_fast_spec ──────────────────────────────────────────────────────
 
 static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args, PyObject* kwargs) {
@@ -2262,6 +1515,11 @@ static const char* try_compress_inline(
 
     if (!accept_br && !accept_gzip) return nullptr;
 
+    // GIL release: compression only touches raw C data, no Python objects
+    const char* result = nullptr;
+
+    Py_BEGIN_ALLOW_THREADS
+
 #if HAS_BROTLI
     if (accept_br) {
         size_t output_size = BrotliEncoderMaxCompressedSize(body_len);
@@ -2273,12 +1531,12 @@ static const char* try_compress_inline(
             &output_size, (uint8_t*)out.data());
         if (ok && output_size < body_len) {
             out.resize(output_size);
-            return "br";
+            result = "br";
         }
     }
 #endif
 
-    if (accept_gzip) {
+    if (!result && accept_gzip) {
         // Size-adaptive compression: level 1 for <4KB (speed), 4 for 4-64KB, 6 for >64KB
         int gz_level = (body_len < 4096) ? 1 : (body_len <= 65536) ? 4 : 6;
         z_stream strm = {};
@@ -2293,13 +1551,16 @@ static const char* try_compress_inline(
             if (ret == Z_STREAM_END && strm.total_out < body_len) {
                 out.resize(strm.total_out);
                 deflateEnd(&strm);
-                return "gzip";
+                result = "gzip";
+            } else {
+                deflateEnd(&strm);
             }
-            deflateEnd(&strm);
         }
     }
 
-    return nullptr;
+    Py_END_ALLOW_THREADS
+
+    return result;
 }
 
 // ── Response builder with optional CORS + compression headers ────────────────
@@ -3250,12 +2511,18 @@ static PyObject* CoreApp_handle_http(
                 }
             }
         } else if (spec.has_body_params) {
-            // ── JSON body parsing (yyjson — ~3GB/s) ──────────────────────
-            PyRef parsed(yyjson_parse_to_pyobject(req.body.data, req.body.len));
-            if (parsed) {
-                json_body_obj = parsed.release();
-            } else {
-                PyErr_Clear();
+            // ── JSON body parsing (yyjson — GIL-released raw parse) ──────
+            yyjson_doc* doc = nullptr;
+            Py_BEGIN_ALLOW_THREADS
+            doc = yyjson_parse_raw(req.body.data, req.body.len);
+            Py_END_ALLOW_THREADS
+            if (doc) {
+                PyRef parsed(yyjson_doc_to_pyobject(doc));
+                if (parsed) {
+                    json_body_obj = parsed.release();
+                } else {
+                    PyErr_Clear();
+                }
             }
 
             if (json_body_obj != Py_None && spec.body_param_name) {
@@ -4456,14 +3723,20 @@ static PyObject* CoreApp_parse_and_route(
     fill_defaults(spec.header_specs);
     fill_defaults(spec.cookie_specs);
 
-    // ── JSON body parsing (yyjson — ~3GB/s, zero intermediate PyBytes) ──
+    // ── JSON body parsing (yyjson — GIL-released raw parse) ──
     PyObject* json_body_obj = Py_None;
     if (spec.has_body_params && !req.body.empty()) {
-        PyRef parsed(yyjson_parse_to_pyobject(req.body.data, req.body.len));
-        if (parsed) {
-            json_body_obj = parsed.release();
-        } else {
-            PyErr_Clear();
+        yyjson_doc* doc = nullptr;
+        Py_BEGIN_ALLOW_THREADS
+        doc = yyjson_parse_raw(req.body.data, req.body.len);
+        Py_END_ALLOW_THREADS
+        if (doc) {
+            PyRef parsed(yyjson_doc_to_pyobject(doc));
+            if (parsed) {
+                json_body_obj = parsed.release();
+            } else {
+                PyErr_Clear();
+            }
         }
 
         if (json_body_obj != Py_None && spec.body_param_name) {
@@ -4584,11 +3857,6 @@ static PyMethodDef CoreApp_methods[] = {
     {"get_endpoint", (PyCFunction)CoreApp_get_endpoint, METH_O, nullptr},
     {"get_response_model_field", (PyCFunction)CoreApp_get_response_model_field, METH_O, nullptr},
     {"get_response_filters", (PyCFunction)CoreApp_get_response_filters, METH_O, nullptr},
-    // NEW: Mega hot path — ONE call does everything
-    {"handle_and_respond", (PyCFunction)(void(*)(void))CoreApp_handle_and_respond, METH_FASTCALL, nullptr},
-    // Kept for compatibility + suspended coro fallback
-    {"handle_request_inline", (PyCFunction)(void(*)(void))CoreApp_handle_request_inline, METH_FASTCALL, nullptr},
-    {"build_asgi_response", (PyCFunction)(void(*)(void))CoreApp_build_asgi_response, METH_FASTCALL, nullptr},
     {"register_fast_spec", (PyCFunction)CoreApp_register_fast_spec, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"configure_cors", (PyCFunction)CoreApp_configure_cors, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"configure_trusted_hosts", (PyCFunction)CoreApp_configure_trusted_hosts, METH_O, nullptr},
