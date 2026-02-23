@@ -173,6 +173,9 @@ try:
         http_buf_consume as _http_buf_consume,
         http_buf_clear as _http_buf_clear,
         http_buf_len as _http_buf_len,
+        # Warm-up / eager initialization
+        init_cached_refs as _init_cached_refs,
+        prewarm_buffer_pool as _prewarm_buffer_pool,
     )
 except ImportError as e:
     raise ImportError(
@@ -969,10 +972,7 @@ class CppHttpProtocol(asyncio.Protocol):
                 sock.setsockopt(socket.IPPROTO_TCP, 12, 1)  # TCP_QUICKACK = 12
             except (OSError, AttributeError):
                 pass
-            try:
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_DEFER_ACCEPT, 1)
-            except (OSError, AttributeError):
-                pass
+            # Note: TCP_DEFER_ACCEPT is a listen-socket option, not per-connection
         transport.set_write_buffer_limits(high=1048576, low=262144)  # type: ignore[union-attr]
         # Pass client IP to C++ for rate limiting
         peername = transport.get_extra_info("peername")
@@ -1569,6 +1569,10 @@ async def _create_server(
     if hasattr(core_app, "freeze_routes"):
         core_app.freeze_routes()
 
+    # ── Warm-up: eliminate first-request lazy initialization overhead ──
+    _init_cached_refs()       # Pre-import modules + intern strings in C++
+    _prewarm_buffer_pool(4)   # Pre-allocate thread-local response buffers
+
     # Cache OpenAPI schema
     if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
         try:
@@ -1581,6 +1585,11 @@ async def _create_server(
             pass
 
     active_connections: set[CppHttpProtocol] = set()
+
+    # Pre-populate protocol pool to avoid __init__ on first connections
+    for _ in range(min(8, _MAX_CONNECTIONS)):
+        proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
+        _protocol_pool.release(proto)
 
     def _protocol_factory() -> asyncio.Protocol:
         if len(active_connections) >= _MAX_CONNECTIONS:
@@ -1675,6 +1684,10 @@ async def run_server(
     if hasattr(core_app, "freeze_routes"):
         core_app.freeze_routes()
 
+    # ── Warm-up: eliminate first-request lazy initialization overhead ──
+    _init_cached_refs()       # Pre-import modules + intern strings in C++
+    _prewarm_buffer_pool(4)   # Pre-allocate thread-local response buffers
+
     # ── Cache OpenAPI schema as pre-built HTTP response ──────────────────
     if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
         try:
@@ -1709,8 +1722,17 @@ async def run_server(
                     for k, v in state.items():
                         setattr(app_state, k, v)
 
+    # Detect reload worker for fast shutdown
+    import os as _os
+    _is_reload_worker = _os.environ.get("_FASTAPI_RELOAD_WORKER") == "1"
+
     # ── Track active connections for graceful shutdown ──────────────────
     active_connections: set[CppHttpProtocol] = set()
+
+    # Pre-populate protocol pool to avoid __init__ on first connections
+    for _ in range(min(8, _MAX_CONNECTIONS)):
+        proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
+        _protocol_pool.release(proto)
 
     def _protocol_factory() -> asyncio.Protocol:
         # Fast 503 reject when at capacity — prevents cascading slowdown
@@ -1741,11 +1763,20 @@ async def run_server(
 
     def _signal_handler() -> None:
         print("\nShutting down...")
+        # Force-close all active connections immediately to speed up drain
+        for proto in list(active_connections):
+            t = proto._transport
+            if t and not t.is_closing():
+                t.close()
         stop_event.set()
 
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGINT, _signal_handler)
         loop.add_signal_handler(signal.SIGTERM, _signal_handler)
+    else:
+        # Windows: loop.add_signal_handler() not supported — use thread-safe signal
+        signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(_signal_handler))
+        signal.signal(signal.SIGTERM, lambda *_: loop.call_soon_threadsafe(_signal_handler))
 
     # Batch keep-alive sweep — one task checks all connections every 5s
     # instead of per-connection call_later() timers (eliminates ~1K+ callbacks/sec)
@@ -1764,10 +1795,7 @@ async def run_server(
 
     try:
         async with server:
-            if sys.platform == "win32":
-                await server.serve_forever()
-            else:
-                await stop_event.wait()
+            await stop_event.wait()
     except KeyboardInterrupt:
         pass
     finally:
@@ -1776,13 +1804,15 @@ async def run_server(
         server.close()
         await server.wait_closed()
 
+        # Short drain for reload workers; normal drain otherwise
+        drain_timeout = 0.5 if _is_reload_worker else 5.0
+
         # Wait for active connections to drain (with timeout)
         if active_connections:
             logger.info(
                 "Waiting for %d active connection(s) to drain...",
                 len(active_connections),
             )
-            drain_timeout = 10.0
             drain_start = time.monotonic()
             while active_connections and (time.monotonic() - drain_start) < drain_timeout:
                 await asyncio.sleep(0.1)

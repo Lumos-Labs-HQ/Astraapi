@@ -42,7 +42,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {"status": "health"}
 
 if __name__ == "__main__":   
     host = "0.0.0.0"

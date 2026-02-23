@@ -34,13 +34,67 @@ static PyObject* s_request_body_to_args = nullptr;   // fastapi.dependencies.uti
 static PyObject* g_str_write = nullptr;
 static PyObject* g_str_is_closing = nullptr;
 
-static void cleanup_cached_refs() {
+// Promoted from function-local statics for eager initialization
+static PyObject* s_ensure_future = nullptr;          // asyncio.ensure_future
+static PyObject* s_kw_body_fields = nullptr;         // "body_fields" interned string
+static PyObject* s_kw_received_body = nullptr;       // "received_body" interned string
+static PyObject* s_kw_embed = nullptr;               // "embed_body_fields" interned string
+static PyObject* s_detail_key_global = nullptr;      // "detail" interned string
+
+void cleanup_cached_refs() {
     Py_CLEAR(s_http_exc_type);
     Py_CLEAR(s_fastapi_http_exc_type);
     Py_CLEAR(s_resume_func);
     Py_CLEAR(s_request_body_to_args);
     Py_CLEAR(g_str_write);
     Py_CLEAR(g_str_is_closing);
+    Py_CLEAR(s_ensure_future);
+    Py_CLEAR(s_kw_body_fields);
+    Py_CLEAR(s_kw_received_body);
+    Py_CLEAR(s_kw_embed);
+    Py_CLEAR(s_detail_key_global);
+}
+
+// ── Eager initialization — called at server startup to eliminate first-request overhead ──
+PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
+    // Pre-intern transport method strings
+    if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
+    if (!g_str_is_closing) g_str_is_closing = PyUnicode_InternFromString("is_closing");
+
+    // Pre-import exception types (avoids 3-8ms lazy import on first error)
+    if (!s_http_exc_type) {
+        PyRef mod(PyImport_ImportModule("starlette.exceptions"));
+        if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else PyErr_Clear();
+    }
+    if (!s_fastapi_http_exc_type) {
+        PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
+        if (mod) s_fastapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else PyErr_Clear();
+    }
+
+    // Pre-import request_body_to_args (avoids 3-8ms lazy import on first body request)
+    if (!s_request_body_to_args) {
+        PyRef mod(PyImport_ImportModule("fastapi.dependencies.utils"));
+        if (mod) s_request_body_to_args = PyObject_GetAttrString(mod.get(), "request_body_to_args");
+        else PyErr_Clear();
+    }
+
+    // Pre-import asyncio.ensure_future (avoids 2-4ms lazy import on first background task)
+    if (!s_ensure_future) {
+        PyRef mod(PyImport_ImportModule("asyncio"));
+        if (mod) s_ensure_future = PyObject_GetAttrString(mod.get(), "ensure_future");
+        else PyErr_Clear();
+    }
+
+    // Pre-intern body parsing keyword strings
+    if (!s_kw_body_fields) s_kw_body_fields = PyUnicode_InternFromString("body_fields");
+    if (!s_kw_received_body) s_kw_received_body = PyUnicode_InternFromString("received_body");
+    if (!s_kw_embed) s_kw_embed = PyUnicode_InternFromString("embed_body_fields");
+    if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+
+    PyErr_Clear();
+    Py_RETURN_NONE;
 }
 
 // ── HTTPException type check helper ──────────────────────────────────────────
@@ -893,10 +947,9 @@ static inline PyObject* build_error_response(PyObject* detail, int status_code) 
     PyRef content(PyDict_New());
     if (!content) return build_500_tuple();
 
-    static PyObject* g_str_detail = nullptr;
-    if (!g_str_detail) g_str_detail = PyUnicode_InternFromString("detail");
+    if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
 
-    if (PyDict_SetItem(content.get(), g_str_detail, detail) < 0) return build_500_tuple();
+    if (PyDict_SetItem(content.get(), s_detail_key_global, detail) < 0) return build_500_tuple();
 
     PyRef body_bytes(serialize_to_json_pybytes(content.get()));
     if (!body_bytes) return build_500_tuple();
@@ -2780,9 +2833,8 @@ static PyObject* CoreApp_handle_http(
                         if (error_list) {
                             PyRef err_dict(PyDict_New());
                             if (err_dict) {
-                                static PyObject* s_detail_key2 = nullptr;
-                                if (!s_detail_key2) s_detail_key2 = PyUnicode_InternFromString("detail");
-                                PyDict_SetItem(err_dict.get(), s_detail_key2, error_list.get());
+                                if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+                                PyDict_SetItem(err_dict.get(), s_detail_key_global, error_list.get());
                                 PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
                                 if (err_json) {
                                     char* ej_data; Py_ssize_t ej_len;
@@ -2821,9 +2873,7 @@ static PyObject* CoreApp_handle_http(
             // Build kwargs: body_fields, received_body, embed_body_fields
             PyRef call_kw(PyDict_New());
             if (call_kw) {
-                static PyObject* s_kw_body_fields = nullptr;
-                static PyObject* s_kw_received_body = nullptr;
-                static PyObject* s_kw_embed = nullptr;
+                // Pre-interned by init_cached_refs() — fallback if not called
                 if (!s_kw_body_fields) {
                     s_kw_body_fields = PyUnicode_InternFromString("body_fields");
                     s_kw_received_body = PyUnicode_InternFromString("received_body");
@@ -2852,9 +2902,8 @@ static PyObject* CoreApp_handle_http(
                                 // Build {"detail": errors_list} and serialize as JSON
                                 PyRef err_dict(PyDict_New());
                                 if (err_dict) {
-                                    static PyObject* s_detail_key = nullptr;
-                                    if (!s_detail_key) s_detail_key = PyUnicode_InternFromString("detail");
-                                    PyDict_SetItem(err_dict.get(), s_detail_key, body_errors);
+                                    if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+                                    PyDict_SetItem(err_dict.get(), s_detail_key_global, body_errors);
                                     PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
                                     if (err_json) {
                                         char* ej_data; Py_ssize_t ej_len;
@@ -3202,8 +3251,7 @@ body_done:
                 // Call background() to get coroutine, schedule on event loop
                 PyRef bg_coro(PyObject_CallNoArgs(bg_attr.get()));
                 if (bg_coro) {
-                    // Schedule via asyncio.ensure_future
-                    static PyObject* s_ensure_future = nullptr;
+                    // Schedule via asyncio.ensure_future (pre-imported by init_cached_refs)
                     if (!s_ensure_future) {
                         PyRef asyncio_mod(PyImport_ImportModule("asyncio"));
                         if (asyncio_mod) s_ensure_future = PyObject_GetAttrString(asyncio_mod.get(), "ensure_future");

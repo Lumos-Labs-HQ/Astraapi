@@ -10,3 +10,4 @@ constexpr size_t BUFFER_INITIAL_CAPACITY = 8192;
 
 std::vector<char> acquire_buffer();
 void release_buffer(std::vector<char> buf);
+void prewarm_buffer_pool(int count);

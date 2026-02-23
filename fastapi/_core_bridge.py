@@ -34,4 +34,7 @@ from fastapi._fastapi_core import (  # type: ignore[import-not-found]
     # ── Error serialization ──────────────────────────────────────────────
     serialize_error_response,
     serialize_error_list,
+    # ── Warm-up / eager initialization ────────────────────────────────────
+    init_cached_refs,
+    prewarm_buffer_pool,
 )

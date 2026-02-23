@@ -13,6 +13,8 @@
 
 // app.cpp
 extern void init_status_line_cache();
+extern void cleanup_cached_refs();
+extern PyObject* py_init_cached_refs(PyObject* self, PyObject* args);
 extern PyObject* py_build_response_from_parts(PyObject* self, PyObject* args);
 extern PyObject* py_build_chunked_frame(PyObject* self, PyObject* arg);
 extern PyObject* py_http_buf_create(PyObject* self, PyObject* args);
@@ -21,6 +23,9 @@ extern PyObject* py_http_buf_get_view(PyObject* self, PyObject* capsule);
 extern PyObject* py_http_buf_consume(PyObject* self, PyObject* args);
 extern PyObject* py_http_buf_clear(PyObject* self, PyObject* capsule);
 extern PyObject* py_http_buf_len(PyObject* self, PyObject* capsule);
+
+// buffer_pool.cpp
+extern PyObject* py_prewarm_buffer_pool(PyObject* self, PyObject* args);
 
 // ws_ring_buffer.cpp
 extern void init_ws_opcode_cache();
@@ -278,6 +283,10 @@ static PyMethodDef module_methods[] = {
     {"register_route_params", (PyCFunction)py_register_route_params, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"batch_extract_params_inline", (PyCFunction)py_batch_extract_params_inline, METH_VARARGS | METH_KEYWORDS, nullptr},
 
+    // Warm-up / eager initialization
+    {"init_cached_refs", (PyCFunction)py_init_cached_refs, METH_NOARGS, nullptr},
+    {"prewarm_buffer_pool", (PyCFunction)py_prewarm_buffer_pool, METH_VARARGS, nullptr},
+
     // Response building helpers
     {"build_response_from_parts", (PyCFunction)py_build_response_from_parts, METH_VARARGS, nullptr},
     {"build_chunked_frame", (PyCFunction)py_build_chunked_frame, METH_O, nullptr},
@@ -299,6 +308,9 @@ static PyMethodDef module_methods[] = {
 extern void cleanup_param_registry();
 
 static void module_free(void* /*module*/) {
+    // Clean up app.cpp cached refs (imports, interned strings)
+    cleanup_cached_refs();
+
     // Clean up json_writer.cpp cached type objects
     json_writer_cleanup();
 
