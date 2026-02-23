@@ -1,10 +1,12 @@
-"""
-FastAPI app with C++ core acceleration enabled.
-Used for benchmarking against pure Python FastAPI.
-Comprehensive test app: all features (CORS, DI, response_model, WebSocket, etc.)
-"""
 
+
+import time
+
+# Measure import time
+import_start = time.perf_counter()
 from fastapi import FastAPI
+import_end = time.perf_counter()
+print(f"⏱️  Module import time: {(import_end - import_start) * 1000:.2f}ms")
 
 app = FastAPI(title="FastAPI + Core")
 
@@ -21,4 +23,10 @@ if __name__ == "__main__":
             port = int(arg.split("=")[1])
         elif arg.startswith("--host="):
             host = arg.split("=")[1]
+    
+    # Measure server startup time
+    server_start = time.perf_counter()
+    print(f"🚀 Starting server at {host}:{port}...")
     app.run(host=host, port=port)
+    server_end = time.perf_counter()
+    print(f"⏱️  Server run time: {(server_end - server_start) * 1000:.2f}ms")

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Mapping
 from typing import (
     Annotated,
@@ -10,7 +12,6 @@ from typing import (
 )
 
 from annotated_doc import Doc
-from pydantic import GetJsonSchemaHandler
 from fastapi._datastructures_impl import URL as URL  # noqa: F401
 from fastapi._datastructures_impl import Address as Address  # noqa: F401
 from fastapi._datastructures_impl import FormData as FormData  # noqa: F401

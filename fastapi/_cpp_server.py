@@ -1688,17 +1688,6 @@ async def run_server(
     _init_cached_refs()       # Pre-import modules + intern strings in C++
     _prewarm_buffer_pool(4)   # Pre-allocate thread-local response buffers
 
-    # ── Cache OpenAPI schema as pre-built HTTP response ──────────────────
-    if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
-        try:
-            import json
-            schema = app.openapi()
-            if schema:
-                schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
-                core_app.set_openapi_schema(schema_json)
-        except Exception:
-            logger.debug("OpenAPI schema generation failed", exc_info=True)
-
     # ── Lifespan context manager detection ──────────────────────────────
     router = getattr(app, "router", None)
     lifespan_handler = None
@@ -1758,6 +1747,25 @@ async def run_server(
 
     print(f"C++ HTTP server running on http://{host}:{port}")
     print("Press Ctrl+C to stop")
+
+    # ── Defer OpenAPI schema generation to background (non-blocking) ──────
+    # OpenAPI is only needed for /docs and /openapi.json — no need to block
+    # startup for it.  The openapi() method caches its result, so if a user
+    # hits /docs before this task finishes, it generates on-demand once.
+    if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
+        async def _deferred_openapi() -> None:
+            try:
+                import json as _json
+                schema = app.openapi()
+                if schema:
+                    schema_json = _json.dumps(
+                        schema, ensure_ascii=False, separators=(",", ":")
+                    )
+                    core_app.set_openapi_schema(schema_json)
+            except Exception:
+                logger.debug("OpenAPI schema generation failed", exc_info=True)
+
+        loop.create_task(_deferred_openapi())
 
     stop_event = asyncio.Event()
 

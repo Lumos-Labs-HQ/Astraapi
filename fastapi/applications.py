@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import asyncio
+import re
 from collections.abc import Awaitable, Coroutine, Sequence
 from enum import Enum
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
     Callable,
@@ -11,7 +15,7 @@ from typing import (
 )
 
 from annotated_doc import Doc
-from fastapi import routing
+# Lightweight imports only — no pydantic triggering:
 from fastapi.datastructures import Default, DefaultPlaceholder
 from fastapi.exception_handlers import (
     http_exception_handler,
@@ -20,15 +24,8 @@ from fastapi.exception_handlers import (
 )
 from fastapi.exceptions import RequestValidationError, WebSocketRequestValidationError
 from fastapi.logger import logger
-from fastapi.openapi.docs import (
-    get_redoc_html,
-    get_swagger_ui_html,
-    get_swagger_ui_oauth2_redirect_html,
-)
-from fastapi.openapi.utils import get_openapi
-from fastapi.params import Depends
-from fastapi.types import DecoratedCallable, IncEx
-from fastapi.utils import generate_unique_id
+# openapi.docs, openapi.utils, routing, and params are imported lazily
+# to avoid pulling in pydantic at module import time.
 from fastapi._app_base import AppBase
 from fastapi._datastructures_impl import State
 from fastapi.exceptions import HTTPException
@@ -41,6 +38,18 @@ from fastapi._types import Lifespan
 from typing_extensions import deprecated
 
 from fastapi._core_bridge import CoreApp, openapi_dict_to_json_bytes
+
+if TYPE_CHECKING:
+    from fastapi import routing
+    from fastapi.params import Depends
+    from fastapi.types import DecoratedCallable, IncEx
+
+
+def _generate_unique_id(route: routing.APIRoute) -> str:
+    """Inline copy of fastapi.utils.generate_unique_id to avoid importing pydantic."""
+    operation_id = re.sub(r"\W", "_", f"{route.name}{route.path_format}")
+    assert route.methods
+    return f"{operation_id}_{list(route.methods)[0].lower()}"
 
 AppType = TypeVar("AppType", bound="FastAPI")
 
@@ -787,7 +796,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
         separate_input_output_schemas: Annotated[
             bool,
             Doc(
@@ -922,18 +931,6 @@ class FastAPI(AppBase):
                 "automatic. Check the docs at "
                 "https://fastapi.tiangolo.com/advanced/sub-applications/"
             )
-        self.webhooks: Annotated[
-            routing.APIRouter,
-            Doc(
-                """
-                The `app.webhooks` attribute is an `APIRouter` with the *path
-                operations* that will be used just for documentation of webhooks.
-
-                Read more about it in the
-                [FastAPI docs for OpenAPI Webhooks](https://fastapi.tiangolo.com/advanced/openapi-webhooks/).
-                """
-            ),
-        ] = webhooks or routing.APIRouter()
         self.root_path = root_path or openapi_prefix
         self.state: Annotated[
             State,
@@ -969,7 +966,9 @@ class FastAPI(AppBase):
                 """
             ),
         ] = {}
-        self.router: routing.APIRouter = routing.APIRouter(
+
+        # ── Lazy router: defer routing + pydantic import to first access ──
+        self._router_params = dict(
             routes=routes,
             redirect_slashes=redirect_slashes,
             dependency_overrides_provider=self,
@@ -984,6 +983,11 @@ class FastAPI(AppBase):
             responses=responses,
             generate_unique_id_function=generate_unique_id_function,
         )
+        self._webhooks_arg = webhooks
+        self._router = None
+        self._webhooks = None
+        self._setup_done = False
+
         self.exception_handlers: dict[
             Any, Callable[[Request, Any], Union[Response, Awaitable[Response]]]
         ] = {} if exception_handlers is None else dict(exception_handlers)
@@ -993,7 +997,6 @@ class FastAPI(AppBase):
         )
         self.exception_handlers.setdefault(
             WebSocketRequestValidationError,
-            # Starlette still has incorrect type specification for the handlers
             websocket_request_validation_exception_handler,  # type: ignore
         )
 
@@ -1004,7 +1007,36 @@ class FastAPI(AppBase):
         self._core_app = CoreApp()
         self._routes_synced: bool = False
 
-        self.setup()
+    # ── Lazy router + webhooks properties ─────────────────────────────────
+    # Defers `from fastapi import routing` (and thus pydantic) until the
+    # first time the router is actually accessed (e.g. @app.get()).
+
+    @property
+    def router(self) -> routing.APIRouter:
+        if self._router is None:
+            from fastapi import routing as _routing
+            self._webhooks = self._webhooks_arg or _routing.APIRouter()
+            self._webhooks_arg = None
+            self._router = _routing.APIRouter(**self._router_params)
+            self._router_params = None  # free memory
+            if not self._setup_done:
+                self.setup()
+                self._setup_done = True
+        return self._router
+
+    @router.setter
+    def router(self, value: routing.APIRouter) -> None:
+        self._router = value
+
+    @property
+    def webhooks(self) -> routing.APIRouter:
+        if self._router is None:
+            _ = self.router  # trigger lazy init
+        return self._webhooks
+
+    @webhooks.setter
+    def webhooks(self, value: routing.APIRouter) -> None:
+        self._webhooks = value
 
     def openapi(self) -> dict[str, Any]:
         """
@@ -1021,6 +1053,7 @@ class FastAPI(AppBase):
         [FastAPI docs for OpenAPI](https://fastapi.tiangolo.com/how-to/extending-openapi/).
         """
         if not self.openapi_schema:
+            from fastapi.openapi.utils import get_openapi
             self.openapi_schema = get_openapi(
                 title=self.title,
                 version=self.version,
@@ -1043,6 +1076,11 @@ class FastAPI(AppBase):
         return self.openapi_schema
 
     def setup(self) -> None:
+        from fastapi.openapi.docs import (
+            get_redoc_html,
+            get_swagger_ui_html,
+            get_swagger_ui_oauth2_redirect_html,
+        )
         if self.openapi_url:
             urls = (server_data.get("url") for server_data in self.servers)
             server_urls = {url for url in urls if url}
@@ -1236,7 +1274,7 @@ class FastAPI(AppBase):
         name: Optional[str] = None,
         openapi_extra: Optional[dict[str, Any]] = None,
         generate_unique_id_function: Callable[[routing.APIRoute], str] = Default(
-            generate_unique_id
+            _generate_unique_id
         ),
     ) -> None:
         self.router.add_api_route(
@@ -1294,7 +1332,7 @@ class FastAPI(AppBase):
         name: Optional[str] = None,
         openapi_extra: Optional[dict[str, Any]] = None,
         generate_unique_id_function: Callable[[routing.APIRoute], str] = Default(
-            generate_unique_id
+            _generate_unique_id
         ),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         def decorator(func: DecoratedCallable) -> DecoratedCallable:
@@ -1580,7 +1618,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> None:
         """
         Include an `APIRouter` in the same app.
@@ -1943,7 +1981,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Add a *path operation* using an HTTP GET operation.
@@ -2316,7 +2354,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Add a *path operation* using an HTTP PUT operation.
@@ -2694,7 +2732,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Add a *path operation* using an HTTP POST operation.
@@ -3072,7 +3110,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Add a *path operation* using an HTTP DELETE operation.
@@ -3445,7 +3483,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Add a *path operation* using an HTTP OPTIONS operation.
@@ -3818,7 +3856,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Add a *path operation* using an HTTP HEAD operation.
@@ -4191,7 +4229,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Add a *path operation* using an HTTP PATCH operation.
@@ -4569,7 +4607,7 @@ class FastAPI(AppBase):
                 [FastAPI docs about how to Generate Clients](https://fastapi.tiangolo.com/advanced/generate-clients/#custom-generate-unique-id-function).
                 """
             ),
-        ] = Default(generate_unique_id),
+        ] = Default(_generate_unique_id),
     ) -> Callable[[DecoratedCallable], DecoratedCallable]:
         """
         Add a *path operation* using an HTTP TRACE operation.

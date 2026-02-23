@@ -2,7 +2,8 @@ from collections.abc import Sequence
 from typing import Annotated, Any, Optional, TypedDict, Union
 
 from annotated_doc import Doc
-from pydantic import BaseModel, create_model
+
+
 class EndpointContext(TypedDict, total=False):
     function: str
     path: str
@@ -156,10 +157,6 @@ class WebSocketException(Exception):
         self.code = code
         self.reason = reason or ""
         super().__init__(self.reason)
-
-
-RequestErrorModel: type[BaseModel] = create_model("Request")
-WebSocketErrorModel: type[BaseModel] = create_model("WebSocket")
 
 
 class FastAPIError(RuntimeError):
