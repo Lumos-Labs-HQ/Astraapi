@@ -12,11 +12,24 @@
 #include <unordered_map>
 #include <unordered_set>
 
+// ── Transparent hash/equal for string_view lookups into string sets ──────────
+// Allows unordered_set<string>.find(string_view) without heap allocation.
+struct TransparentStringHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
+    size_t operator()(const std::string& s) const noexcept { return std::hash<std::string_view>{}(s); }
+};
+struct TransparentStringEqual {
+    using is_transparent = void;
+    bool operator()(std::string_view a, std::string_view b) const noexcept { return a == b; }
+};
+using TransparentStringSet = std::unordered_set<std::string, TransparentStringHash, TransparentStringEqual>;
+
 // ── Config structs ──────────────────────────────────────────────────────────
 
 struct CorsConfig {
     std::vector<std::string> allow_origins;
-    std::unordered_set<std::string> allow_origins_set;  // O(1) origin lookup
+    TransparentStringSet allow_origins_set;              // O(1) origin lookup (zero-alloc with string_view)
     bool allow_any_origin = false;                       // true if "*" in origins
     std::optional<std::string> allow_origin_regex;
     std::vector<std::string> allow_methods;
@@ -28,7 +41,7 @@ struct CorsConfig {
 
 struct TrustedHostConfig {
     std::vector<std::string> allowed_hosts;
-    std::unordered_set<std::string> allowed_hosts_set;  // O(1) host lookup
+    TransparentStringSet allowed_hosts_set;              // O(1) host lookup (zero-alloc with string_view)
     bool allow_any_host = false;                         // true if "*" in hosts
 };
 
@@ -144,12 +157,20 @@ typedef struct {
     std::shared_mutex routes_mutex;
     std::atomic<bool> routes_frozen{false};  // Skip lock after startup
     std::atomic<std::shared_ptr<CorsConfig>> cors_config;
+    bool cors_enabled = false;  // Cached bool — avoids atomic shared_ptr load per request
     std::atomic<std::shared_ptr<TrustedHostConfig>> trusted_host_config;
     std::unordered_map<uint16_t, PyObject*> exception_handlers;
     std::atomic<uint64_t> route_counter{0};
-    std::atomic<uint64_t> total_requests{0};
-    std::atomic<int64_t> active_requests{0};
-    std::atomic<uint64_t> total_errors{0};
+
+    // ── Hot counters: cache-line aligned to prevent false sharing ────────
+    // Under high concurrency, cores writing to these atomics would invalidate
+    // each other's cache lines if mixed with cold fields. Own cache line = no contention.
+    struct alignas(64) HotCounters {
+        std::atomic<uint64_t> total_requests{0};
+        std::atomic<int64_t>  active_requests{0};
+        std::atomic<uint64_t> total_errors{0};
+    };
+    HotCounters counters;
 
     // OpenAPI schema + docs (cached as pre-built HTTP responses)
     PyObject* openapi_json_resp;    // strong ref: pre-built HTTP response bytes for /openapi.json
@@ -164,12 +185,14 @@ typedef struct {
     int rate_limit_max_requests = 100;
     int rate_limit_window_seconds = 60;
     struct RateLimitEntry { int count; int64_t window_start_ns; };
-    struct RateLimitShard {
+    // Cache-line aligned: prevents inter-shard contention from mutex invalidation
+    struct alignas(64) RateLimitShard {
         std::mutex mutex;
         std::unordered_map<std::string, RateLimitEntry> counters;
     };
     RateLimitShard rate_limit_shards[RATE_LIMIT_SHARDS];
     std::string current_client_ip;
+    size_t current_shard_idx = 0;  // cached shard index for current_client_ip
 
     // Post-response hook (for logging middleware)
     PyObject* post_response_hook = nullptr;  // Python callable or NULL

@@ -29,6 +29,10 @@ from fastapi._websocket import WebSocketDisconnect, WebSocketState
 
 logger = logging.getLogger("fastapi")
 
+# ── Module-level capability checks (avoid per-connection try/except) ──────────
+_HAS_QUICKACK = hasattr(socket, "TCP_QUICKACK") or sys.platform == "linux"
+_TCP_QUICKACK = 12  # constant for TCP_QUICKACK
+
 # ── Zero-overhead awaitable for sync send methods ────────────────────────────
 class _NoopAwaitable:
     """Awaitable that completes immediately with no overhead.
@@ -60,7 +64,12 @@ _STATUS_PHRASES: dict[int, str] = {
     503: "Service Unavailable",
 }
 # Pre-computed bytes version — avoids .encode() per streaming response
-_STATUS_PHRASES_BYTES: dict[int, bytes] = {k: v.encode() for k, v in _STATUS_PHRASES.items()}
+# Pre-built streaming status line prefixes — avoids 4× bytearray.extend() per streaming response
+# Maps status_code → b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n"
+_STREAMING_STATUS_LINES: dict[int, bytes] = {
+    code: f"HTTP/1.1 {code} {phrase}\r\ntransfer-encoding: chunked\r\n".encode()
+    for code, phrase in _STATUS_PHRASES.items()
+}
 
 # ── Lightweight single-producer single-consumer channel ──────────────────────
 class _WsFastChannel:
@@ -217,6 +226,17 @@ class _WsConnectionPool:
         # else: let GC reclaim it
 
 _ws_pool = _WsConnectionPool() if _ws_ring_buffer_create is not None else None
+
+# Pre-built WebSocket PING frame — reused forever (avoids rebuild per heartbeat)
+_PING_FRAME: bytes | None = None
+if _ws_build_ping_frame is not None:
+    try:
+        _PING_FRAME = _ws_build_ping_frame(None)
+    except Exception:
+        pass
+if _PING_FRAME is None:
+    # Python fallback: raw PING frame (opcode 0x89, no payload, no mask)
+    _PING_FRAME = b"\x89\x00"
 
 # ── WebSocket endpoint signature cache ────────────────────────────────────────
 _ws_sig_cache: dict[int, str] = {}
@@ -839,7 +859,7 @@ class _ProtocolPool:
     """Fixed-size pool of CppHttpProtocol objects for reuse."""
     __slots__ = ("_pool", "_max_size")
 
-    def __init__(self, max_size: int = 4096):
+    def __init__(self, max_size: int = 10000):
         self._pool: list = []
         self._max_size = max_size
 
@@ -926,7 +946,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks")
+    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_active_count")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -935,6 +955,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._loop = loop
         self._ka_timeout = keep_alive_timeout
         self._connections_set = connections_set
+        self._active_count: list | None = None  # mutable int ref for fast connection counting
         self._transport: asyncio.Transport | None = None
         # C++ HTTP connection buffer (O(1) consume vs O(N) memmove)
         self._http_buf = _http_buf_create()
@@ -947,7 +968,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle: asyncio.TimerHandle | None = None
         self._ws_pong_received = True
         self._ws_task: asyncio.Task | None = None  # TS-2: tracked for cancellation
-        self._pending_tasks: set = set()  # Track async HTTP tasks for cancellation
+        self._pending_tasks: set | None = None  # Lazy — only allocated for async endpoints
 
     def _reinit(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
                 ka_timeout: float, connections_set: set | None) -> None:
@@ -956,6 +977,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._loop = loop
         self._ka_timeout = ka_timeout
         self._connections_set = connections_set
+        self._active_count = None
         self._transport = None
         _http_buf_clear(self._http_buf)  # reuse existing C++ buffer
         self._ka_deadline = 0.0
@@ -967,7 +989,8 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle = None
         self._ws_pong_received = True
         self._ws_task = None
-        self._pending_tasks = set()
+        if self._pending_tasks is not None:
+            self._pending_tasks.clear()  # reuse existing set's backing store
 
     # ── Connection lifecycle ─────────────────────────────────────────────
 
@@ -976,24 +999,25 @@ class CppHttpProtocol(asyncio.Protocol):
         sock: socket.socket | None = transport.get_extra_info("socket")  # type: ignore[union-attr]
         if sock is not None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            try:
-                sock.setsockopt(socket.IPPROTO_TCP, 12, 1)  # TCP_QUICKACK = 12
-            except (OSError, AttributeError):
-                pass
-            # Note: TCP_DEFER_ACCEPT is a listen-socket option, not per-connection
-        transport.set_write_buffer_limits(high=1048576, low=262144)  # type: ignore[union-attr]
-        # Pass client IP to C++ for rate limiting
+            if _HAS_QUICKACK:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, _TCP_QUICKACK, 1)
+                except OSError:
+                    pass
+        # Reduced from 1MB/256KB — saves ~7.5GB potential buffer at 10K connections
+        transport.set_write_buffer_limits(high=262144, low=65536)  # type: ignore[union-attr]
         peername = transport.get_extra_info("peername")
-        if peername and hasattr(self._core, "set_client_ip"):
+        if peername:
             self._core.set_client_ip(peername[0])
         self._ka_reset()
 
     def connection_lost(self, exc: Exception | None) -> None:
         # Cancel all pending async HTTP tasks to prevent writes to stale transport
-        for t in self._pending_tasks:
-            if not t.done():
-                t.cancel()
-        self._pending_tasks.clear()
+        if self._pending_tasks:
+            for t in self._pending_tasks:
+                if not t.done():
+                    t.cancel()
+            self._pending_tasks.clear()
         self._ka_cancel()
         self._stop_ws_heartbeat()
         # TS-2: Cancel tracked WebSocket task to prevent hanging
@@ -1018,6 +1042,9 @@ class CppHttpProtocol(asyncio.Protocol):
         # Remove from active connections set (graceful shutdown tracking)
         if self._connections_set is not None:
             self._connections_set.discard(self)
+        # Decrement fast connection counter
+        if self._active_count is not None:
+            self._active_count[0] -= 1
         # OPT-14: Return protocol to pool for reuse
         _protocol_pool.release(self)
 
@@ -1143,21 +1170,30 @@ class CppHttpProtocol(asyncio.Protocol):
                     first_yield._asyncio_future_blocking = False
                     task = self._loop.create_task(
                         self._handle_async(coro, first_yield, status_code, keep_alive))
-                    task.add_done_callback(self._pending_tasks.discard)
-                    self._pending_tasks.add(task)
+                    pt = self._pending_tasks
+                    if pt is None:
+                        pt = self._pending_tasks = set()
+                    task.add_done_callback(pt.discard)
+                    pt.add(task)
 
                 elif tag == "async_di":
                     _, di_coro, first_yield, endpoint, kwargs, sc, ka = result_obj
                     first_yield._asyncio_future_blocking = False
                     task = self._loop.create_task(
                         self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka))
-                    task.add_done_callback(self._pending_tasks.discard)
-                    self._pending_tasks.add(task)
+                    pt = self._pending_tasks
+                    if pt is None:
+                        pt = self._pending_tasks = set()
+                    task.add_done_callback(pt.discard)
+                    pt.add(task)
 
             elif IR and type(result_obj) is IR:
                 task = self._loop.create_task(self._handle_pydantic(result_obj))
-                task.add_done_callback(self._pending_tasks.discard)
-                self._pending_tasks.add(task)
+                pt = self._pending_tasks
+                if pt is None:
+                    pt = self._pending_tasks = set()
+                task.add_done_callback(pt.discard)
+                pt.add(task)
 
         mv.release()
         if offset > 0:
@@ -1302,12 +1338,7 @@ class CppHttpProtocol(asyncio.Protocol):
             return
 
         self._ws_pong_received = False
-        if _ws_build_ping_frame is not None:
-            ping_frame = _ws_build_ping_frame(None)
-        else:
-            # Python fallback: build PING frame manually
-            ping_frame = CppWebSocket._build_frame_py(0x9, b"")
-        transport.write(ping_frame)
+        transport.write(_PING_FRAME)  # pre-built at module init
 
         # Schedule next ping
         self._ws_ping_handle = self._loop.call_later(interval, self._send_ws_ping, interval)
@@ -1376,13 +1407,12 @@ class CppHttpProtocol(asyncio.Protocol):
                     elif hasattr(raw, 'headers'):
                         for k, v in raw.headers.items():
                             headers_list.append((k, v))
-                    # Build header block using bytearray (O(n) vs O(n²) string concat)
-                    reason = _STATUS_PHRASES_BYTES.get(status, b"OK")
-                    buf = bytearray(b"HTTP/1.1 ")
-                    buf.extend(str(status).encode())
-                    buf.extend(b" ")
-                    buf.extend(reason)
-                    buf.extend(b"\r\ntransfer-encoding: chunked\r\n")
+                    # Pre-built status line replaces 4× extend() with single lookup + extend
+                    prefix = _STREAMING_STATUS_LINES.get(status)
+                    if prefix is not None:
+                        buf = bytearray(prefix)
+                    else:
+                        buf = bytearray(f"HTTP/1.1 {status} OK\r\ntransfer-encoding: chunked\r\n".encode())
                     for name, value in headers_list:
                         if isinstance(name, str):
                             name = name.encode("latin-1")
@@ -1621,17 +1651,20 @@ async def _create_server(
             pass
 
     active_connections: set[CppHttpProtocol] = set()
+    active_count = [0]  # mutable int via list — avoids nonlocal overhead
 
     # Pre-populate protocol pool to avoid __init__ on first connections
-    for _ in range(min(8, _MAX_CONNECTIONS)):
+    for _ in range(min(64, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
 
     def _protocol_factory() -> asyncio.Protocol:
-        if len(active_connections) >= _MAX_CONNECTIONS:
+        if active_count[0] >= _MAX_CONNECTIONS:
             return _RejectProtocol()
+        active_count[0] += 1
         proto = _protocol_pool.acquire(
             core_app, loop, keep_alive_timeout, active_connections)
+        proto._active_count = active_count
         active_connections.add(proto)
         return proto
 
@@ -1753,19 +1786,22 @@ async def run_server(
 
     # ── Track active connections for graceful shutdown ──────────────────
     active_connections: set[CppHttpProtocol] = set()
+    active_count = [0]  # mutable int via list — faster than len(set) in hot path
 
     # Pre-populate protocol pool to avoid __init__ on first connections
-    for _ in range(min(8, _MAX_CONNECTIONS)):
+    for _ in range(min(64, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
 
     def _protocol_factory() -> asyncio.Protocol:
         # Fast 503 reject when at capacity — prevents cascading slowdown
-        if len(active_connections) >= _MAX_CONNECTIONS:
+        if active_count[0] >= _MAX_CONNECTIONS:
             return _RejectProtocol()
+        active_count[0] += 1
         # OPT-14: Reuse protocol objects from pool to reduce __init__ + GC overhead
         proto = _protocol_pool.acquire(
             core_app, loop, keep_alive_timeout, active_connections)
+        proto._active_count = active_count
         active_connections.add(proto)
         return proto
 

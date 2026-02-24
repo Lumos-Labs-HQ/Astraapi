@@ -128,8 +128,8 @@ static int on_body(llhttp_t* parser, const char* at, size_t length) {
     auto* out = ctx->out;
 
     if (out->chunked) {
-        // Chunked TE: accumulate body chunks into reassembly buffer
-        out->chunked_body.insert(out->chunked_body.end(), at, at + length);
+        // Chunked TE: accumulate body chunks into reassembly buffer (lazy alloc)
+        out->append_chunked(at, length);
     } else {
         // Content-Length: zero-copy pointer into input buffer
         if (out->body.data == nullptr) {
@@ -186,11 +186,24 @@ int parse_http_request(const char* data, size_t len, ParsedHttpRequest* out) {
     out->upgrade = false;
     out->chunked = false;
     out->total_consumed = 0;
-    out->chunked_body.clear();
+    out->chunked_body_ptr = nullptr;  // lazy — only allocated for chunked requests
+    // Zero-init header value pointers (for chunked header value detection)
+    for (int i = 0; i < MAX_HEADERS; i++) {
+        out->headers[i].value.data = nullptr;
+        out->headers[i].value.len = 0;
+    }
 
-    // Initialize llhttp parser
-    llhttp_t parser;
-    llhttp_init(&parser, HTTP_REQUEST, &s_settings);
+    // Thread-local parser reuse: llhttp_reset() is ~10x cheaper than llhttp_init()
+    // (resets state without re-assigning 15 callback function pointers)
+    static thread_local bool tl_parser_inited = false;
+    static thread_local llhttp_t tl_parser;
+    if (!tl_parser_inited) {
+        llhttp_init(&tl_parser, HTTP_REQUEST, &s_settings);
+        tl_parser_inited = true;
+    } else {
+        llhttp_reset(&tl_parser);
+    }
+    llhttp_t& parser = tl_parser;
 
     ParserContext ctx;
     ctx.out = out;
@@ -203,7 +216,7 @@ int parse_http_request(const char* data, size_t len, ParsedHttpRequest* out) {
     // Execute parser
     llhttp_errno_t err = llhttp_execute(&parser, data, len);
 
-    if (err == HPE_PAUSED || err == HPE_PAUSED_UPGRADE) {
+    if (__builtin_expect(!!(err == HPE_PAUSED || err == HPE_PAUSED_UPGRADE), 1)) {
         // Message complete or upgrade detected
         // Calculate consumed bytes
         const char* error_pos = llhttp_get_error_pos(&parser);
@@ -214,8 +227,8 @@ int parse_http_request(const char* data, size_t len, ParsedHttpRequest* out) {
         }
 
         // For chunked: point body into reassembled buffer
-        if (out->chunked && !out->chunked_body.empty()) {
-            out->body = StringView(out->chunked_body.data(), out->chunked_body.size());
+        if (out->chunked && out->chunked_body_ptr && !out->chunked_body_ptr->empty()) {
+            out->body = StringView(out->chunked_body_ptr->data(), out->chunked_body_ptr->size());
         }
 
         return 1;  // Complete request
@@ -228,8 +241,8 @@ int parse_http_request(const char* data, size_t len, ParsedHttpRequest* out) {
         }
         out->total_consumed = len;
 
-        if (out->chunked && !out->chunked_body.empty()) {
-            out->body = StringView(out->chunked_body.data(), out->chunked_body.size());
+        if (out->chunked && out->chunked_body_ptr && !out->chunked_body_ptr->empty()) {
+            out->body = StringView(out->chunked_body_ptr->data(), out->chunked_body_ptr->size());
         }
 
         return 1;

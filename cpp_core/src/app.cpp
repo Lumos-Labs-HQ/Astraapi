@@ -14,8 +14,43 @@
 #include <new>
 #include <algorithm>
 #include <string_view>
+#include <charconv>
 #include <chrono>
 #include <zlib.h>
+
+// ── buf_append: resize+memcpy (5-15% faster than buf.insert iterator path) ──
+static inline void buf_append(std::vector<char>& buf, const char* s, size_t len) {
+    size_t old = buf.size();
+    buf.resize(old + len);
+    std::memcpy(buf.data() + old, s, len);
+}
+static inline void buf_append(std::vector<char>& buf, const std::string& s) {
+    buf_append(buf, s.data(), s.size());
+}
+
+// ── Case-insensitive helpers (zero-allocation, for content-type/origin checks) ──
+static inline bool ci_starts_with(const char* s, size_t s_len, const char* prefix, size_t p_len) {
+    if (s_len < p_len) return false;
+    for (size_t i = 0; i < p_len; i++) {
+        char c = s[i];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if (c != prefix[i]) return false;
+    }
+    return true;
+}
+static inline bool ci_contains(const char* s, size_t s_len, const char* needle, size_t n_len) {
+    if (s_len < n_len) return false;
+    for (size_t i = 0; i <= s_len - n_len; i++) {
+        bool match = true;
+        for (size_t j = 0; j < n_len; j++) {
+            char c = s[i + j];
+            if (c >= 'A' && c <= 'Z') c += 32;
+            if (c != needle[j]) { match = false; break; }
+        }
+        if (match) return true;
+    }
+    return false;
+}
 
 #if HAS_BROTLI
 #include <brotli/encode.h>
@@ -40,6 +75,18 @@ static PyObject* s_kw_body_fields = nullptr;         // "body_fields" interned s
 static PyObject* s_kw_received_body = nullptr;       // "received_body" interned string
 static PyObject* s_kw_embed = nullptr;               // "embed_body_fields" interned string
 static PyObject* s_detail_key_global = nullptr;      // "detail" interned string
+// Cached return tuples (avoid per-request PyObject allocation)
+static PyObject* s_need_more_data = nullptr;         // (0, None) — returned on incomplete parse
+
+// DI/async path interned strings (promoted from lazy function-local statics)
+static PyObject* s_rh_key = nullptr;                 // "__raw_headers__"
+static PyObject* s_m_key = nullptr;                  // "__method__"
+static PyObject* s_p_key = nullptr;                  // "__path__"
+static PyObject* s_as_key = nullptr;                 // "__auth_scheme__"
+static PyObject* s_ac_key = nullptr;                 // "__auth_credentials__"
+static PyObject* s_validate_str = nullptr;           // "validate_python"
+static PyObject* s_fut_blocking = nullptr;           // "_asyncio_future_blocking"
+static PyObject* s_async_tag = nullptr;              // "async"
 
 void cleanup_cached_refs() {
     Py_CLEAR(s_http_exc_type);
@@ -53,6 +100,15 @@ void cleanup_cached_refs() {
     Py_CLEAR(s_kw_received_body);
     Py_CLEAR(s_kw_embed);
     Py_CLEAR(s_detail_key_global);
+    Py_CLEAR(s_rh_key);
+    Py_CLEAR(s_m_key);
+    Py_CLEAR(s_p_key);
+    Py_CLEAR(s_as_key);
+    Py_CLEAR(s_ac_key);
+    Py_CLEAR(s_validate_str);
+    Py_CLEAR(s_fut_blocking);
+    Py_CLEAR(s_async_tag);
+    Py_CLEAR(s_need_more_data);
 }
 
 // ── Eager initialization — called at server startup to eliminate first-request overhead ──
@@ -92,6 +148,25 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     if (!s_kw_received_body) s_kw_received_body = PyUnicode_InternFromString("received_body");
     if (!s_kw_embed) s_kw_embed = PyUnicode_InternFromString("embed_body_fields");
     if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+
+    // DI/async interned strings (promoted from lazy function-local statics)
+    if (!s_rh_key) s_rh_key = PyUnicode_InternFromString("__raw_headers__");
+    if (!s_m_key) s_m_key = PyUnicode_InternFromString("__method__");
+    if (!s_p_key) s_p_key = PyUnicode_InternFromString("__path__");
+    if (!s_as_key) s_as_key = PyUnicode_InternFromString("__auth_scheme__");
+    if (!s_ac_key) s_ac_key = PyUnicode_InternFromString("__auth_credentials__");
+    if (!s_validate_str) s_validate_str = PyUnicode_InternFromString("validate_python");
+    if (!s_fut_blocking) s_fut_blocking = PyUnicode_InternFromString("_asyncio_future_blocking");
+    if (!s_async_tag) s_async_tag = PyUnicode_InternFromString("async");
+
+    // Cached return tuples
+    if (!s_need_more_data) {
+        PyObject* zero = PyLong_FromLong(0);
+        if (zero) {
+            s_need_more_data = PyTuple_Pack(2, zero, Py_None);
+            Py_DECREF(zero);
+        }
+    }
 
     PyErr_Clear();
     Py_RETURN_NONE;
@@ -346,9 +421,9 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
         new (&self->trusted_host_config) std::atomic<std::shared_ptr<TrustedHostConfig>>();
         new (&self->exception_handlers) std::unordered_map<uint16_t, PyObject*>();
         self->route_counter.store(0);
-        self->total_requests.store(0);
-        self->active_requests.store(0);
-        self->total_errors.store(0);
+        self->counters.total_requests.store(0);
+        self->counters.active_requests.store(0);
+        self->counters.total_errors.store(0);
         self->openapi_json_resp = nullptr;
         self->docs_html_resp = nullptr;
         self->redoc_html_resp = nullptr;
@@ -441,38 +516,38 @@ static PyObject* build_static_response(
     // Use pre-cached status line if available
     if (status_code >= 0 && status_code < 600 && s_status_lines[status_code].data) {
         const auto& sl = s_status_lines[status_code];
-        buf.insert(buf.end(), sl.data, sl.data + sl.len - 2);  // exclude \r\n (added with ct_pre below)
+        buf_append(buf, sl.data, sl.len - 2);  // exclude \r\n (added with ct_pre below)
     } else {
         static const char prefix[] = "HTTP/1.1 ";
-        buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
+        buf_append(buf, prefix, sizeof(prefix) - 1);
         char sc_buf[8];
         int sn = fast_i64_to_buf(sc_buf, status_code);
-        buf.insert(buf.end(), sc_buf, sc_buf + sn);
+        buf_append(buf, sc_buf, sn);
         buf.push_back(' ');
         const char* reason = status_reason(status_code);
         size_t rlen = strlen(reason);
-        buf.insert(buf.end(), reason, reason + rlen);
+        buf_append(buf, reason, rlen);
     }
 
     // Content-Type header
     const char* ct_pre = "\r\ncontent-type: ";
-    buf.insert(buf.end(), ct_pre, ct_pre + 16);
+    buf_append(buf, ct_pre, 16);
     size_t ct_len = strlen(content_type);
-    buf.insert(buf.end(), content_type, content_type + ct_len);
+    buf_append(buf, content_type, ct_len);
 
     // Content-Length header
     const char* cl_pre = "\r\ncontent-length: ";
-    buf.insert(buf.end(), cl_pre, cl_pre + 18);
+    buf_append(buf, cl_pre, 18);
     char cl_buf[20];
     int cl_n = fast_i64_to_buf(cl_buf, (long long)body_len);
-    buf.insert(buf.end(), cl_buf, cl_buf + cl_n);
+    buf_append(buf, cl_buf, cl_n);
 
     // Connection + end of headers
     static const char end_hdr[] = "\r\nconnection: keep-alive\r\n\r\n";
-    buf.insert(buf.end(), end_hdr, end_hdr + sizeof(end_hdr) - 1);
+    buf_append(buf, end_hdr, sizeof(end_hdr) - 1);
 
     // Body
-    buf.insert(buf.end(), body, body + body_len);
+    buf_append(buf, body, body_len);
 
     PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
@@ -549,18 +624,18 @@ static PyObject* CoreApp_next_route_id(CoreAppObject* self, PyObject*) {
 }
 
 static PyObject* CoreApp_record_request_start(CoreAppObject* self, PyObject*) {
-    self->total_requests.fetch_add(1, std::memory_order_relaxed);
-    self->active_requests.fetch_add(1, std::memory_order_relaxed);
+    self->counters.total_requests.fetch_add(1, std::memory_order_relaxed);
+    self->counters.active_requests.fetch_add(1, std::memory_order_relaxed);
     Py_RETURN_NONE;
 }
 
 static PyObject* CoreApp_record_request_end(CoreAppObject* self, PyObject*) {
-    self->active_requests.fetch_sub(1, std::memory_order_release);
+    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
     Py_RETURN_NONE;
 }
 
 static PyObject* CoreApp_record_error(CoreAppObject* self, PyObject*) {
-    self->total_errors.fetch_add(1, std::memory_order_relaxed);
+    self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
     Py_RETURN_NONE;
 }
 
@@ -577,9 +652,9 @@ static PyObject* CoreApp_freeze_routes(CoreAppObject* self, PyObject*) {
 static PyObject* CoreApp_get_metrics(CoreAppObject* self, PyObject*) {
     PyRef dict(PyDict_New());
     if (!dict) return nullptr;
-    PyRef tr(PyLong_FromUnsignedLongLong(self->total_requests.load(std::memory_order_relaxed)));
-    PyRef ar(PyLong_FromLongLong(self->active_requests.load(std::memory_order_acquire)));
-    PyRef te(PyLong_FromUnsignedLongLong(self->total_errors.load(std::memory_order_relaxed)));
+    PyRef tr(PyLong_FromUnsignedLongLong(self->counters.total_requests.load(std::memory_order_relaxed)));
+    PyRef ar(PyLong_FromLongLong(self->counters.active_requests.load(std::memory_order_acquire)));
+    PyRef te(PyLong_FromUnsignedLongLong(self->counters.total_errors.load(std::memory_order_relaxed)));
     std::shared_lock lock(self->routes_mutex);
     PyRef rc(PyLong_FromSsize_t((Py_ssize_t)self->routes.size()));
     lock.unlock();
@@ -845,14 +920,11 @@ static inline PyObject* coerce_param(std::string_view val, ParamType type_tag) {
                 }
                 if (all_digit) return PyLong_FromLong(v);
             }
-            // Fast path: fits in stack buffer (handles negatives, larger numbers)
+            // Fast path: std::from_chars works directly on string_view — no copy needed
             if (val.size() <= 20) {
-                char buf[24];
-                memcpy(buf, val.data(), val.size());
-                buf[val.size()] = '\0';
-                char* endptr = nullptr;
-                long long v = strtoll(buf, &endptr, 10);
-                if (endptr == buf + val.size()) {
+                long long v = 0;
+                auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), v);
+                if (ec == std::errc{} && ptr == val.data() + val.size()) {
                     return PyLong_FromLongLong(v);
                 }
             }
@@ -862,14 +934,11 @@ static inline PyObject* coerce_param(std::string_view val, ParamType type_tag) {
             return PyLong_FromUnicodeObject(py_str.get(), 10);
         }
         case TYPE_FLOAT: {
-            // Fast path: fits in stack buffer
+            // Fast path: std::from_chars on string_view — no null-terminated copy needed
             if (val.size() <= 48) {
-                char buf[52];
-                memcpy(buf, val.data(), val.size());
-                buf[val.size()] = '\0';
-                char* endptr = nullptr;
-                double v = strtod(buf, &endptr);
-                if (endptr == buf + val.size()) {
+                double v = 0.0;
+                auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), v);
+                if (ec == std::errc{} && ptr == val.data() + val.size()) {
                     return PyFloat_FromDouble(v);
                 }
             }
@@ -1214,6 +1283,7 @@ static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyO
     config->max_age = max_age;
 
     self->cors_config.store(config);
+    self->cors_enabled = true;  // Cache for hot-path: skip atomic shared_ptr load
 
     Py_RETURN_NONE;
 }
@@ -1249,7 +1319,7 @@ static PyObject* CoreApp_check_trusted_host(CoreAppObject* self, PyObject* arg) 
     if (!config) Py_RETURN_TRUE;
     if (config->allow_any_host) Py_RETURN_TRUE;
 
-    if (config->allowed_hosts_set.count(std::string(host)) > 0) Py_RETURN_TRUE;
+    if (config->allowed_hosts_set.count(std::string_view(host)) > 0) Py_RETURN_TRUE;
     Py_RETURN_FALSE;
 }
 
@@ -1398,15 +1468,13 @@ void init_status_line_cache() {
 static bool cors_origin_allowed(const CorsConfig* cors, const char* origin, size_t origin_len) {
     if (!cors || !origin || origin_len == 0) return false;
     if (cors->allow_any_origin) return true;
-    return cors->allow_origins_set.count(std::string(origin, origin_len)) > 0;
+    // Transparent hash: looks up string_view directly — zero heap allocation
+    return cors->allow_origins_set.count(std::string_view(origin, origin_len)) > 0;
 }
 
-// Check for CRLF injection in origin strings
+// Check for CRLF injection in origin strings (memchr = SIMD-accelerated on most platforms)
 static inline bool contains_crlf(const char* s, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        if (s[i] == '\r' || s[i] == '\n') return true;
-    }
-    return false;
+    return memchr(s, '\r', len) != nullptr || memchr(s, '\n', len) != nullptr;
 }
 
 // Build CORS headers string into a buffer. Returns number of bytes written.
@@ -1423,28 +1491,28 @@ static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
 
     // Access-Control-Allow-Origin
     static const char ACAO[] = "\r\naccess-control-allow-origin: ";
-    buf.insert(buf.end(), ACAO, ACAO + sizeof(ACAO) - 1);
+    buf_append(buf, ACAO, sizeof(ACAO) - 1);
     // If wildcard and no credentials, use *; otherwise echo origin
     if (!cors->allow_credentials && cors->allow_origins.size() == 1 && cors->allow_origins[0] == "*") {
         buf.push_back('*');
     } else {
-        buf.insert(buf.end(), origin, origin + origin_len);
+        buf_append(buf, origin, origin_len);
     }
 
     // Access-Control-Allow-Credentials
     if (cors->allow_credentials) {
         static const char ACAC[] = "\r\naccess-control-allow-credentials: true";
-        buf.insert(buf.end(), ACAC, ACAC + sizeof(ACAC) - 1);
+        buf_append(buf, ACAC, sizeof(ACAC) - 1);
     }
 
     // Access-Control-Expose-Headers
     if (!cors->expose_headers.empty()) {
         static const char ACEH[] = "\r\naccess-control-expose-headers: ";
-        buf.insert(buf.end(), ACEH, ACEH + sizeof(ACEH) - 1);
+        buf_append(buf, ACEH, sizeof(ACEH) - 1);
         for (size_t i = 0; i < cors->expose_headers.size(); i++) {
             if (i > 0) { buf.push_back(','); buf.push_back(' '); }
             const auto& h = cors->expose_headers[i];
-            buf.insert(buf.end(), h.begin(), h.end());
+            buf_append(buf, h.data(), h.size());
         }
     }
 
@@ -1452,7 +1520,7 @@ static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
     if (cors->allow_credentials || cors->allow_origins.size() > 1 ||
         (cors->allow_origins.size() == 1 && cors->allow_origins[0] != "*")) {
         static const char VARY[] = "\r\nvary: Origin";
-        buf.insert(buf.end(), VARY, VARY + sizeof(VARY) - 1);
+        buf_append(buf, VARY, sizeof(VARY) - 1);
     }
 
     return buf.size() - start;
@@ -1473,64 +1541,64 @@ static PyObject* build_cors_preflight_response(
     buf.reserve(estimate);
 
     static const char STATUS[] = "HTTP/1.1 204 No Content\r\naccess-control-allow-origin: ";
-    buf.insert(buf.end(), STATUS, STATUS + sizeof(STATUS) - 1);
+    buf_append(buf, STATUS, sizeof(STATUS) - 1);
 
     // Origin
     if (!cors->allow_credentials && cors->allow_origins.size() == 1 && cors->allow_origins[0] == "*") {
         buf.push_back('*');
     } else {
-        buf.insert(buf.end(), origin, origin + origin_len);
+        buf_append(buf, origin, origin_len);
     }
 
     // Allow-Methods
     static const char ACAM[] = "\r\naccess-control-allow-methods: ";
-    buf.insert(buf.end(), ACAM, ACAM + sizeof(ACAM) - 1);
+    buf_append(buf, ACAM, sizeof(ACAM) - 1);
     if (cors->allow_methods.empty()) {
         static const char DEF_METHODS[] = "GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD";
-        buf.insert(buf.end(), DEF_METHODS, DEF_METHODS + sizeof(DEF_METHODS) - 1);
+        buf_append(buf, DEF_METHODS, sizeof(DEF_METHODS) - 1);
     } else {
         for (size_t i = 0; i < cors->allow_methods.size(); i++) {
             if (i > 0) { buf.push_back(','); buf.push_back(' '); }
             const auto& m = cors->allow_methods[i];
-            buf.insert(buf.end(), m.begin(), m.end());
+            buf_append(buf, m.data(), m.size());
         }
     }
 
     // Allow-Headers
     if (!cors->allow_headers.empty()) {
         static const char ACAH[] = "\r\naccess-control-allow-headers: ";
-        buf.insert(buf.end(), ACAH, ACAH + sizeof(ACAH) - 1);
+        buf_append(buf, ACAH, sizeof(ACAH) - 1);
         for (size_t i = 0; i < cors->allow_headers.size(); i++) {
             if (i > 0) { buf.push_back(','); buf.push_back(' '); }
             const auto& h = cors->allow_headers[i];
-            buf.insert(buf.end(), h.begin(), h.end());
+            buf_append(buf, h.data(), h.size());
         }
     }
 
     // Max-Age
     static const char AMA[] = "\r\naccess-control-max-age: ";
-    buf.insert(buf.end(), AMA, AMA + sizeof(AMA) - 1);
+    buf_append(buf, AMA, sizeof(AMA) - 1);
     char age_buf[16];
     int age_n = fast_i64_to_buf(age_buf, cors->max_age);
-    buf.insert(buf.end(), age_buf, age_buf + age_n);
+    buf_append(buf, age_buf, age_n);
 
     // Credentials
     if (cors->allow_credentials) {
         static const char ACAC[] = "\r\naccess-control-allow-credentials: true";
-        buf.insert(buf.end(), ACAC, ACAC + sizeof(ACAC) - 1);
+        buf_append(buf, ACAC, sizeof(ACAC) - 1);
     }
 
     // Vary
     static const char VARY[] = "\r\nvary: Origin";
-    buf.insert(buf.end(), VARY, VARY + sizeof(VARY) - 1);
+    buf_append(buf, VARY, sizeof(VARY) - 1);
 
     // Content-Length: 0 + Connection
     static const char CL0_KA[] = "\r\ncontent-length: 0\r\nconnection: keep-alive\r\n\r\n";
     static const char CL0_CLOSE[] = "\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
     if (keep_alive) {
-        buf.insert(buf.end(), CL0_KA, CL0_KA + sizeof(CL0_KA) - 1);
+        buf_append(buf, CL0_KA, sizeof(CL0_KA) - 1);
     } else {
-        buf.insert(buf.end(), CL0_CLOSE, CL0_CLOSE + sizeof(CL0_CLOSE) - 1);
+        buf_append(buf, CL0_CLOSE, sizeof(CL0_CLOSE) - 1);
     }
 
     PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
@@ -1549,7 +1617,7 @@ static bool check_trusted_host_inline(const TrustedHostConfig* th, const char* h
     if (colon != std::string_view::npos) {
         host_sv = host_sv.substr(0, colon);
     }
-    return th->allowed_hosts_set.count(std::string(host_sv)) > 0;
+    return th->allowed_hosts_set.count(host_sv) > 0;  // transparent hash — zero alloc
 }
 
 // ── Inline compression (no Python overhead — raw zlib/brotli) ────────────────
@@ -1643,62 +1711,67 @@ static PyObject* build_http_response_bytes(
     // Reserve total size upfront — eliminates ALL reallocations
     buf.reserve(256 + body_len);
 
-    if (status_code == 200 && !cors && !content_encoding && keep_alive) {
-        // Ultra-fast path: single resize + 4 memcpy for 200 JSON keep-alive
-        // (eliminates multiple buf.insert calls + branch overhead)
+    // Ultra-fast path: any status code with cached JSON prefix, no CORS, no compression
+    // Covers ~99% of API responses. Single resize + 4 memcpy — zero buf_append calls.
+    if (__builtin_expect(!!(!cors && !content_encoding &&
+        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data), 1)) {
+        const auto& jp = s_json_prefixes[status_code];
         char cl_buf[20];
         int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
         static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
-        size_t total = sizeof(HDR_200_JSON) - 1 + cl_len + sizeof(SUFFIX_KA) - 1 + body_len;
+        static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
+        const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
+        size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
+        size_t total = jp.len + cl_len + suffix_len + body_len;
         buf.resize(total);
         char* dst = buf.data();
-        memcpy(dst, HDR_200_JSON, sizeof(HDR_200_JSON) - 1); dst += sizeof(HDR_200_JSON) - 1;
+        memcpy(dst, jp.data, jp.len); dst += jp.len;
         memcpy(dst, cl_buf, cl_len); dst += cl_len;
-        memcpy(dst, SUFFIX_KA, sizeof(SUFFIX_KA) - 1); dst += sizeof(SUFFIX_KA) - 1;
+        memcpy(dst, suffix, suffix_len); dst += suffix_len;
         memcpy(dst, body_data, body_len);
         PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
         release_buffer(std::move(buf));
         return result;
     }
 
-    if (status_code == 200 && !cors && !content_encoding) {
-        buf.insert(buf.end(), HDR_200_JSON, HDR_200_JSON + sizeof(HDR_200_JSON) - 1);
+    if (status_code == 200 && !content_encoding) {
+        buf_append(buf, HDR_200_JSON, sizeof(HDR_200_JSON) - 1);
     } else if (status_code == 200) {
         // 200 with CORS or compression
-        buf.insert(buf.end(), HDR_200_JSON, HDR_200_JSON + sizeof(HDR_200_JSON) - 1);
+        buf_append(buf, HDR_200_JSON, sizeof(HDR_200_JSON) - 1);
     } else if (status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data) {
         // Cached JSON prefix: "HTTP/1.1 XXX Reason\r\ncontent-type: application/json\r\ncontent-length: "
         const auto& jp = s_json_prefixes[status_code];
-        buf.insert(buf.end(), jp.data, jp.data + jp.len);
+        buf_append(buf, jp.data, jp.len);
     } else {
         // Uncached status code — build dynamically
         static const char prefix[] = "HTTP/1.1 ";
-        buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
+        buf_append(buf, prefix, sizeof(prefix) - 1);
         char sc_buf[8];
         int sn = fast_i64_to_buf(sc_buf, status_code);
-        buf.insert(buf.end(), sc_buf, sc_buf + sn);
+        buf_append(buf, sc_buf, sn);
         buf.push_back(' ');
         const char* reason = status_reason(status_code);
         size_t rlen = strlen(reason);
-        buf.insert(buf.end(), reason, reason + rlen);
+        buf_append(buf, reason, rlen);
         static const char ct_hdr[] = "\r\ncontent-type: application/json\r\ncontent-length: ";
-        buf.insert(buf.end(), ct_hdr, ct_hdr + sizeof(ct_hdr) - 1);
+        buf_append(buf, ct_hdr, sizeof(ct_hdr) - 1);
     }
 
     // Content-Length value
     char sc[20];
     int n = fast_i64_to_buf(sc, (long long)body_len);
-    buf.insert(buf.end(), sc, sc + n);
+    buf_append(buf, sc, n);
 
     // Content-Encoding header (when compressed)
     if (content_encoding) {
         static const char ce_prefix[] = "\r\ncontent-encoding: ";
-        buf.insert(buf.end(), ce_prefix, ce_prefix + sizeof(ce_prefix) - 1);
+        buf_append(buf, ce_prefix, sizeof(ce_prefix) - 1);
         size_t ce_len = strlen(content_encoding);
-        buf.insert(buf.end(), content_encoding, content_encoding + ce_len);
+        buf_append(buf, content_encoding, ce_len);
         // Also add Vary: Accept-Encoding for caching
         static const char vary_hdr[] = "\r\nvary: Accept-Encoding";
-        buf.insert(buf.end(), vary_hdr, vary_hdr + sizeof(vary_hdr) - 1);
+        buf_append(buf, vary_hdr, sizeof(vary_hdr) - 1);
     }
 
     // CORS headers (before connection header)
@@ -1708,13 +1781,13 @@ static PyObject* build_http_response_bytes(
 
     // Connection header + end-of-headers (single insert)
     if (keep_alive) {
-        buf.insert(buf.end(), CONN_KA, CONN_KA + sizeof(CONN_KA) - 1);
+        buf_append(buf, CONN_KA, sizeof(CONN_KA) - 1);
     } else {
-        buf.insert(buf.end(), CONN_CLOSE, CONN_CLOSE + sizeof(CONN_CLOSE) - 1);
+        buf_append(buf, CONN_CLOSE, sizeof(CONN_CLOSE) - 1);
     }
 
     // Body
-    buf.insert(buf.end(), body_data, body_data + body_len);
+    buf_append(buf, body_data, body_len);
 
     PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
@@ -1733,7 +1806,7 @@ static void json_escape_cstr(std::vector<char>& buf, const char* s, size_t len) 
         else if (c < 0x20) {
             char esc[7];
             snprintf(esc, sizeof(esc), "\\u%04x", c);
-            buf.insert(buf.end(), esc, esc + 6);
+            buf_append(buf, esc, 6);
         }
         else { buf.push_back((char)c); }
     }
@@ -1761,8 +1834,6 @@ static int write_to_transport(PyObject* transport, PyObject* data) {
 
     if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
 
-    // Skip is_closing() check — direct write is faster and transport.write()
-    // handles closed transport gracefully. Saves one Python method call per request.
     PyRef result(PyObject_CallMethodOneArg(transport, g_str_write, data));
     if (!result) {
         log_and_clear_pyerr("transport.write() failed");
@@ -1776,7 +1847,7 @@ static int write_to_transport(PyObject* transport, PyObject* data) {
 // Eliminates: Python memoryview creation, slice ops, O(N) memmove per request.
 
 class HttpConnectionBuffer {
-    static constexpr size_t INITIAL_CAPACITY = 8192;
+    static constexpr size_t INITIAL_CAPACITY = 4096;
     static constexpr size_t MAX_CAPACITY = 1048576;  // 1MB
 
     uint8_t* buf_;
@@ -2007,7 +2078,11 @@ static PyObject* CoreApp_handle_http(
     int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
 
     if (parse_result == 0) {
-        // Need more data
+        // Need more data — return cached (0, None) tuple
+        if (s_need_more_data) {
+            Py_INCREF(s_need_more_data);
+            return s_need_more_data;
+        }
         PyRef zero(PyLong_FromLong(0));
         Py_INCREF(Py_None);
         return PyTuple_Pack(2, zero.get(), Py_None);
@@ -2022,11 +2097,13 @@ static PyObject* CoreApp_handle_http(
         return PyTuple_Pack(2, neg.get(), Py_None);
     }
 
-    self->total_requests.fetch_add(1, std::memory_order_relaxed);
-    self->active_requests.fetch_add(1, std::memory_order_relaxed);
+    self->counters.total_requests.fetch_add(1, std::memory_order_relaxed);
+    self->counters.active_requests.fetch_add(1, std::memory_order_relaxed);
 
-    // Capture start time for post-response hook (logging middleware)
-    auto request_start_time = std::chrono::steady_clock::now();
+    // Capture start time only if post-response hook is configured (skip ~25ns rdtsc otherwise)
+    auto request_start_time = self->post_response_hook
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
 
     // ── Extract Origin, Host, Accept-Encoding, Authorization headers ────
     StringView origin_sv;
@@ -2035,8 +2112,8 @@ static PyObject* CoreApp_handle_http(
     StringView content_type_sv;
     StringView authorization_sv;
     {
-        // Only look for origin if CORS is configured (skip if not)
-        bool want_origin = (self->cors_config.load().get() != nullptr);
+        // Only look for origin if CORS is configured — cached bool avoids atomic shared_ptr load
+        bool want_origin = self->cors_enabled;
         int found = 0;
         const int need = want_origin ? 5 : 4;
         for (int i = 0; i < req.header_count && found < need; i++) {
@@ -2072,7 +2149,7 @@ static PyObject* CoreApp_handle_http(
     auto th_config = self->trusted_host_config.load();
     if (th_config && !host_sv.empty()) {
         if (!check_trusted_host_inline(th_config.get(), host_sv.data, host_sv.len)) {
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             PyRef resp(build_http_error_response(400, "Invalid host header", req.keep_alive));
             if (resp) write_to_transport(transport, resp.get());
             return make_consumed_true(req.total_consumed);
@@ -2084,36 +2161,44 @@ static PyObject* CoreApp_handle_http(
     const CorsConfig* cors_ptr = cors.get();
     bool has_cors = cors_ptr && !origin_sv.empty() && cors_origin_allowed(cors_ptr, origin_sv.data, origin_sv.len);
 
-    if (has_cors && req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0) {
+    if (__builtin_expect(!!(has_cors && req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0), 0)) {
         // Full CORS preflight response — entirely in C++, no route needed
-        self->active_requests.fetch_sub(1, std::memory_order_release);
+        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
         PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive));
         if (resp) write_to_transport(transport, resp.get());
         return make_consumed_true(req.total_consumed);
     }
 
     // ── Serve /openapi.json, /docs, /redoc (pre-built responses) ──────
-    if (req.path.len > 0) {
-        std::string_view path_sv(req.path.data, req.path.len);
-        if (self->openapi_json_resp && path_sv == self->openapi_url) {
-            self->active_requests.fetch_sub(1, std::memory_order_release);
-            write_to_transport(transport, self->openapi_json_resp);
-            return make_consumed_true(req.total_consumed);
-        }
-        if (self->docs_html_resp && path_sv == self->docs_url) {
-            self->active_requests.fetch_sub(1, std::memory_order_release);
-            write_to_transport(transport, self->docs_html_resp);
-            return make_consumed_true(req.total_consumed);
-        }
-        if (self->redoc_html_resp && path_sv == self->redoc_url) {
-            self->active_requests.fetch_sub(1, std::memory_order_release);
-            write_to_transport(transport, self->redoc_html_resp);
-            return make_consumed_true(req.total_consumed);
+    // First-byte dispatch: skip 3 comparisons for 97%+ of requests
+    if (req.path.len > 1) {
+        char second = req.path.data[1];
+        if (second == 'o' && self->openapi_json_resp) {
+            std::string_view path_sv(req.path.data, req.path.len);
+            if (path_sv == self->openapi_url) {
+                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                write_to_transport(transport, self->openapi_json_resp);
+                return make_consumed_true(req.total_consumed);
+            }
+        } else if (second == 'd' && self->docs_html_resp) {
+            std::string_view path_sv(req.path.data, req.path.len);
+            if (path_sv == self->docs_url) {
+                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                write_to_transport(transport, self->docs_html_resp);
+                return make_consumed_true(req.total_consumed);
+            }
+        } else if (second == 'r' && self->redoc_html_resp) {
+            std::string_view path_sv(req.path.data, req.path.len);
+            if (path_sv == self->redoc_url) {
+                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                write_to_transport(transport, self->redoc_html_resp);
+                return make_consumed_true(req.total_consumed);
+            }
         }
     }
 
     // ── WebSocket upgrade detection ────────────────────────────────────
-    if (req.upgrade) {
+    if (__builtin_expect(!!(req.upgrade), 0)) {
         // Extract Sec-WebSocket-Key header
         StringView ws_key;
         for (int i = 0; i < req.header_count; i++) {
@@ -2142,7 +2227,7 @@ static PyObject* CoreApp_handle_http(
             }
             ws_lock.unlock();
 
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
 
             if (ws_endpoint) {
@@ -2211,7 +2296,7 @@ static PyObject* CoreApp_handle_http(
     }
 
     auto match = self->router.at(req.path.data, req.path.len);
-    if (!match) {
+    if (__builtin_expect(!!(!match), 0)) {
         // ── Trailing slash redirect: try with/without '/' ───────────
         // Use stack buffer to avoid heap allocation for path probe
         char alt_buf[512];
@@ -2229,7 +2314,7 @@ static PyObject* CoreApp_handle_http(
         auto alt_match = do_redirect_check ? self->router.at(alt_buf, alt_len) : std::nullopt;
         if (alt_match) {
             if (!rt_frozen) lock.unlock();
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             // Build 307 redirect response using resize+memcpy
             auto buf = acquire_buffer();
             buf.reserve(256);
@@ -2260,7 +2345,7 @@ static PyObject* CoreApp_handle_http(
         }
 
         if (!rt_frozen) lock.unlock();
-        self->active_requests.fetch_sub(1, std::memory_order_release);
+        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
@@ -2272,7 +2357,7 @@ static PyObject* CoreApp_handle_http(
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
         if (!rt_frozen) lock.unlock();
-        self->active_requests.fetch_sub(1, std::memory_order_release);
+        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
@@ -2288,7 +2373,7 @@ static PyObject* CoreApp_handle_http(
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (!(route.method_mask & req_method)) {
             if (!rt_frozen) lock.unlock();
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
@@ -2299,10 +2384,10 @@ static PyObject* CoreApp_handle_http(
     }
 
     // ── Rate limiting (C++ native, per client IP) — sharded for low contention
-    if (self->rate_limit_enabled && !self->current_client_ip.empty()) {
+    if (__builtin_expect(!!(self->rate_limit_enabled && !self->current_client_ip.empty()), 0)) {
         auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
         int64_t window_ns = (int64_t)self->rate_limit_window_seconds * 1'000'000'000LL;
-        size_t shard_idx = std::hash<std::string>{}(self->current_client_ip) % RATE_LIMIT_SHARDS;
+        size_t shard_idx = self->current_shard_idx;  // cached at connection time
         auto& shard = self->rate_limit_shards[shard_idx];
         std::lock_guard<std::mutex> rl_lock(shard.mutex);
         auto& entry = shard.counters[self->current_client_ip];
@@ -2315,7 +2400,7 @@ static PyObject* CoreApp_handle_http(
         if (entry.count > self->rate_limit_max_requests) {
             // Unlock route lock before writing response
             if (!rt_frozen) lock.unlock();
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             PyRef resp(build_http_error_response(429, "Rate limit exceeded", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
@@ -2336,7 +2421,7 @@ static PyObject* CoreApp_handle_http(
 
     if (!route.fast_spec) {
         if (!rt_frozen) lock.unlock();
-        self->active_requests.fetch_sub(1, std::memory_order_release);
+        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
@@ -2475,7 +2560,8 @@ static PyObject* CoreApp_handle_http(
     // ── Fill defaults for missing params ─────────────────────────────────
     auto fill_defaults_http = [&](const std::vector<FieldSpec>& specs) {
         for (const auto& fs : specs) {
-            if (fs.default_value && !PyDict_Contains(kwargs.get(), fs.py_field_name)) {
+            // Single hash+lookup instead of Contains(hash+lookup) + SetItem(hash+lookup)
+            if (fs.default_value && !PyDict_GetItem(kwargs.get(), fs.py_field_name)) {
                 PyDict_SetItem(kwargs.get(), fs.py_field_name, fs.default_value);
             }
         }
@@ -2491,12 +2577,10 @@ static PyObject* CoreApp_handle_http(
             // ── Form data parsing (urlencoded or multipart) ──────────────
             // Check content-type to determine form type
             bool is_urlencoded = false, is_multipart = false;
-            std::string ct_check(content_type_sv.data, content_type_sv.len);
-            for (auto& c : ct_check) if (c >= 'A' && c <= 'Z') c += 32;
-
-            if (ct_check.find("application/x-www-form-urlencoded") != std::string::npos) {
+            // Zero-allocation case-insensitive content-type check
+            if (ci_contains(content_type_sv.data, content_type_sv.len, "application/x-www-form-urlencoded", 33)) {
                 is_urlencoded = true;
-            } else if (ct_check.find("multipart/form-data") != std::string::npos) {
+            } else if (ci_contains(content_type_sv.data, content_type_sv.len, "multipart/form-data", 19)) {
                 is_multipart = true;
             }
 
@@ -2527,22 +2611,35 @@ static PyObject* CoreApp_handle_http(
                 }
                 json_body_obj = form_dict.release();  // for Pydantic validation path
             } else if (is_multipart) {
-                // Extract boundary from content-type
-                size_t bpos = ct_check.find("boundary=");
-                if (bpos != std::string::npos) {
+                // Extract boundary from content-type (zero-alloc: scan raw string_view)
+                const char* ct_ptr = content_type_sv.data;
+                size_t ct_len = content_type_sv.len;
+                size_t bpos = std::string_view(ct_ptr, ct_len).find("boundary=");
+                if (bpos == std::string_view::npos) {
+                    // Try case-insensitive
+                    for (size_t i = 0; i + 9 <= ct_len; i++) {
+                        if (ci_starts_with(ct_ptr + i, ct_len - i, "boundary=", 9)) {
+                            bpos = i; break;
+                        }
+                    }
+                }
+                if (bpos != std::string_view::npos) {
                     bpos += 9;  // skip "boundary="
-                    size_t bend = ct_check.find(';', bpos);
-                    if (bend == std::string::npos) bend = ct_check.size();
-                    // Use original (not lowered) content-type for boundary
-                    std::string boundary(content_type_sv.data + bpos, bend - bpos);
-                    // Strip quotes if present
-                    if (boundary.size() >= 2 && boundary.front() == '"' && boundary.back() == '"') {
-                        boundary = boundary.substr(1, boundary.size() - 2);
+                    // Find end of boundary (';' or end of string)
+                    size_t bend = bpos;
+                    while (bend < ct_len && ct_ptr[bend] != ';') bend++;
+                    // Use string_view into original content-type for boundary
+                    const char* bnd_start = ct_ptr + bpos;
+                    size_t bnd_len = bend - bpos;
+                    // Strip quotes if present (using string_view — no alloc)
+                    if (bnd_len >= 2 && bnd_start[0] == '"' && bnd_start[bnd_len - 1] == '"') {
+                        bnd_start++;
+                        bnd_len -= 2;
                     }
 
                     // Call C++ multipart parser via Python wrapper
                     PyRef body_bytes(PyBytes_FromStringAndSize(req.body.data, req.body.len));
-                    PyRef boundary_str(PyUnicode_FromStringAndSize(boundary.c_str(), boundary.size()));
+                    PyRef boundary_str(PyUnicode_FromStringAndSize(bnd_start, bnd_len));
                     if (body_bytes && boundary_str) {
                         PyRef parse_args(PyTuple_Pack(2, body_bytes.get(), boundary_str.get()));
                         // py_parse_multipart_body is declared in form_parser
@@ -2640,18 +2737,14 @@ static PyObject* CoreApp_handle_http(
                         PyList_SET_ITEM(headers_list.get(), i, Py_None);
                     }
                 }
-                static PyObject* s_rh_key = nullptr;
-                if (!s_rh_key) s_rh_key = PyUnicode_InternFromString("__raw_headers__");
+                // s_rh_key pre-cached at startup by py_init_cached_refs()
                 PyDict_SetItem(kwargs.get(), s_rh_key, headers_list.get());
             }
 
-            static PyObject* s_m_key = nullptr;
-            if (!s_m_key) s_m_key = PyUnicode_InternFromString("__method__");
+            // s_m_key, s_p_key pre-cached at startup
             PyRef method_str(PyUnicode_FromStringAndSize(req.method.data, (Py_ssize_t)req.method.len));
             if (method_str) PyDict_SetItem(kwargs.get(), s_m_key, method_str.get());
 
-            static PyObject* s_p_key = nullptr;
-            if (!s_p_key) s_p_key = PyUnicode_InternFromString("__path__");
             PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
             if (path_str) PyDict_SetItem(kwargs.get(), s_p_key, path_str.get());
 
@@ -2662,10 +2755,7 @@ static PyObject* CoreApp_handle_http(
                 while (space_pos < authorization_sv.len && authorization_sv.data[space_pos] != ' ')
                     space_pos++;
 
-                static PyObject* s_as_key = nullptr;
-                if (!s_as_key) s_as_key = PyUnicode_InternFromString("__auth_scheme__");
-                static PyObject* s_ac_key = nullptr;
-                if (!s_ac_key) s_ac_key = PyUnicode_InternFromString("__auth_credentials__");
+                // s_as_key, s_ac_key pre-cached at startup
 
                 PyRef scheme(PyUnicode_FromStringAndSize(authorization_sv.data, (Py_ssize_t)space_pos));
                 size_t cred_start = space_pos < authorization_sv.len ? space_pos + 1 : space_pos;
@@ -2696,10 +2786,9 @@ static PyObject* CoreApp_handle_http(
 
                     // Reset _asyncio_future_blocking — C++ intercepted the yield
                     // before asyncio's Task.__step could clear it.
-                    static PyObject* s_fut_blocking_di = nullptr;
-                    if (!s_fut_blocking_di) s_fut_blocking_di = PyUnicode_InternFromString("_asyncio_future_blocking");
+                    // s_fut_blocking pre-cached at startup
                     if (dep_raw) {
-                        PyObject_SetAttr(dep_raw, s_fut_blocking_di, Py_False);
+                        PyObject_SetAttr(dep_raw, s_fut_blocking, Py_False);
                     }
 
                     // NOTE: Do NOT decrement active_requests here — Python will call
@@ -2746,7 +2835,7 @@ static PyObject* CoreApp_handle_http(
                         fire_post_response_hook(self, req.method.data, req.method.len,
                                                 req.path.data, req.path.len, hook_status, request_start_time);
                     }
-                    self->active_requests.fetch_sub(1, std::memory_order_release);
+                    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     Py_DECREF(endpoint_local);
                     Py_XDECREF(body_params_local);
@@ -2772,7 +2861,7 @@ static PyObject* CoreApp_handle_http(
                     // If there are validation errors, return 422
                     if (dep_errors && PyList_Check(dep_errors) && PyList_GET_SIZE(dep_errors) > 0) {
                         Py_DECREF(dep_raw);
-                        self->active_requests.fetch_sub(1, std::memory_order_release);
+                        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
                         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                         Py_DECREF(endpoint_local);
                         Py_XDECREF(body_params_local);
@@ -2812,7 +2901,7 @@ static PyObject* CoreApp_handle_http(
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, hook_status, request_start_time);
             }
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
             Py_DECREF(endpoint_local);
             Py_XDECREF(body_params_local);
@@ -2872,8 +2961,8 @@ static PyObject* CoreApp_handle_http(
                             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                             Py_DECREF(endpoint_local);
                             Py_DECREF(body_params_local);
-                            self->active_requests.fetch_sub(1, std::memory_order_release);
-                            self->total_errors.fetch_add(1, std::memory_order_relaxed);
+                            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                            self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
                             return make_consumed_true(req.total_consumed);
                         }
                     }
@@ -2941,8 +3030,8 @@ static PyObject* CoreApp_handle_http(
                                 if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                                 Py_DECREF(endpoint_local);
                                 Py_DECREF(body_params_local);
-                                self->active_requests.fetch_sub(1, std::memory_order_release);
-                                self->total_errors.fetch_add(1, std::memory_order_relaxed);
+                                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                                self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
                                 return make_consumed_true(req.total_consumed);
                             }
 
@@ -2992,7 +3081,7 @@ static PyObject* CoreApp_handle_http(
             ir->endpoint = endpoint_local;
             ir->body_params = body_params_local;
 
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             return make_consumed_obj(req.total_consumed, (PyObject*)ir);
         }
     }
@@ -3054,7 +3143,7 @@ body_done:
                     }
                     fire_post_response_hook(self, req.method.data, req.method.len,
                                             req.path.data, req.path.len, scode, request_start_time);
-                    self->active_requests.fetch_sub(1, std::memory_order_release);
+                    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(req.total_consumed);
                 }
@@ -3069,7 +3158,7 @@ body_done:
                     if (resp) write_to_transport(transport, resp.get());
                     fire_post_response_hook(self, req.method.data, req.method.len,
                                             req.path.data, req.path.len, scode, request_start_time);
-                    self->active_requests.fetch_sub(1, std::memory_order_release);
+                    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(req.total_consumed);
                 }
@@ -3082,8 +3171,8 @@ body_done:
         if (resp) write_to_transport(transport, resp.get());
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, 500, request_start_time);
-        self->active_requests.fetch_sub(1, std::memory_order_release);
-        self->total_errors.fetch_add(1, std::memory_order_relaxed);
+        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+        self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
         return make_consumed_true(req.total_consumed);
     }
@@ -3109,13 +3198,12 @@ body_done:
         // ── Response model validation ────────────────────────────────────
         // If route has a response_model, validate + serialize through Pydantic
         if (response_model_local && response_model_local != Py_None) {
-            static PyObject* s_validate = nullptr;
+            // s_validate_str pre-cached at startup; s_serialize stays lazy (rare path)
             static PyObject* s_serialize = nullptr;
-            if (!s_validate) s_validate = PyUnicode_InternFromString("validate_python");
             if (!s_serialize) s_serialize = PyUnicode_InternFromString("serialize_python");
 
             // field.validate_python(raw_result) → validated model
-            PyRef validated(PyObject_CallMethodOneArg(response_model_local, s_validate, raw_result));
+            PyRef validated(PyObject_CallMethodOneArg(response_model_local, s_validate_str, raw_result));
             if (!validated) {
                 // Validation error → 422
                 PyErr_Clear();
@@ -3123,7 +3211,7 @@ body_done:
                 PyRef resp(build_http_error_response(422, "Response validation error", req.keep_alive,
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
-                self->active_requests.fetch_sub(1, std::memory_order_release);
+                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
                 return make_consumed_true(req.total_consumed);
             }
 
@@ -3152,8 +3240,8 @@ body_done:
                 PyRef resp(build_http_error_response(500, "JSON serialization failed", req.keep_alive,
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
-                self->active_requests.fetch_sub(1, std::memory_order_release);
-                self->total_errors.fetch_add(1, std::memory_order_relaxed);
+                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
                 return make_consumed_true(req.total_consumed);
             }
 
@@ -3190,15 +3278,19 @@ body_done:
 
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, status_code_local, request_start_time);
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             return make_consumed_true(req.total_consumed);
         }
 
         // ── Response object detection ─────────────────────────────────────
         // Check if result is a Starlette Response (has .body, .status_code, .raw_headers)
-        PyRef body_attr(PyObject_GetAttrString(raw_result, "body"));
-        PyRef sc_attr(PyObject_GetAttrString(raw_result, "status_code"));
-        PyErr_Clear();  // Clear any AttributeError
+        // Use HasAttrString first to avoid expensive exception set+clear on dict/list
+        PyRef body_attr, sc_attr;
+        if (PyObject_HasAttrString(raw_result, "body") &&
+            PyObject_HasAttrString(raw_result, "status_code")) {
+            body_attr = PyRef(PyObject_GetAttrString(raw_result, "body"));
+            sc_attr = PyRef(PyObject_GetAttrString(raw_result, "status_code"));
+        }
 
         if (body_attr && PyBytes_Check(body_attr.get()) && sc_attr && PyLong_Check(sc_attr.get())) {
             // This is a Response object — extract body + status + headers
@@ -3214,17 +3306,17 @@ body_done:
             // Build HTTP response status line (use cache if available)
             if (resp_sc > 0 && resp_sc < 600 && s_status_lines[resp_sc].data) {
                 const auto& sl = s_status_lines[resp_sc];
-                buf.insert(buf.end(), sl.data, sl.data + sl.len - 2);  // exclude trailing \r\n
+                buf_append(buf, sl.data, sl.len - 2);  // exclude trailing \r\n
             } else {
                 static const char prefix[] = "HTTP/1.1 ";
-                buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
+                buf_append(buf, prefix, sizeof(prefix) - 1);
                 char sc_buf[8];
                 int sn = fast_i64_to_buf(sc_buf, resp_sc);
-                buf.insert(buf.end(), sc_buf, sc_buf + sn);
+                buf_append(buf, sc_buf, sn);
                 buf.push_back(' ');
                 const char* reason = status_reason(resp_sc);
                 size_t rlen = strlen(reason);
-                buf.insert(buf.end(), reason, reason + rlen);
+                buf_append(buf, reason, rlen);
             }
 
             // Emit response headers from raw_headers list
@@ -3236,12 +3328,10 @@ body_done:
                         PyObject* hname = PyTuple_GET_ITEM(htuple, 0);
                         PyObject* hval = PyTuple_GET_ITEM(htuple, 1);
                         if (PyBytes_Check(hname) && PyBytes_Check(hval)) {
-                            buf.push_back('\r'); buf.push_back('\n');
-                            buf.insert(buf.end(), PyBytes_AS_STRING(hname),
-                                       PyBytes_AS_STRING(hname) + PyBytes_GET_SIZE(hname));
-                            buf.push_back(':'); buf.push_back(' ');
-                            buf.insert(buf.end(), PyBytes_AS_STRING(hval),
-                                       PyBytes_AS_STRING(hval) + PyBytes_GET_SIZE(hval));
+                            buf_append(buf, "\r\n", 2);
+                            buf_append(buf, PyBytes_AS_STRING(hname), (size_t)PyBytes_GET_SIZE(hname));
+                            buf_append(buf, ": ", 2);
+                            buf_append(buf, PyBytes_AS_STRING(hval), (size_t)PyBytes_GET_SIZE(hval));
                         }
                     }
                 }
@@ -3256,13 +3346,13 @@ body_done:
             static const char CONN_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
             static const char CONN_CLOSE[] = "\r\nconnection: close\r\n\r\n";
             if (req.keep_alive) {
-                buf.insert(buf.end(), CONN_KA, CONN_KA + sizeof(CONN_KA) - 1);
+                buf_append(buf, CONN_KA, sizeof(CONN_KA) - 1);
             } else {
-                buf.insert(buf.end(), CONN_CLOSE, CONN_CLOSE + sizeof(CONN_CLOSE) - 1);
+                buf_append(buf, CONN_CLOSE, sizeof(CONN_CLOSE) - 1);
             }
 
             // Body
-            buf.insert(buf.end(), resp_body, resp_body + resp_body_len);
+            buf_append(buf, resp_body, resp_body_len);
 
             PyRef http_resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
             release_buffer(std::move(buf));
@@ -3291,7 +3381,7 @@ body_done:
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, resp_sc, request_start_time);
             Py_DECREF(raw_result);
-            self->active_requests.fetch_sub(1, std::memory_order_release);
+            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
             return make_consumed_true(req.total_consumed);
         }
 
@@ -3309,7 +3399,7 @@ body_done:
         }
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, status_code_local, request_start_time);
-        self->active_requests.fetch_sub(1, std::memory_order_release);
+        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
         return make_consumed_true(req.total_consumed);
     }
 
@@ -3323,14 +3413,12 @@ body_done:
         // Reset _asyncio_future_blocking — C++ intercepted the yield before
         // asyncio's Task.__step could clear it. Python needs to re-await this
         // future, which requires fut_blocking to be False.
-        static PyObject* s_fut_blocking = nullptr;
-        if (!s_fut_blocking) s_fut_blocking = PyUnicode_InternFromString("_asyncio_future_blocking");
+        // s_fut_blocking pre-cached at startup
         if (raw_result) {
             PyObject_SetAttr(raw_result, s_fut_blocking, Py_False);
         }
 
-        static PyObject* s_async_tag = nullptr;
-        if (!s_async_tag) s_async_tag = PyUnicode_InternFromString("async");
+        // s_async_tag pre-cached at startup
         Py_INCREF(s_async_tag);
 
         PyObject* ka = req.keep_alive ? Py_True : Py_False;
@@ -3371,7 +3459,7 @@ body_done:
                 }
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, scode, request_start_time);
-                self->active_requests.fetch_sub(1, std::memory_order_release);
+                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
                 return make_consumed_true(req.total_consumed);
             }
 
@@ -3385,7 +3473,7 @@ body_done:
                 if (resp) write_to_transport(transport, resp.get());
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, scode, request_start_time);
-                self->active_requests.fetch_sub(1, std::memory_order_release);
+                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
                 return make_consumed_true(req.total_consumed);
             }
         }
@@ -3397,8 +3485,8 @@ body_done:
     if (resp) write_to_transport(transport, resp.get());
     fire_post_response_hook(self, req.method.data, req.method.len,
                             req.path.data, req.path.len, 500, request_start_time);
-    self->active_requests.fetch_sub(1, std::memory_order_release);
-    self->total_errors.fetch_add(1, std::memory_order_relaxed);
+    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+    self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
     return make_consumed_true(req.total_consumed);
 }
 
@@ -3899,6 +3987,8 @@ static PyObject* CoreApp_set_client_ip(CoreAppObject* self, PyObject* arg) {
     const char* ip = PyUnicode_AsUTF8(arg);
     if (!ip) return nullptr;
     self->current_client_ip = ip;
+    // Pre-compute shard index for rate limiting (avoids hash per request)
+    self->current_shard_idx = std::hash<std::string>{}(self->current_client_ip) % RATE_LIMIT_SHARDS;
     Py_RETURN_NONE;
 }
 
@@ -3986,18 +4076,18 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
     // Status line (use cache if available)
     if (status_code >= 0 && status_code < 600 && s_status_lines[status_code].data) {
         const auto& sl = s_status_lines[status_code];
-        buf.insert(buf.end(), sl.data, sl.data + sl.len);
+        buf_append(buf, sl.data, sl.len);
     } else {
         static const char prefix[] = "HTTP/1.1 ";
-        buf.insert(buf.end(), prefix, prefix + sizeof(prefix) - 1);
+        buf_append(buf, prefix, sizeof(prefix) - 1);
         char sc_buf[8];
         int sn = fast_i64_to_buf(sc_buf, status_code);
-        buf.insert(buf.end(), sc_buf, sc_buf + sn);
+        buf_append(buf, sc_buf, sn);
         buf.push_back(' ');
         const char* reason = status_reason(status_code);
         size_t rlen = strlen(reason);
-        buf.insert(buf.end(), reason, reason + rlen);
-        buf.insert(buf.end(), {'\r', '\n'});
+        buf_append(buf, reason, rlen);
+        buf_append(buf, "\r\n", 2);
     }
 
     // Headers from list of (key, value) tuples
@@ -4017,10 +4107,10 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
             return nullptr;
         }
 
-        buf.insert(buf.end(), kstr, kstr + klen);
-        buf.insert(buf.end(), {':', ' '});
-        buf.insert(buf.end(), vstr, vstr + vlen);
-        buf.insert(buf.end(), {'\r', '\n'});
+        buf_append(buf, kstr, klen);
+        buf_append(buf, ": ", 2);
+        buf_append(buf, vstr, vlen);
+        buf_append(buf, "\r\n", 2);
 
         // Check if content-length was provided (case-insensitive first char + length match)
         if (klen == 14) {
@@ -4034,25 +4124,25 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
     // Add content-length if not provided by headers
     if (!has_content_length) {
         static const char cl_pre[] = "content-length: ";
-        buf.insert(buf.end(), cl_pre, cl_pre + sizeof(cl_pre) - 1);
+        buf_append(buf, cl_pre, sizeof(cl_pre) - 1);
         char cl_buf[20];
         int cl_n = fast_i64_to_buf(cl_buf, (long long)body_len);
-        buf.insert(buf.end(), cl_buf, cl_buf + cl_n);
-        buf.insert(buf.end(), {'\r', '\n'});
+        buf_append(buf, cl_buf, cl_n);
+        buf_append(buf, "\r\n", 2);
     }
 
     // Connection header
     if (keep_alive) {
         static const char ka[] = "connection: keep-alive\r\n";
-        buf.insert(buf.end(), ka, ka + sizeof(ka) - 1);
+        buf_append(buf, ka, sizeof(ka) - 1);
     } else {
         static const char cl[] = "connection: close\r\n";
-        buf.insert(buf.end(), cl, cl + sizeof(cl) - 1);
+        buf_append(buf, cl, sizeof(cl) - 1);
     }
 
     // End of headers + body
-    buf.insert(buf.end(), {'\r', '\n'});
-    buf.insert(buf.end(), (const char*)body.buf, (const char*)body.buf + body_len);
+    buf_append(buf, "\r\n", 2);
+    buf_append(buf, (const char*)body.buf, body_len);
     PyBuffer_Release(&body);
 
     PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());

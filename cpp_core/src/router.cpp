@@ -140,6 +140,10 @@ bool Router::insert_recursive(Node& node, const std::string& path, int index, si
     node.children.push_back(std::move(child));
     int16_t child_idx = (int16_t)(node.children.size() - 1);
     if (fb < 128) {
+        // Track dispatch collisions for match-time optimization
+        if (node.dispatch[fb] >= 0 && node.dispatch[fb] != child_idx) {
+            node.has_dispatch_collision = true;
+        }
         node.dispatch[fb] = child_idx;
     }
     return insert_recursive(node.children.back(), path, index, end);
@@ -185,9 +189,9 @@ bool Router::match_recursive(
     // 1) First-byte dispatch for static child
     unsigned char fb = (unsigned char)path[pos];
     int16_t tried_idx = -1;
-    if (fb < 128) {
+    if (__builtin_expect(!!(fb < 128), 1)) {
         int16_t idx = node.dispatch[fb];
-        if (idx >= 0) {
+        if (__builtin_expect(!!(idx >= 0), 1)) {
             tried_idx = idx;
             const auto& child = node.children[idx];
             size_t plen = child.prefix.size();
@@ -199,15 +203,18 @@ bool Router::match_recursive(
         }
     }
 
-    // 1b) Fallback: scan all static children (handles dispatch collisions)
-    for (int16_t ci = 0; ci < (int16_t)node.children.size(); ci++) {
-        if (ci == tried_idx) continue;
-        const auto& child = node.children[ci];
-        if (child.param_name.empty() && !child.prefix.empty()) {
-            size_t plen = child.prefix.size();
-            if (pos + plen <= len && memcmp(path + pos, child.prefix.c_str(), plen) == 0) {
-                if (match_recursive(child, path, len, pos + plen, result))
-                    return true;
+    // 1b) Fallback: scan all static children — only needed when dispatch has collisions
+    // Most route trees are collision-free, making this scan unreachable.
+    if (__builtin_expect(!!(node.has_dispatch_collision), 0)) {
+        for (int16_t ci = 0; ci < (int16_t)node.children.size(); ci++) {
+            if (ci == tried_idx) continue;
+            const auto& child = node.children[ci];
+            if (child.param_name.empty() && !child.prefix.empty()) {
+                size_t plen = child.prefix.size();
+                if (pos + plen <= len && memcmp(path + pos, child.prefix.c_str(), plen) == 0) {
+                    if (match_recursive(child, path, len, pos + plen, result))
+                        return true;
+                }
             }
         }
     }

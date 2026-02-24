@@ -73,6 +73,7 @@ private:
         int route_index = -1;               // -1 = not a terminal node
         std::string param_name;             // non-empty if this is a {param} segment
         bool is_catch_all = false;          // true for {param:path}
+        bool has_dispatch_collision = false; // true if multiple children share same first byte
 
         Node() { dispatch.fill(-1); }
     };

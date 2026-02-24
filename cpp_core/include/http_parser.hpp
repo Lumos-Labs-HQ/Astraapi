@@ -43,7 +43,7 @@ struct HttpHeader {
     StringView value;
 };
 
-static constexpr int MAX_HEADERS = 64;
+static constexpr int MAX_HEADERS = 32;
 
 struct ParsedHttpRequest {
     StringView method;          // "GET", "POST", etc.
@@ -61,7 +61,21 @@ struct ParsedHttpRequest {
     size_t total_consumed;      // Total bytes consumed from input
 
     // For chunked TE: reassembled body buffer (body.data points into this)
-    std::vector<char> chunked_body;
+    // Lazy: only allocated for chunked requests (99%+ of requests skip this)
+    std::vector<char>* chunked_body_ptr = nullptr;
+
+    void append_chunked(const char* at, size_t length) {
+        if (!chunked_body_ptr) {
+            // Thread-local scratch buffer avoids malloc/free per-request
+            static thread_local std::vector<char> tl_chunked;
+            tl_chunked.clear();
+            tl_chunked.reserve(4096);
+            chunked_body_ptr = &tl_chunked;
+        }
+        size_t old = chunked_body_ptr->size();
+        chunked_body_ptr->resize(old + length);
+        std::memcpy(chunked_body_ptr->data() + old, at, length);
+    }
 
     // Find a header by lowercase name
     // Optimized: length-dispatch + first-byte check eliminates most comparisons
