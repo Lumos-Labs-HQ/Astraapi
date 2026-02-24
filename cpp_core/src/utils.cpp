@@ -34,6 +34,27 @@ std::string percent_decode(const char* s, size_t len) {
     return result;
 }
 
+// Reuse-buffer variant: clears & writes into caller's pre-allocated string
+static inline void percent_decode_into(std::string& out, const char* s, size_t len) {
+    out.clear();
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '%' && i + 2 < len) {
+            int hi = hex_val(s[i + 1]);
+            int lo = hex_val(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back((char)((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        if (s[i] == '+') {
+            out.push_back(' ');
+        } else {
+            out.push_back(s[i]);
+        }
+    }
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // parse_query_string(query: str) → PyDict {key: [values]}
 // ══════════════════════════════════════════════════════════════════════════════
@@ -51,6 +72,11 @@ PyObject* py_parse_query_string(PyObject* self, PyObject* args) {
     const char* p = query;
     const char* end = query + query_len;
 
+    // Pre-allocate scratch buffers — reused across iterations (eliminates 2N allocs)
+    std::string key, val;
+    key.reserve(64);
+    val.reserve(256);
+
     while (p < end) {
         const char* key_start = p;
         const char* eq = nullptr;
@@ -59,12 +85,12 @@ PyObject* py_parse_query_string(PyObject* self, PyObject* args) {
             p++;
         }
 
-        std::string key, val;
         if (eq) {
-            key = percent_decode(key_start, eq - key_start);
-            val = percent_decode(eq + 1, p - eq - 1);
+            percent_decode_into(key, key_start, eq - key_start);
+            percent_decode_into(val, eq + 1, p - eq - 1);
         } else {
-            key = percent_decode(key_start, p - key_start);
+            percent_decode_into(key, key_start, p - key_start);
+            val.clear();
         }
 
         PyRef py_key(PyUnicode_FromStringAndSize(key.c_str(), key.size()));

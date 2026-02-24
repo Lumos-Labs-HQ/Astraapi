@@ -115,7 +115,8 @@ else()
 endif()
 
 # ── Link system libs ────────────────────────────────────────────────────────
-# Try to find brotli; if not found, build without it
+# Try to find libdeflate (2-3x faster single-shot gzip); fall back to zlib
+find_library(LIBDEFLATE deflate)
 find_library(BROTLI_ENC brotlienc)
 find_library(BROTLI_DEC brotlidec)
 
@@ -124,6 +125,14 @@ if(MSVC)
     target_link_libraries(_fastapi_core PRIVATE ZLIB::ZLIB ws2_32)
 else()
     target_link_libraries(_fastapi_core PRIVATE z)
+endif()
+
+if(LIBDEFLATE)
+    target_link_libraries(_fastapi_core PRIVATE ${LIBDEFLATE})
+    target_compile_definitions(_fastapi_core PRIVATE HAS_LIBDEFLATE=1)
+    message(STATUS "libdeflate found — using fast single-shot gzip compression")
+else()
+    message(STATUS "libdeflate not found — using zlib for gzip compression")
 endif()
 
 if(BROTLI_ENC AND BROTLI_DEC)

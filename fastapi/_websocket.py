@@ -7,7 +7,7 @@ Uses C++ ``ws_parse_json`` / ``ws_serialize_json`` when available.
 from __future__ import annotations
 
 import enum
-import json as _json
+from fastapi._json_utils import json_dumps_str as _json_dumps_str, json_loads as _json_loads
 from typing import Any, Optional
 
 from fastapi._request import HTTPConnection
@@ -149,7 +149,7 @@ class WebSocket(HTTPConnection):
             except (ValueError, TypeError):
                 pass
 
-        text = _json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        text = _json_dumps_str(data)
         if mode == "text":
             await self.send({"type": "websocket.send", "text": text})
         else:
@@ -192,12 +192,12 @@ class WebSocket(HTTPConnection):
             text = message.get("text")
             if text is None:
                 raise RuntimeError("Expected text frame, got binary")
-            return _json.loads(text)
+            return _json_loads(text)
         else:
             data = message.get("bytes")
             if data is None:
                 raise RuntimeError("Expected binary frame, got text")
-            return _json.loads(data)
+            return _json_loads(data)
 
     # -- Iteration -----------------------------------------------------------
 

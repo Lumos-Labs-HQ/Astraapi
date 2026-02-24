@@ -1361,6 +1361,8 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "annotated-doc" },
+    { name = "orjson", version = "3.11.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
+    { name = "orjson", version = "3.11.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "pydantic" },
     { name = "typing-extensions" },
     { name = "typing-inspection" },
@@ -1544,6 +1546,7 @@ requires-dist = [
     { name = "jinja2", marker = "extra == 'all'", specifier = ">=3.1.5" },
     { name = "jinja2", marker = "extra == 'standard'", specifier = ">=3.1.5" },
     { name = "jinja2", marker = "extra == 'standard-no-fastapi-cloud-cli'", specifier = ">=3.1.5" },
+    { name = "orjson", specifier = ">=3.11.5" },
     { name = "orjson", marker = "extra == 'all'", specifier = ">=3.9.3" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "pydantic-extra-types", marker = "extra == 'all'", specifier = ">=2.0.0" },

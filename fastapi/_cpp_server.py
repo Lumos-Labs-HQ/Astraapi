@@ -59,6 +59,8 @@ _STATUS_PHRASES: dict[int, str] = {
     502: "Bad Gateway",
     503: "Service Unavailable",
 }
+# Pre-computed bytes version — avoids .encode() per streaming response
+_STATUS_PHRASES_BYTES: dict[int, bytes] = {k: v.encode() for k, v in _STATUS_PHRASES.items()}
 
 # ── Lightweight single-producer single-consumer channel ──────────────────────
 class _WsFastChannel:
@@ -577,8 +579,8 @@ class CppWebSocket:
                 return _NOOP
             self._queue_send(opcode, json_bytes)
         else:
-            import json
-            payload = json.dumps(data).encode("utf-8")
+            from fastapi._json_utils import json_dumps
+            payload = json_dumps(data)
             if self._corked:
                 self._cork_buf.append((opcode, payload))
                 return _NOOP
@@ -635,8 +637,8 @@ class CppWebSocket:
                 result = _ws_parse_json(payload)
                 self._last_received_json = result
                 return result
-            import json
-            result = json.loads(payload)
+            from fastapi._json_utils import json_loads
+            result = json_loads(payload)
             self._last_received_json = result
             return result
         # bytes
@@ -644,8 +646,8 @@ class CppWebSocket:
             result = _ws_parse_json(payload)
             self._last_received_json = result
             return result
-        import json
-        result = json.loads(payload)
+        from fastapi._json_utils import json_loads
+        result = json_loads(payload)
         self._last_received_json = result
         return result
 
@@ -880,28 +882,34 @@ async def _drive_coro(coro: Any, first_yield: Any) -> Any:
     C++ drove the first step via PyIter_Send; this finishes the rest.
     Mimics asyncio Task.__step: on await exception, throws it back into
     the coroutine so user-defined handlers (try/except) work correctly.
+
+    Fast-path: most async endpoints have exactly 1 await (e.g. a DB query).
+    We inline the single-yield case to avoid the loop + extra try/except.
     """
-    next_yield = first_yield
+    # Single-yield fast-path (most common case)
+    result = await first_yield
+    try:
+        next_yield = coro.send(result)
+    except StopIteration as e:
+        return e.value
+    # Multi-yield: fall through to loop
     while True:
+        try:
+            next_yield._asyncio_future_blocking = False
+        except AttributeError:
+            pass
         try:
             result = await next_yield
         except BaseException as exc:
-            # Throw exception into coroutine so its handlers can catch it
             try:
                 next_yield = coro.throw(type(exc), exc, exc.__traceback__)
             except StopIteration as e:
                 return e.value
-            # If coro.throw raises (user didn't handle), let it propagate
         else:
             try:
                 next_yield = coro.send(result)
             except StopIteration as e:
                 return e.value
-        # Reset _asyncio_future_blocking — C++ bypassed Task.__step
-        try:
-            next_yield._asyncio_future_blocking = False
-        except AttributeError:
-            pass
 
 
 class CppHttpProtocol(asyncio.Protocol):
@@ -1351,8 +1359,16 @@ class CppHttpProtocol(asyncio.Protocol):
             raw = await _drive_coro(coro, first_yield)
             transport = self._transport
             if transport and not transport.is_closing():
+                # FAST PATH — dict/list are the most common return types (90%+)
+                raw_type = type(raw)
+                if raw_type is dict or raw_type is list or raw_type is str or raw_type is int or raw_type is float or raw_type is bool or raw is None:
+                    resp = self._core.build_response(raw, status_code, keep_alive)
+                    if resp:
+                        transport.write(resp)
+                    else:
+                        transport.write(_500_RESP)
                 # StreamingResponse — chunked transfer encoding
-                if hasattr(raw, 'body_iterator'):
+                elif hasattr(raw, 'body_iterator'):
                     status = getattr(raw, 'status_code', 200)
                     headers_list = []
                     if hasattr(raw, 'raw_headers'):
@@ -1360,13 +1376,24 @@ class CppHttpProtocol(asyncio.Protocol):
                     elif hasattr(raw, 'headers'):
                         for k, v in raw.headers.items():
                             headers_list.append((k, v))
-                    # Build header block
-                    reason = _STATUS_PHRASES.get(status, "OK")
-                    header_bytes = f"HTTP/1.1 {status} {reason}\r\ntransfer-encoding: chunked\r\n"
+                    # Build header block using bytearray (O(n) vs O(n²) string concat)
+                    reason = _STATUS_PHRASES_BYTES.get(status, b"OK")
+                    buf = bytearray(b"HTTP/1.1 ")
+                    buf.extend(str(status).encode())
+                    buf.extend(b" ")
+                    buf.extend(reason)
+                    buf.extend(b"\r\ntransfer-encoding: chunked\r\n")
                     for name, value in headers_list:
-                        header_bytes += f"{name}: {value}\r\n"
-                    header_bytes += "\r\n"
-                    transport.write(header_bytes.encode())
+                        if isinstance(name, str):
+                            name = name.encode("latin-1")
+                        if isinstance(value, str):
+                            value = value.encode("latin-1")
+                        buf.extend(name)
+                        buf.extend(b": ")
+                        buf.extend(value)
+                        buf.extend(b"\r\n")
+                    buf.extend(b"\r\n")
+                    transport.write(bytes(buf))
                     try:
                         async for chunk in raw.body_iterator:
                             if isinstance(chunk, str):
@@ -1380,7 +1407,7 @@ class CppHttpProtocol(asyncio.Protocol):
                             transport.write(b"0\r\n\r\n")
                         except Exception:
                             logger.debug("Failed to write chunked trailer", exc_info=True)
-                # Handle Starlette Response objects (HTMLResponse, etc.)
+                # Handle Response objects (HTMLResponse, etc.)
                 elif hasattr(raw, "body") and hasattr(raw, "status_code"):
                     self._write_response_obj(raw, keep_alive)
                 else:
@@ -1428,14 +1455,23 @@ class CppHttpProtocol(asyncio.Protocol):
             # Call endpoint
             raw = await endpoint(**kwargs)
             if self._transport and not self._transport.is_closing():
-                # Pydantic models → dict for JSON serialization
-                if hasattr(raw, 'model_dump'):
-                    raw = raw.model_dump(mode='json')
-                resp = self._core.build_response(raw, status_code, keep_alive)
-                if resp:
-                    self._transport.write(resp)
+                # FAST PATH — dict/list are the most common return types
+                raw_type = type(raw)
+                if raw_type is dict or raw_type is list or raw_type is str or raw_type is int or raw_type is float or raw_type is bool or raw is None:
+                    resp = self._core.build_response(raw, status_code, keep_alive)
+                    if resp:
+                        self._transport.write(resp)
+                    else:
+                        self._transport.write(_500_RESP)
                 else:
-                    self._transport.write(_500_RESP)
+                    # Pydantic models → dict for JSON serialization
+                    if hasattr(raw, 'model_dump'):
+                        raw = raw.model_dump(mode='json')
+                    resp = self._core.build_response(raw, status_code, keep_alive)
+                    if resp:
+                        self._transport.write(resp)
+                    else:
+                        self._transport.write(_500_RESP)
             # BackgroundTasks support
             background = getattr(raw, 'background', None)
             if background is not None:
@@ -1576,10 +1612,10 @@ async def _create_server(
     # Cache OpenAPI schema
     if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
         try:
-            import json
+            from fastapi._json_utils import json_dumps_str
             schema = app.openapi()
             if schema:
-                schema_json = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+                schema_json = json_dumps_str(schema)
                 core_app.set_openapi_schema(schema_json)
         except Exception:
             pass
@@ -1755,12 +1791,10 @@ async def run_server(
     if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
         async def _deferred_openapi() -> None:
             try:
-                import json as _json
+                from fastapi._json_utils import json_dumps_str as _json_dumps_str
                 schema = app.openapi()
                 if schema:
-                    schema_json = _json.dumps(
-                        schema, ensure_ascii=False, separators=(",", ":")
-                    )
+                    schema_json = _json_dumps_str(schema)
                     core_app.set_openapi_schema(schema_json)
             except Exception:
                 logger.debug("OpenAPI schema generation failed", exc_info=True)

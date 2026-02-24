@@ -111,8 +111,8 @@ class WsConnectionGroup:
         if _ws_serialize_json is not None:
             json_bytes = _ws_serialize_json(data)
         else:
-            import json
-            json_bytes = json.dumps(data).encode('utf-8')
+            from fastapi._json_utils import json_dumps
+            json_bytes = json_dumps(data)
         return self.broadcast_text(group, json_bytes)
 
     def members(self, group: str) -> int:

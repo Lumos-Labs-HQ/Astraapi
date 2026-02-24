@@ -10,11 +10,14 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 // ── Config structs ──────────────────────────────────────────────────────────
 
 struct CorsConfig {
     std::vector<std::string> allow_origins;
+    std::unordered_set<std::string> allow_origins_set;  // O(1) origin lookup
+    bool allow_any_origin = false;                       // true if "*" in origins
     std::optional<std::string> allow_origin_regex;
     std::vector<std::string> allow_methods;
     std::vector<std::string> allow_headers;
@@ -25,6 +28,8 @@ struct CorsConfig {
 
 struct TrustedHostConfig {
     std::vector<std::string> allowed_hosts;
+    std::unordered_set<std::string> allowed_hosts_set;  // O(1) host lookup
+    bool allow_any_host = false;                         // true if "*" in hosts
 };
 
 // ── Field spec for fast-path parameter extraction ───────────────────────────

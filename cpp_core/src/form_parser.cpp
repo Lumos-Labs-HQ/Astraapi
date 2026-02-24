@@ -6,15 +6,17 @@
 #include <string>
 #include <vector>
 
-// Portable memmem
+// Portable memmem — memchr-accelerated: skip to first-byte matches
 static const void* safe_memmem(const void* haystack, size_t haystacklen,
                                const void* needle, size_t needlelen) {
     if (needlelen == 0) return haystack;
     if (haystacklen < needlelen) return nullptr;
     const char* h = (const char*)haystack;
     const char* n = (const char*)needle;
-    for (size_t i = 0; i <= haystacklen - needlelen; i++) {
-        if (memcmp(h + i, n, needlelen) == 0) return (const void*)(h + i);
+    const char* end = h + haystacklen - needlelen + 1;
+    while ((h = (const char*)memchr(h, n[0], end - h)) != nullptr) {
+        if (memcmp(h, n, needlelen) == 0) return h;
+        h++;
     }
     return nullptr;
 }
@@ -141,8 +143,13 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
             if (colon != std::string::npos) {
                 std::string hname = line.substr(0, colon);
                 std::string hval = line.substr(colon + 1);
-                // Trim leading space
-                while (!hval.empty() && hval[0] == ' ') hval.erase(0, 1);
+                // Trim leading space (single substr instead of repeated erase)
+                size_t start = hval.find_first_not_of(' ');
+                if (start == std::string::npos) {
+                    hval.clear();
+                } else if (start > 0) {
+                    hval = hval.substr(start);
+                }
 
                 // Lowercase header name for comparison
                 std::string hname_lower = hname;

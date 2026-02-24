@@ -83,7 +83,9 @@ void json_writer_init() {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 static inline void buf_append(std::vector<char>& buf, const char* s, size_t len) {
-    buf.insert(buf.end(), s, s + len);
+    size_t old = buf.size();
+    buf.resize(old + len);
+    std::memcpy(buf.data() + old, s, len);
 }
 
 static inline void buf_push(std::vector<char>& buf, char c) {
@@ -105,7 +107,7 @@ static inline void emit_escape(std::vector<char>& buf, unsigned char c) {
         default: {
             char esc[7];
             snprintf(esc, sizeof(esc), "\\u%04x", c);
-            buf.insert(buf.end(), esc, esc + 6);
+            buf_append(buf, esc, 6);
             break;
         }
     }
@@ -167,7 +169,7 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
             int first = __builtin_ctz(mask);
 #endif
             p += first;
-            if (p > safe) buf.insert(buf.end(), safe, p);
+            if (p > safe) buf_append(buf, safe, p - safe);
             emit_escape(buf, (unsigned char)*p);
             safe = ++p;
         }
@@ -178,11 +180,11 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
     while (p < end) {
         unsigned char c = (unsigned char)*p;
         if ((c >= 0x20 && c != '"' && c != '\\') || c >= 0x80) { p++; continue; }
-        if (p > safe) buf.insert(buf.end(), safe, p);
+        if (p > safe) buf_append(buf, safe, p - safe);
         emit_escape(buf, c);
         safe = ++p;
     }
-    if (p > safe) buf.insert(buf.end(), safe, p);
+    if (p > safe) buf_append(buf, safe, p - safe);
     buf.push_back('"');
 }
 

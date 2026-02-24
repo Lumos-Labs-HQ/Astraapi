@@ -7,7 +7,7 @@ Uses C++ ``encode_to_json_bytes`` when available for JSON serialization.
 from __future__ import annotations
 
 import asyncio
-import json as _json
+from fastapi._json_utils import json_dumps as _json_dumps
 import mimetypes
 import os
 import stat
@@ -36,6 +36,8 @@ class MutableHeaders:
 
     This can wrap either a ``scope`` dict (reading/writing its ``headers`` key)
     or an existing raw header list directly.
+
+    Uses an O(1) index dict for fast lookup/set instead of O(n) linear scan.
     """
 
     def __init__(
@@ -49,6 +51,11 @@ class MutableHeaders:
             self._raw = scope.setdefault("headers", [])
         else:
             self._raw = []
+        # Build O(1) index: lowercase header name bytes -> position in _raw
+        self._index: dict[bytes, int] = {}
+        for i, (name, _) in enumerate(self._raw):
+            key = (name if isinstance(name, bytes) else name.encode("latin-1")).lower()
+            self._index[key] = i
 
     @property
     def raw(self) -> list:
@@ -58,11 +65,7 @@ class MutableHeaders:
 
     def _find(self, key: str) -> int:
         key_lower = key.lower().encode("latin-1") if isinstance(key, str) else key.lower()
-        for i, (name, _) in enumerate(self._raw):
-            raw_name = name if isinstance(name, bytes) else name.encode("latin-1")
-            if raw_name.lower() == key_lower:
-                return i
-        return -1
+        return self._index.get(key_lower, -1)
 
     def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
         idx = self._find(key)
@@ -108,13 +111,14 @@ class MutableHeaders:
     def __setitem__(self, key: str, value: str) -> None:
         key_bytes = key.lower().encode("latin-1")
         value_bytes = value.encode("latin-1")
-        # Remove existing entries with the same key
-        self._raw[:] = [
-            (n, v)
-            for n, v in self._raw
-            if (n if isinstance(n, bytes) else n.encode("latin-1")).lower() != key_bytes
-        ]
-        self._raw.append((key_bytes, value_bytes))
+        idx = self._index.get(key_bytes, -1)
+        if idx >= 0:
+            # O(1) in-place replace
+            self._raw[idx] = (key_bytes, value_bytes)
+        else:
+            # Append and index
+            self._index[key_bytes] = len(self._raw)
+            self._raw.append((key_bytes, value_bytes))
 
     def __getitem__(self, key: str) -> str:
         idx = self._find(key)
@@ -125,14 +129,14 @@ class MutableHeaders:
 
     def __delitem__(self, key: str) -> None:
         key_bytes = key.lower().encode("latin-1")
-        new_raw = [
-            (n, v)
-            for n, v in self._raw
-            if (n if isinstance(n, bytes) else n.encode("latin-1")).lower() != key_bytes
-        ]
-        if len(new_raw) == len(self._raw):
+        idx = self._index.pop(key_bytes, -1)
+        if idx == -1:
             raise KeyError(key)
-        self._raw[:] = new_raw
+        del self._raw[idx]
+        # Rebuild index for entries after the deleted one
+        for k, v in self._index.items():
+            if v > idx:
+                self._index[k] = v - 1
 
     def __contains__(self, key: Any) -> bool:
         return self._find(key) != -1
@@ -148,9 +152,9 @@ class MutableHeaders:
 
     def append(self, key: str, value: str) -> None:
         """Append a header value without removing existing entries."""
-        self._raw.append(
-            (key.lower().encode("latin-1"), value.encode("latin-1"))
-        )
+        key_bytes = key.lower().encode("latin-1")
+        self._index[key_bytes] = len(self._raw)
+        self._raw.append((key_bytes, value.encode("latin-1")))
 
     def update(self, other: Union[Mapping[str, str], Sequence[tuple[str, str]]]) -> None:
         if isinstance(other, Mapping):
@@ -224,9 +228,10 @@ class Response:
     def _set_raw_header(self, name: bytes, value: bytes) -> None:
         """Set a raw header, replacing any existing entry with the same name."""
         name_lower = name.lower()
-        self._raw_headers = [
-            (n, v) for n, v in self._raw_headers if n.lower() != name_lower
-        ]
+        for i, (n, _) in enumerate(self._raw_headers):
+            if n.lower() == name_lower:
+                self._raw_headers[i] = (name_lower, value)
+                return
         self._raw_headers.append((name_lower, value))
 
     def render(self, content: Any) -> bytes:
@@ -325,13 +330,7 @@ class JSONResponse(Response):
                 return _core_json_bytes(content)
             except (ValueError, TypeError):
                 pass
-        return _json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,
-            indent=None,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        return _json_dumps(content)
 
 
 # ---------------------------------------------------------------------------

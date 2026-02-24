@@ -136,12 +136,12 @@ def get_flat_dependant(
     dependant: Dependant,
     *,
     skip_repeats: bool = False,
-    visited: Optional[list[DependencyCacheKey]] = None,
+    visited: Optional[set[DependencyCacheKey]] = None,
     parent_oauth_scopes: Optional[list[str]] = None,
 ) -> Dependant:
     if visited is None:
-        visited = []
-    visited.append(dependant.cache_key)
+        visited = set()
+    visited.add(dependant.cache_key)
     use_parent_oauth_scopes = (parent_oauth_scopes or []) + (
         dependant.oauth_scopes or []
     )

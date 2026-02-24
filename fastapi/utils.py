@@ -44,8 +44,11 @@ def is_body_allowed_for_status_code(status_code: Union[int, str, None]) -> bool:
     return not (current_status_code < 200 or current_status_code in {204, 205, 304})
 
 
+_PATH_PARAM_RE = re.compile(r"\{(.*?)\}")
+
+
 def get_path_param_names(path: str) -> set[str]:
-    return set(re.findall("{(.*?)}", path))
+    return set(_PATH_PARAM_RE.findall(path))
 
 
 _invalid_args_message = (
@@ -87,9 +90,12 @@ def create_model_field(
         ) from None
 
 
+_NON_WORD_RE = re.compile(r"\W")
+
+
 def generate_unique_id(route: "APIRoute") -> str:
     operation_id = f"{route.name}{route.path_format}"
-    operation_id = re.sub(r"\W", "_", operation_id)
+    operation_id = _NON_WORD_RE.sub("_", operation_id)
     assert route.methods
     operation_id = f"{operation_id}_{list(route.methods)[0].lower()}"
     return operation_id

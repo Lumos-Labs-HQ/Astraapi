@@ -426,26 +426,38 @@ class TrustedHostMiddleware:
         if allowed_hosts is None or "*" in (allowed_hosts or []):
             self.allowed_hosts: list[str] = ["*"]
             self.allow_any = True
+            self._exact_hosts: set[str] = set()
+            self._wildcard_suffixes: list[str] = []
+            self._wildcard_bare_domains: set[str] = set()
         else:
             self.allowed_hosts = [h.lower() for h in allowed_hosts]
             self.allow_any = False
+            # Pre-build O(1) lookup structures
+            self._exact_hosts = set()
+            self._wildcard_suffixes = []
+            self._wildcard_bare_domains = set()
+            for h in self.allowed_hosts:
+                if h.startswith("*."):
+                    self._wildcard_suffixes.append(h[1:])  # ".example.com"
+                    self._wildcard_bare_domains.add(h[2:])  # "example.com"
+                else:
+                    self._exact_hosts.add(h)
 
     def _is_host_allowed(self, host: str) -> bool:
         if self.allow_any:
             return True
         # Strip port if present
         host_without_port = host.split(":")[0].lower()
-        for pattern in self.allowed_hosts:
-            if pattern == host_without_port:
+        # O(1) exact match
+        if host_without_port in self._exact_hosts:
+            return True
+        # O(1) bare domain check for wildcard entries
+        if host_without_port in self._wildcard_bare_domains:
+            return True
+        # O(w) wildcard suffix check (w is typically 0-2)
+        for suffix in self._wildcard_suffixes:
+            if host_without_port.endswith(suffix):
                 return True
-            # Wildcard subdomain: *.example.com
-            if pattern.startswith("*."):
-                suffix = pattern[1:]  # .example.com
-                if host_without_port.endswith(suffix):
-                    return True
-                # Also allow the bare domain (e.g., example.com for *.example.com)
-                if host_without_port == pattern[2:]:
-                    return True
         return False
 
 

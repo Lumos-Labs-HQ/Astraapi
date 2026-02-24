@@ -1199,6 +1199,13 @@ static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyO
     };
 
     config->allow_origins = list_to_vec(origins);
+    // Build O(1) lookup set and wildcard flag from allow_origins
+    for (const auto& o : config->allow_origins) {
+        if (o == "*") {
+            config->allow_any_origin = true;
+        }
+        config->allow_origins_set.insert(o);
+    }
     config->allow_origin_regex = origin_regex ? std::optional<std::string>(origin_regex) : std::nullopt;
     config->allow_methods = list_to_vec(methods);
     config->allow_headers = list_to_vec(headers);
@@ -1222,7 +1229,13 @@ static PyObject* CoreApp_configure_trusted_hosts(CoreAppObject* self, PyObject* 
     Py_ssize_t n = PyList_GET_SIZE(arg);
     for (Py_ssize_t i = 0; i < n; i++) {
         const char* h = PyUnicode_AsUTF8(PyList_GET_ITEM(arg, i));
-        if (h) config->allowed_hosts.emplace_back(h);
+        if (h) {
+            config->allowed_hosts.emplace_back(h);
+            if (std::string_view(h) == "*") {
+                config->allow_any_host = true;
+            }
+            config->allowed_hosts_set.emplace(h);
+        }
     }
     self->trusted_host_config.store(config);
     Py_RETURN_NONE;
@@ -1234,10 +1247,9 @@ static PyObject* CoreApp_check_trusted_host(CoreAppObject* self, PyObject* arg) 
 
     auto config = self->trusted_host_config.load();
     if (!config) Py_RETURN_TRUE;
+    if (config->allow_any_host) Py_RETURN_TRUE;
 
-    for (const auto& h : config->allowed_hosts) {
-        if (h == "*" || h == host) Py_RETURN_TRUE;
-    }
+    if (config->allowed_hosts_set.count(std::string(host)) > 0) Py_RETURN_TRUE;
     Py_RETURN_FALSE;
 }
 
@@ -1385,11 +1397,8 @@ void init_status_line_cache() {
 // Check if origin is allowed by CORS config. Returns true if allowed.
 static bool cors_origin_allowed(const CorsConfig* cors, const char* origin, size_t origin_len) {
     if (!cors || !origin || origin_len == 0) return false;
-    std::string_view origin_sv(origin, origin_len);
-    for (const auto& o : cors->allow_origins) {
-        if (o == "*" || std::string_view(o) == origin_sv) return true;
-    }
-    return false;
+    if (cors->allow_any_origin) return true;
+    return cors->allow_origins_set.count(std::string(origin, origin_len)) > 0;
 }
 
 // Check for CRLF injection in origin strings
@@ -1533,16 +1542,14 @@ static PyObject* build_cors_preflight_response(
 
 static bool check_trusted_host_inline(const TrustedHostConfig* th, const char* host, size_t host_len) {
     if (!th) return true;  // No config = allow all
+    if (th->allow_any_host) return true;
     std::string_view host_sv(host, host_len);
     // Strip port if present
     auto colon = host_sv.find(':');
     if (colon != std::string_view::npos) {
         host_sv = host_sv.substr(0, colon);
     }
-    for (const auto& h : th->allowed_hosts) {
-        if (h == "*" || std::string_view(h) == host_sv) return true;
-    }
-    return false;
+    return th->allowed_hosts_set.count(std::string(host_sv)) > 0;
 }
 
 // ── Inline compression (no Python overhead — raw zlib/brotli) ────────────────
@@ -2206,29 +2213,46 @@ static PyObject* CoreApp_handle_http(
     auto match = self->router.at(req.path.data, req.path.len);
     if (!match) {
         // ── Trailing slash redirect: try with/without '/' ───────────
-        std::string alt_path(req.path.data, req.path.len);
-        if (!alt_path.empty() && alt_path.back() == '/') {
-            alt_path.pop_back();  // try without trailing slash
-        } else {
-            alt_path.push_back('/');  // try with trailing slash
+        // Use stack buffer to avoid heap allocation for path probe
+        char alt_buf[512];
+        size_t alt_len = req.path.len;
+        bool do_redirect_check = (alt_len > 0 && alt_len < sizeof(alt_buf) - 1);
+        if (do_redirect_check) {
+            std::memcpy(alt_buf, req.path.data, alt_len);
+            if (alt_buf[alt_len - 1] == '/') {
+                alt_len--;  // try without trailing slash
+            } else {
+                alt_buf[alt_len++] = '/';  // try with trailing slash
+            }
+            alt_buf[alt_len] = '\0';
         }
-        auto alt_match = self->router.at(alt_path.c_str(), alt_path.size());
+        auto alt_match = do_redirect_check ? self->router.at(alt_buf, alt_len) : std::nullopt;
         if (alt_match) {
             if (!rt_frozen) lock.unlock();
             self->active_requests.fetch_sub(1, std::memory_order_release);
-            // Build 307 redirect response
+            // Build 307 redirect response using resize+memcpy
             auto buf = acquire_buffer();
             buf.reserve(256);
             static const char redir[] = "HTTP/1.1 307 Temporary Redirect\r\nlocation: ";
-            buf.insert(buf.end(), redir, redir + sizeof(redir) - 1);
-            buf.insert(buf.end(), alt_path.begin(), alt_path.end());
+            constexpr size_t redir_sz = sizeof(redir) - 1;
+            size_t old = buf.size();
+            buf.resize(old + redir_sz);
+            std::memcpy(buf.data() + old, redir, redir_sz);
+            old = buf.size();
+            buf.resize(old + alt_len);
+            std::memcpy(buf.data() + old, alt_buf, alt_len);
             // Add query string if present
             if (!req.query_string.empty()) {
                 buf.push_back('?');
-                buf.insert(buf.end(), req.query_string.data, req.query_string.data + req.query_string.len);
+                old = buf.size();
+                buf.resize(old + req.query_string.len);
+                std::memcpy(buf.data() + old, req.query_string.data, req.query_string.len);
             }
             static const char redir_end[] = "\r\ncontent-length: 0\r\nconnection: keep-alive\r\n\r\n";
-            buf.insert(buf.end(), redir_end, redir_end + sizeof(redir_end) - 1);
+            constexpr size_t redir_end_sz = sizeof(redir_end) - 1;
+            old = buf.size();
+            buf.resize(old + redir_end_sz);
+            std::memcpy(buf.data() + old, redir_end, redir_end_sz);
             PyRef resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
             release_buffer(std::move(buf));
             if (resp) write_to_transport(transport, resp.get());

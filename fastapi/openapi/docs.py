@@ -1,6 +1,7 @@
 import html as html_mod
-import json
 from typing import Annotated, Any, Optional
+
+from fastapi._json_utils import json_dumps_str as _json_dumps_str
 
 from annotated_doc import Doc
 from fastapi.encoders import jsonable_encoder
@@ -160,7 +161,7 @@ def get_swagger_ui_html(
     """
 
     for key, value in current_swagger_ui_parameters.items():
-        html += f"{json.dumps(key)}: {json.dumps(jsonable_encoder(value))},\n"
+        html += f"{_json_dumps_str(key)}: {_json_dumps_str(jsonable_encoder(value))},\n"
 
     if oauth2_redirect_url:
         html += f"oauth2RedirectUrl: window.location.origin + '{oauth2_redirect_url}',"
@@ -174,7 +175,7 @@ def get_swagger_ui_html(
 
     if init_oauth:
         html += f"""
-        ui.initOAuth({json.dumps(jsonable_encoder(init_oauth))})
+        ui.initOAuth({_json_dumps_str(jsonable_encoder(init_oauth))})
         """
 
     html += """

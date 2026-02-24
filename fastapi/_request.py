@@ -6,7 +6,7 @@ dependency injection, with zero starlette imports.
 """
 from __future__ import annotations
 
-import json as _json
+from fastapi._json_utils import json_loads as _json_loads
 from http.cookies import SimpleCookie
 from typing import Any, Optional
 from urllib.parse import unquote, urlencode, urlparse
@@ -569,7 +569,7 @@ class Request(HTTPConnection):
         """Parse request body as JSON."""
         if not self._json_loaded:
             body = await self.body()
-            self._json = _json.loads(body)
+            self._json = _json_loads(body)
             self._json_loaded = True
         return self._json
 

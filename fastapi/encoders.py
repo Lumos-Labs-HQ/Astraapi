@@ -257,7 +257,7 @@ def jsonable_encoder(
         )
     if dataclasses.is_dataclass(obj):
         assert not isinstance(obj, type)
-        obj_dict = dataclasses.asdict(obj)
+        obj_dict = {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)}
         return jsonable_encoder(
             obj_dict,
             include=include,
