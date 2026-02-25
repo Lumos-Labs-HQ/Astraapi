@@ -861,7 +861,7 @@ class _ProtocolPool:
     """Fixed-size pool of CppHttpProtocol objects for reuse."""
     __slots__ = ("_pool", "_max_size")
 
-    def __init__(self, max_size: int = 10000):
+    def __init__(self, max_size: int = 32768):
         self._pool: list = []
         self._max_size = max_size
 
@@ -891,7 +891,7 @@ _protocol_pool = _ProtocolPool()
 # OS-level fd limits are the real constraint. Set FASTAPI_MAX_CONNECTIONS to enforce.
 _MAX_CONNECTIONS = int(os.environ.get("FASTAPI_MAX_CONNECTIONS", "0"))  # 0 = unlimited
 # At 80% capacity (if limit set), force Connection: close to cycle connections
-_PRESSURE_THRESHOLD = _MAX_CONNECTIONS * 4 // 5 if _MAX_CONNECTIONS > 0 else 0
+_PRESSURE_THRESHOLD = _MAX_CONNECTIONS * 4 // 5 if _MAX_CONNECTIONS > 0 else 16384
 
 
 class _RejectProtocol(asyncio.Protocol):
@@ -1622,7 +1622,7 @@ class CppHttpProtocol(asyncio.Protocol):
 
 async def _create_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
-    keep_alive_timeout: float = 75.0,
+    keep_alive_timeout: float = 30.0,
 ) -> asyncio.AbstractServer:
     """Create and return a C++ HTTP server without blocking.
 
@@ -1719,7 +1719,7 @@ async def _create_server(
 
 async def run_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
-    keep_alive_timeout: float = 75.0,
+    keep_alive_timeout: float = 30.0,
 ) -> None:
     """Start the C++ HTTP server with optimal event loop configuration."""
     try:
@@ -1738,6 +1738,8 @@ async def run_server(
             "sysctl -w net.core.somaxconn=65535",
             "sysctl -w net.ipv4.tcp_max_syn_backlog=65535",
             "sysctl -w net.core.netdev_max_backlog=65535",
+            "sysctl -w net.ipv4.tcp_tw_reuse=1",
+            "sysctl -w net.ipv4.tcp_fin_timeout=10",
         ):
             subprocess.run(_cmd.split(), capture_output=True, timeout=2)
     except Exception:
@@ -1901,6 +1903,12 @@ async def run_server(
             s.setsockopt(socket.IPPROTO_TCP, 23, 5)  # TCP_FASTOPEN = 23
         except (OSError, AttributeError):
             pass
+        # TCP_DEFER_ACCEPT: kernel holds connection until first data arrives
+        # Reduces event loop wakeups for half-open connections
+        try:
+            s.setsockopt(socket.IPPROTO_TCP, 9, 5)  # TCP_DEFER_ACCEPT = 9
+        except (OSError, AttributeError):
+            pass
 
     print(f"C++ HTTP server running on http://{host}:{port}")
     print("Press Ctrl+C to stop")
@@ -1941,11 +1949,11 @@ async def run_server(
         signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(_signal_handler))
         signal.signal(signal.SIGTERM, lambda *_: loop.call_soon_threadsafe(_signal_handler))
 
-    # Batch keep-alive sweep — one task checks all connections every 15s
+    # Batch keep-alive sweep — one task checks all connections every 5s
     # instead of per-connection call_later() timers (eliminates ~1K+ callbacks/sec)
     async def _ka_sweep() -> None:
         while not stop_event.is_set():
-            await asyncio.sleep(15.0)
+            await asyncio.sleep(5.0)
             now = time.monotonic()
             batch: list = []
             for p in active_connections:
