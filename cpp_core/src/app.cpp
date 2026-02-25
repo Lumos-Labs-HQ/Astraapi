@@ -421,9 +421,9 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
         new (&self->trusted_host_config) std::atomic<std::shared_ptr<TrustedHostConfig>>();
         new (&self->exception_handlers) std::unordered_map<uint16_t, PyObject*>();
         self->route_counter.store(0);
-        self->counters.total_requests.store(0);
-        self->counters.active_requests.store(0);
-        self->counters.total_errors.store(0);
+        self->counters.total_requests = 0;
+        self->counters.active_requests = 0;
+        self->counters.total_errors = 0;
         self->openapi_json_resp = nullptr;
         self->docs_html_resp = nullptr;
         self->redoc_html_resp = nullptr;
@@ -624,18 +624,18 @@ static PyObject* CoreApp_next_route_id(CoreAppObject* self, PyObject*) {
 }
 
 static PyObject* CoreApp_record_request_start(CoreAppObject* self, PyObject*) {
-    self->counters.total_requests.fetch_add(1, std::memory_order_relaxed);
-    self->counters.active_requests.fetch_add(1, std::memory_order_relaxed);
+    ++self->counters.total_requests;
+    ++self->counters.active_requests;
     Py_RETURN_NONE;
 }
 
 static PyObject* CoreApp_record_request_end(CoreAppObject* self, PyObject*) {
-    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+    --self->counters.active_requests;
     Py_RETURN_NONE;
 }
 
 static PyObject* CoreApp_record_error(CoreAppObject* self, PyObject*) {
-    self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
+    ++self->counters.total_errors;
     Py_RETURN_NONE;
 }
 
@@ -652,9 +652,9 @@ static PyObject* CoreApp_freeze_routes(CoreAppObject* self, PyObject*) {
 static PyObject* CoreApp_get_metrics(CoreAppObject* self, PyObject*) {
     PyRef dict(PyDict_New());
     if (!dict) return nullptr;
-    PyRef tr(PyLong_FromUnsignedLongLong(self->counters.total_requests.load(std::memory_order_relaxed)));
-    PyRef ar(PyLong_FromLongLong(self->counters.active_requests.load(std::memory_order_acquire)));
-    PyRef te(PyLong_FromUnsignedLongLong(self->counters.total_errors.load(std::memory_order_relaxed)));
+    PyRef tr(PyLong_FromUnsignedLongLong(self->counters.total_requests));
+    PyRef ar(PyLong_FromLongLong(self->counters.active_requests));
+    PyRef te(PyLong_FromUnsignedLongLong(self->counters.total_errors));
     std::shared_lock lock(self->routes_mutex);
     PyRef rc(PyLong_FromSsize_t((Py_ssize_t)self->routes.size()));
     lock.unlock();
@@ -986,19 +986,14 @@ static inline PyObject* build_500_tuple() {
 // HELPER: Fast (consumed, True) tuple — avoids PyTuple_Pack varargs overhead
 // ═══════════════════════════════════════════════════════════════════════════════
 
-static inline PyObject* make_consumed_true(size_t consumed) {
-    PyObject* c = PyLong_FromLongLong((long long)consumed);
-    if (!c) return nullptr;
-    PyObject* t = PyTuple_New(2);
-    if (!t) { Py_DECREF(c); return nullptr; }
-    PyTuple_SET_ITEM(t, 0, c);
-    Py_INCREF(Py_True);
-    PyTuple_SET_ITEM(t, 1, Py_True);
-    return t;
+static inline PyObject* make_consumed_true(CoreAppObject* self, size_t consumed) {
+    self->last_consumed = (Py_ssize_t)consumed;
+    Py_RETURN_TRUE;
 }
 
-// HELPER: Fast (consumed, obj) tuple — obj ref is stolen
-static inline PyObject* make_consumed_obj(size_t consumed, PyObject* obj) {
+// HELPER: Fast (consumed, obj) tuple — obj ref is stolen. Also sets last_consumed for Python.
+static inline PyObject* make_consumed_obj(CoreAppObject* self, size_t consumed, PyObject* obj) {
+    self->last_consumed = (Py_ssize_t)consumed;
     PyObject* c = PyLong_FromLongLong((long long)consumed);
     if (!c) { Py_DECREF(obj); return nullptr; }
     PyObject* t = PyTuple_New(2);
@@ -1283,7 +1278,8 @@ static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyO
     config->max_age = max_age;
 
     self->cors_config.store(config);
-    self->cors_enabled = true;  // Cache for hot-path: skip atomic shared_ptr load
+    self->cors_enabled = true;
+    self->cors_ptr_cached = config.get();  // Raw pointer for hot-path — no atomic load
 
     Py_RETURN_NONE;
 }
@@ -1308,6 +1304,8 @@ static PyObject* CoreApp_configure_trusted_hosts(CoreAppObject* self, PyObject* 
         }
     }
     self->trusted_host_config.store(config);
+    self->trusted_host_enabled = !config->allow_any_host;
+    self->th_ptr_cached = config.get();
     Py_RETURN_NONE;
 }
 
@@ -1842,6 +1840,96 @@ static int write_to_transport(PyObject* transport, PyObject* data) {
     return 0;
 }
 
+// ── Direct socket write — bypasses Python transport for small HTTP responses ──
+// Only on Linux/macOS (asyncio uses epoll/kqueue with non-blocking sockets).
+// Falls back to transport.write() for large responses or on partial/failed write.
+// Matches existing WebSocket direct-fd pattern (ws_ring_buffer.cpp).
+static int write_response_direct(int fd, PyObject* transport, PyObject* data) {
+#ifndef _WIN32
+    if (fd >= 0 && PyBytes_Check(data)) {
+        Py_ssize_t len = PyBytes_GET_SIZE(data);
+        if (len > 0 && len <= 4096) {
+            ssize_t sent = platform_socket_write(fd, PyBytes_AS_STRING(data), (size_t)len);
+            if (sent == len) return 0;  // Full write — bypassed Python entirely
+            if (sent > 0) {
+                // Partial write: send remainder through Python transport
+                PyRef remainder(PyBytes_FromStringAndSize(
+                    PyBytes_AS_STRING(data) + sent, len - sent));
+                if (remainder) return write_to_transport(transport, remainder.get());
+                return -1;
+            }
+            // sent <= 0: EAGAIN or error — fall through to transport.write()
+        }
+    }
+#endif
+    return write_to_transport(transport, data);
+}
+
+// ── Build + write HTTP response — eliminates per-response PyBytes allocation ─
+// For the ultra-fast path (no CORS, no compression, cached prefix): builds
+// response directly in a pooled buffer and writes to socket fd, bypassing
+// PyBytes entirely. Falls back to build_http_response_bytes for other cases.
+static int build_and_write_http_response(
+    int sock_fd, PyObject* transport,
+    int status_code, const char* body_data, size_t body_len, bool keep_alive,
+    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
+    const char* content_encoding = nullptr)
+{
+    // Ultra-fast path: cached JSON prefix, no CORS, no compression
+    if (__builtin_expect(!!(!cors && !content_encoding &&
+        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data), 1)) {
+        auto buf = acquire_buffer();
+        buf.reserve(256 + body_len);
+        const auto& jp = s_json_prefixes[status_code];
+        char cl_buf[20];
+        int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
+        static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
+        static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
+        const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
+        size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
+        size_t total = jp.len + cl_len + suffix_len + body_len;
+        buf.resize(total);
+        char* dst = buf.data();
+        memcpy(dst, jp.data, jp.len); dst += jp.len;
+        memcpy(dst, cl_buf, cl_len); dst += cl_len;
+        memcpy(dst, suffix, suffix_len); dst += suffix_len;
+        memcpy(dst, body_data, body_len);
+
+        // Direct write from buffer — skip PyBytes entirely
+#ifndef _WIN32
+        if (sock_fd >= 0) {
+            ssize_t sent = platform_socket_write(sock_fd, buf.data(), buf.size());
+            if (sent == (ssize_t)buf.size()) {
+                release_buffer(std::move(buf));
+                return 0;  // Zero Python allocations!
+            }
+            if (sent > 0) {
+                PyRef rem(PyBytes_FromStringAndSize(buf.data() + sent, buf.size() - sent));
+                release_buffer(std::move(buf));
+                if (rem) return write_to_transport(transport, rem.get());
+                return -1;
+            }
+            // sent <= 0: EAGAIN or error — fall through to transport
+        }
+#endif
+        // Fallback: create PyBytes from buffer
+        PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+        release_buffer(std::move(buf));
+        if (!result) return -1;
+        int rc = write_to_transport(transport, result);
+        Py_DECREF(result);
+        return rc;
+    }
+
+    // Slow path: CORS, compression, or uncached status — use existing builder
+    PyObject* resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive,
+                                                cors, origin, origin_len, content_encoding);
+    if (!resp) return -1;
+    int rc = write_response_direct(sock_fd, transport, resp);
+    Py_DECREF(resp);
+    return rc;
+}
+
 // ── HttpConnectionBuffer — replaces Python bytearray + memmove ──────────────
 // Linear buffer with read/write offsets. Compact only when read_pos > 50% capacity.
 // Eliminates: Python memoryview creation, slice ops, O(N) memmove per request.
@@ -1906,8 +1994,8 @@ public:
     void clear() {
         read_pos_ = 0;
         write_pos_ = 0;
-        // Shrink if capacity grew beyond 4x initial to reclaim memory
-        if (capacity_ > INITIAL_CAPACITY * 4) {
+        // Shrink if capacity grew beyond initial — reclaim memory on pool return
+        if (capacity_ > INITIAL_CAPACITY) {
             uint8_t* nb = static_cast<uint8_t*>(realloc(buf_, INITIAL_CAPACITY));
             if (nb) {
                 buf_ = nb;
@@ -2043,8 +2131,8 @@ static inline void fire_post_response_hook(
 static PyObject* CoreApp_handle_http(
     CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
 {
-    if (nargs < 2 || nargs > 3) {
-        PyErr_SetString(PyExc_TypeError, "handle_http requires 2-3 args (buffer, transport[, offset])");
+    if (nargs < 2 || nargs > 4) {
+        PyErr_SetString(PyExc_TypeError, "handle_http requires 2-4 args (buffer, transport[, offset[, sock_fd]])");
         return nullptr;
     }
 
@@ -2052,9 +2140,15 @@ static PyObject* CoreApp_handle_http(
     PyObject* transport = args[1];
     // OPT-7: Optional offset parameter eliminates memoryview slicing in Python loop
     Py_ssize_t offset = 0;
-    if (nargs == 3) {
+    if (nargs >= 3) {
         offset = PyLong_AsSsize_t(args[2]);
         if (offset < 0 && PyErr_Occurred()) return nullptr;
+    }
+    // OPT-DIRECT: Optional socket fd for direct write (bypasses Python transport)
+    int sock_fd = -1;
+    if (nargs >= 4) {
+        sock_fd = (int)PyLong_AsLong(args[3]);
+        if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
     }
 
     // Accept any buffer protocol object (bytes, bytearray, memoryview)
@@ -2078,27 +2172,19 @@ static PyObject* CoreApp_handle_http(
     int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
 
     if (parse_result == 0) {
-        // Need more data — return cached (0, None) tuple
-        if (s_need_more_data) {
-            Py_INCREF(s_need_more_data);
-            return s_need_more_data;
-        }
-        PyRef zero(PyLong_FromLong(0));
-        Py_INCREF(Py_None);
-        return PyTuple_Pack(2, zero.get(), Py_None);
+        // Need more data — return None (zero allocations)
+        Py_RETURN_NONE;
     }
 
     if (parse_result < 0) {
-        // Parse error — send 400
+        // Parse error — send 400, return False (zero allocations)
         PyRef err_resp(build_http_error_response(400, "Bad Request", false));
-        if (err_resp) write_to_transport(transport, err_resp.get());
-        PyRef neg(PyLong_FromLong(-1));
-        Py_INCREF(Py_None);
-        return PyTuple_Pack(2, neg.get(), Py_None);
+        if (err_resp) write_response_direct(sock_fd, transport, err_resp.get());
+        Py_RETURN_FALSE;
     }
 
-    self->counters.total_requests.fetch_add(1, std::memory_order_relaxed);
-    self->counters.active_requests.fetch_add(1, std::memory_order_relaxed);
+    ++self->counters.total_requests;
+    ++self->counters.active_requests;
 
     // Capture start time only if post-response hook is configured (skip ~25ns rdtsc otherwise)
     auto request_start_time = self->post_response_hook
@@ -2146,27 +2232,25 @@ static PyObject* CoreApp_handle_http(
     }
 
     // ── Trusted host check ──────────────────────────────────────────────
-    auto th_config = self->trusted_host_config.load();
-    if (th_config && !host_sv.empty()) {
-        if (!check_trusted_host_inline(th_config.get(), host_sv.data, host_sv.len)) {
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+    if (self->trusted_host_enabled && !host_sv.empty()) {
+        if (!check_trusted_host_inline(self->th_ptr_cached, host_sv.data, host_sv.len)) {
+            --self->counters.active_requests;
             PyRef resp(build_http_error_response(400, "Invalid host header", req.keep_alive));
-            if (resp) write_to_transport(transport, resp.get());
-            return make_consumed_true(req.total_consumed);
+            if (resp) write_response_direct(sock_fd, transport, resp.get());
+            return make_consumed_true(self, req.total_consumed);
         }
     }
 
     // ── CORS preflight (OPTIONS with Origin) ────────────────────────────
-    auto cors = self->cors_config.load();
-    const CorsConfig* cors_ptr = cors.get();
+    const CorsConfig* cors_ptr = self->cors_enabled ? self->cors_ptr_cached : nullptr;
     bool has_cors = cors_ptr && !origin_sv.empty() && cors_origin_allowed(cors_ptr, origin_sv.data, origin_sv.len);
 
     if (__builtin_expect(!!(has_cors && req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0), 0)) {
         // Full CORS preflight response — entirely in C++, no route needed
-        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+        --self->counters.active_requests;
         PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive));
-        if (resp) write_to_transport(transport, resp.get());
-        return make_consumed_true(req.total_consumed);
+        if (resp) write_response_direct(sock_fd, transport, resp.get());
+        return make_consumed_true(self, req.total_consumed);
     }
 
     // ── Serve /openapi.json, /docs, /redoc (pre-built responses) ──────
@@ -2176,23 +2260,23 @@ static PyObject* CoreApp_handle_http(
         if (second == 'o' && self->openapi_json_resp) {
             std::string_view path_sv(req.path.data, req.path.len);
             if (path_sv == self->openapi_url) {
-                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                write_to_transport(transport, self->openapi_json_resp);
-                return make_consumed_true(req.total_consumed);
+                --self->counters.active_requests;
+                write_response_direct(sock_fd, transport, self->openapi_json_resp);
+                return make_consumed_true(self, req.total_consumed);
             }
         } else if (second == 'd' && self->docs_html_resp) {
             std::string_view path_sv(req.path.data, req.path.len);
             if (path_sv == self->docs_url) {
-                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                write_to_transport(transport, self->docs_html_resp);
-                return make_consumed_true(req.total_consumed);
+                --self->counters.active_requests;
+                write_response_direct(sock_fd, transport, self->docs_html_resp);
+                return make_consumed_true(self, req.total_consumed);
             }
         } else if (second == 'r' && self->redoc_html_resp) {
             std::string_view path_sv(req.path.data, req.path.len);
             if (path_sv == self->redoc_url) {
-                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                write_to_transport(transport, self->redoc_html_resp);
-                return make_consumed_true(req.total_consumed);
+                --self->counters.active_requests;
+                write_response_direct(sock_fd, transport, self->redoc_html_resp);
+                return make_consumed_true(self, req.total_consumed);
             }
         }
     }
@@ -2212,7 +2296,7 @@ static PyObject* CoreApp_handle_http(
             // Build and send 101 Switching Protocols
             auto upgrade_resp = ws_build_upgrade_response(ws_key.data, ws_key.len);
             PyRef resp_bytes(PyBytes_FromStringAndSize(upgrade_resp.data(), (Py_ssize_t)upgrade_resp.size()));
-            if (resp_bytes) write_to_transport(transport, resp_bytes.get());
+            if (resp_bytes) write_response_direct(sock_fd, transport, resp_bytes.get());
 
             // Find the WebSocket route endpoint
             std::shared_lock ws_lock(self->routes_mutex);
@@ -2227,7 +2311,7 @@ static PyObject* CoreApp_handle_http(
             }
             ws_lock.unlock();
 
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+            --self->counters.active_requests;
             PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
 
             if (ws_endpoint) {
@@ -2314,7 +2398,7 @@ static PyObject* CoreApp_handle_http(
         auto alt_match = do_redirect_check ? self->router.at(alt_buf, alt_len) : std::nullopt;
         if (alt_match) {
             if (!rt_frozen) lock.unlock();
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+            --self->counters.active_requests;
             // Build 307 redirect response using resize+memcpy
             auto buf = acquire_buffer();
             buf.reserve(256);
@@ -2340,30 +2424,30 @@ static PyObject* CoreApp_handle_http(
             std::memcpy(buf.data() + old, redir_end, redir_end_sz);
             PyRef resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
             release_buffer(std::move(buf));
-            if (resp) write_to_transport(transport, resp.get());
-            return make_consumed_true(req.total_consumed);
+            if (resp) write_response_direct(sock_fd, transport, resp.get());
+            return make_consumed_true(self, req.total_consumed);
         }
 
         if (!rt_frozen) lock.unlock();
-        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+        --self->counters.active_requests;
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-        if (resp) write_to_transport(transport, resp.get());
+        if (resp) write_response_direct(sock_fd, transport, resp.get());
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, 404, request_start_time);
-        return make_consumed_true(req.total_consumed);
+        return make_consumed_true(self, req.total_consumed);
     }
 
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
         if (!rt_frozen) lock.unlock();
-        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+        --self->counters.active_requests;
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-        if (resp) write_to_transport(transport, resp.get());
+        if (resp) write_response_direct(sock_fd, transport, resp.get());
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, 404, request_start_time);
-        return make_consumed_true(req.total_consumed);
+        return make_consumed_true(self, req.total_consumed);
     }
 
     const auto& route = self->routes[idx];
@@ -2373,13 +2457,13 @@ static PyObject* CoreApp_handle_http(
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (!(route.method_mask & req_method)) {
             if (!rt_frozen) lock.unlock();
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+            --self->counters.active_requests;
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-            if (resp) write_to_transport(transport, resp.get());
+            if (resp) write_response_direct(sock_fd, transport, resp.get());
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, 405, request_start_time);
-            return make_consumed_true(req.total_consumed);
+            return make_consumed_true(self, req.total_consumed);
         }
     }
 
@@ -2400,11 +2484,11 @@ static PyObject* CoreApp_handle_http(
         if (entry.count > self->rate_limit_max_requests) {
             // Unlock route lock before writing response
             if (!rt_frozen) lock.unlock();
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+            --self->counters.active_requests;
             PyRef resp(build_http_error_response(429, "Rate limit exceeded", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-            if (resp) write_to_transport(transport, resp.get());
-            return make_consumed_true(req.total_consumed);
+            if (resp) write_response_direct(sock_fd, transport, resp.get());
+            return make_consumed_true(self, req.total_consumed);
         }
         // Periodic cleanup: sweep stale entries every 10K requests
         static thread_local uint32_t rl_cleanup_counter = 0;
@@ -2421,11 +2505,11 @@ static PyObject* CoreApp_handle_http(
 
     if (!route.fast_spec) {
         if (!rt_frozen) lock.unlock();
-        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+        --self->counters.active_requests;
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-        if (resp) write_to_transport(transport, resp.get());
-        return make_consumed_true(req.total_consumed);
+        if (resp) write_response_direct(sock_fd, transport, resp.get());
+        return make_consumed_true(self, req.total_consumed);
     }
 
     // Copy route data to locals and release lock early.
@@ -2806,7 +2890,7 @@ static PyObject* CoreApp_handle_http(
                                  dep_raw, endpoint_local, kwargs.release(),
                                  get_cached_status(status_code_local), ka));
                     Py_XDECREF(dep_raw);
-                    return make_consumed_obj(req.total_consumed, di_info.release());
+                    return make_consumed_obj(self, req.total_consumed, di_info.release());
                 } else {
                     // Async dep_solver raised immediately (e.g., HTTPException from auth check)
                     if (PyErr_Occurred()) {
@@ -2825,21 +2909,21 @@ static PyObject* CoreApp_handle_http(
                             Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
                             PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error",
                                        req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                            if (resp) write_to_transport(transport, resp.get());
+                            if (resp) write_response_direct(sock_fd, transport, resp.get());
                         } else {
                             Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
                             PyRef resp(build_http_error_response(500, "Internal Server Error",
                                        req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                            if (resp) write_to_transport(transport, resp.get());
+                            if (resp) write_response_direct(sock_fd, transport, resp.get());
                         }
                         fire_post_response_hook(self, req.method.data, req.method.len,
                                                 req.path.data, req.path.len, hook_status, request_start_time);
                     }
-                    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                    --self->counters.active_requests;
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     Py_DECREF(endpoint_local);
                     Py_XDECREF(body_params_local);
-                    return make_consumed_true(req.total_consumed);
+                    return make_consumed_true(self, req.total_consumed);
                 }
             } else if (PyTuple_Check(dep_call_result.get())) {
                 // Sync dep solver — result is already the tuple, no coroutine overhead
@@ -2861,14 +2945,14 @@ static PyObject* CoreApp_handle_http(
                     // If there are validation errors, return 422
                     if (dep_errors && PyList_Check(dep_errors) && PyList_GET_SIZE(dep_errors) > 0) {
                         Py_DECREF(dep_raw);
-                        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                        --self->counters.active_requests;
                         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                         Py_DECREF(endpoint_local);
                         Py_XDECREF(body_params_local);
                         PyRef resp(build_http_error_response(422, "Validation Error", req.keep_alive,
                                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                        if (resp) write_to_transport(transport, resp.get());
-                        return make_consumed_true(req.total_consumed);
+                        if (resp) write_response_direct(sock_fd, transport, resp.get());
+                        return make_consumed_true(self, req.total_consumed);
                     }
                 }
                 Py_DECREF(dep_raw);
@@ -2891,21 +2975,21 @@ static PyObject* CoreApp_handle_http(
                     Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
                     PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error",
                                req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                    if (resp) write_to_transport(transport, resp.get());
+                    if (resp) write_response_direct(sock_fd, transport, resp.get());
                 } else {
                     Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
                     PyRef resp(build_http_error_response(500, "Internal Server Error",
                                req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                    if (resp) write_to_transport(transport, resp.get());
+                    if (resp) write_response_direct(sock_fd, transport, resp.get());
                 }
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, hook_status, request_start_time);
             }
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+            --self->counters.active_requests;
             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
             Py_DECREF(endpoint_local);
             Py_XDECREF(body_params_local);
-            return make_consumed_true(req.total_consumed);
+            return make_consumed_true(self, req.total_consumed);
         }
     }
 
@@ -2952,18 +3036,17 @@ static PyObject* CoreApp_handle_http(
                                 if (err_json) {
                                     char* ej_data; Py_ssize_t ej_len;
                                     PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
-                                    PyRef resp(build_http_response_bytes(422, ej_data, (size_t)ej_len, req.keep_alive,
-                                               has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                                    if (resp) write_to_transport(transport, resp.get());
+                                    build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
+                                               has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                                 }
                             }
                             Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
                             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                             Py_DECREF(endpoint_local);
                             Py_DECREF(body_params_local);
-                            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                            self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
-                            return make_consumed_true(req.total_consumed);
+                            --self->counters.active_requests;
+                            ++self->counters.total_errors;
+                            return make_consumed_true(self, req.total_consumed);
                         }
                     }
                 }
@@ -3021,18 +3104,17 @@ static PyObject* CoreApp_handle_http(
                                     if (err_json) {
                                         char* ej_data; Py_ssize_t ej_len;
                                         PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
-                                        PyRef resp(build_http_response_bytes(422, ej_data, (size_t)ej_len, req.keep_alive,
-                                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                                        if (resp) write_to_transport(transport, resp.get());
+                                        build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
+                                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                                     }
                                 }
                                 Py_DECREF(validation_result);
                                 if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                                 Py_DECREF(endpoint_local);
                                 Py_DECREF(body_params_local);
-                                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                                self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
-                                return make_consumed_true(req.total_consumed);
+                                --self->counters.active_requests;
+                                ++self->counters.total_errors;
+                                return make_consumed_true(self, req.total_consumed);
                             }
 
                             // ── Validation succeeded — merge values into kwargs ──
@@ -3081,8 +3163,8 @@ static PyObject* CoreApp_handle_http(
             ir->endpoint = endpoint_local;
             ir->body_params = body_params_local;
 
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-            return make_consumed_obj(req.total_consumed, (PyObject*)ir);
+            --self->counters.active_requests;
+            return make_consumed_obj(self, req.total_consumed, (PyObject*)ir);
         }
     }
 
@@ -3133,9 +3215,8 @@ body_done:
                             PyRef sc_attr(PyObject_GetAttrString(handler_result.get(), "status_code"));
                             int hsc = sc_attr ? (int)PyLong_AsLong(sc_attr.get()) : scode;
                             if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = scode; }
-                            PyRef resp(build_http_response_bytes(hsc, hbody, (size_t)hbody_len, req.keep_alive,
-                                       has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                            if (resp) write_to_transport(transport, resp.get());
+                            build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len, req.keep_alive,
+                                       has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                         }
                     } else {
                         // Handler raised an exception — clear it before falling through to 500
@@ -3143,9 +3224,9 @@ body_done:
                     }
                     fire_post_response_hook(self, req.method.data, req.method.len,
                                             req.path.data, req.path.len, scode, request_start_time);
-                    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                    --self->counters.active_requests;
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-                    return make_consumed_true(req.total_consumed);
+                    return make_consumed_true(self, req.total_consumed);
                 }
 
                 Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
@@ -3155,12 +3236,12 @@ body_done:
                     const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
                     PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error", req.keep_alive,
                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                    if (resp) write_to_transport(transport, resp.get());
+                    if (resp) write_response_direct(sock_fd, transport, resp.get());
                     fire_post_response_hook(self, req.method.data, req.method.len,
                                             req.path.data, req.path.len, scode, request_start_time);
-                    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
+                    --self->counters.active_requests;
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-                    return make_consumed_true(req.total_consumed);
+                    return make_consumed_true(self, req.total_consumed);
                 }
             }
             Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
@@ -3168,13 +3249,13 @@ body_done:
         // 500 error
         PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-        if (resp) write_to_transport(transport, resp.get());
+        if (resp) write_response_direct(sock_fd, transport, resp.get());
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, 500, request_start_time);
-        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-        self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
+        --self->counters.active_requests;
+        ++self->counters.total_errors;
         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-        return make_consumed_true(req.total_consumed);
+        return make_consumed_true(self, req.total_consumed);
     }
 
     // Clean up json_body_obj if it was allocated
@@ -3210,9 +3291,9 @@ body_done:
                 Py_DECREF(raw_result);
                 PyRef resp(build_http_error_response(422, "Response validation error", req.keep_alive,
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                if (resp) write_to_transport(transport, resp.get());
-                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                return make_consumed_true(req.total_consumed);
+                if (resp) write_response_direct(sock_fd, transport, resp.get());
+                --self->counters.active_requests;
+                return make_consumed_true(self, req.total_consumed);
             }
 
             // field.serialize_python(validated) → serializable dict
@@ -3239,10 +3320,10 @@ body_done:
             if (!json_bytes) {
                 PyRef resp(build_http_error_response(500, "JSON serialization failed", req.keep_alive,
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                if (resp) write_to_transport(transport, resp.get());
-                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
-                return make_consumed_true(req.total_consumed);
+                if (resp) write_response_direct(sock_fd, transport, resp.get());
+                --self->counters.active_requests;
+                ++self->counters.total_errors;
+                return make_consumed_true(self, req.total_consumed);
             }
 
             char* json_data;
@@ -3264,22 +3345,19 @@ body_done:
                 }
             }
 
-            // Build complete HTTP response in one buffer (with CORS + compression headers)
-            PyRef http_resp(build_http_response_bytes(
+            // Build + write HTTP response directly from buffer (skips PyBytes for common case)
+            build_and_write_http_response(
+                sock_fd, transport,
                 status_code_local, json_data, (size_t)json_len, req.keep_alive,
                 has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                encoding));
+                encoding);
 
             if (!compressed.empty()) release_buffer(std::move(compressed));
 
-            if (http_resp) {
-                write_to_transport(transport, http_resp.get());
-            }
-
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, status_code_local, request_start_time);
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-            return make_consumed_true(req.total_consumed);
+            --self->counters.active_requests;
+            return make_consumed_true(self, req.total_consumed);
         }
 
         // ── Response object detection ─────────────────────────────────────
@@ -3356,7 +3434,7 @@ body_done:
 
             PyRef http_resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
             release_buffer(std::move(buf));
-            if (http_resp) write_to_transport(transport, http_resp.get());
+            if (http_resp) write_response_direct(sock_fd, transport, http_resp.get());
 
             // ── Background tasks ─────────────────────────────────────────
             PyRef bg_attr(PyObject_GetAttrString(raw_result, "background"));
@@ -3381,8 +3459,8 @@ body_done:
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, resp_sc, request_start_time);
             Py_DECREF(raw_result);
-            self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-            return make_consumed_true(req.total_consumed);
+            --self->counters.active_requests;
+            return make_consumed_true(self, req.total_consumed);
         }
 
         // ── Fallback: serialize as string ────────────────────────────────
@@ -3392,15 +3470,14 @@ body_done:
             Py_ssize_t slen;
             const char* s = PyUnicode_AsUTF8AndSize(str_repr.get(), &slen);
             if (s) {
-                PyRef resp(build_http_response_bytes(status_code_local, s, (size_t)slen, req.keep_alive,
-                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                if (resp) write_to_transport(transport, resp.get());
+                build_and_write_http_response(sock_fd, transport, status_code_local, s, (size_t)slen, req.keep_alive,
+                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
             }
         }
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, status_code_local, request_start_time);
-        self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-        return make_consumed_true(req.total_consumed);
+        --self->counters.active_requests;
+        return make_consumed_true(self, req.total_consumed);
     }
 
     if (send_status == PYGEN_NEXT) {
@@ -3426,7 +3503,7 @@ body_done:
         PyRef async_info(PyTuple_Pack(5, s_async_tag, coro.release(),
                          raw_result, get_cached_status(status_code_local), ka));
         Py_XDECREF(raw_result);
-        return make_consumed_obj(req.total_consumed, async_info.release());
+        return make_consumed_obj(self, req.total_consumed, async_info.release());
     }
 
     // PYGEN_ERROR — exception handler dispatch
@@ -3452,15 +3529,14 @@ body_done:
                         PyBytes_AsStringAndSize(body_attr.get(), &hbody, &hbody_len);
                         PyRef sc_attr(PyObject_GetAttrString(handler_result.get(), "status_code"));
                         int hsc = sc_attr ? (int)PyLong_AsLong(sc_attr.get()) : scode;
-                        PyRef resp(build_http_response_bytes(hsc, hbody, (size_t)hbody_len, req.keep_alive,
-                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                        if (resp) write_to_transport(transport, resp.get());
+                        build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len, req.keep_alive,
+                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                     }
                 }
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, scode, request_start_time);
-                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                return make_consumed_true(req.total_consumed);
+                --self->counters.active_requests;
+                return make_consumed_true(self, req.total_consumed);
             }
 
             Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
@@ -3470,11 +3546,11 @@ body_done:
                 const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
                 PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error", req.keep_alive,
                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                if (resp) write_to_transport(transport, resp.get());
+                if (resp) write_response_direct(sock_fd, transport, resp.get());
                 fire_post_response_hook(self, req.method.data, req.method.len,
                                         req.path.data, req.path.len, scode, request_start_time);
-                self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-                return make_consumed_true(req.total_consumed);
+                --self->counters.active_requests;
+                return make_consumed_true(self, req.total_consumed);
             }
         }
         Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
@@ -3482,12 +3558,12 @@ body_done:
 
     PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-    if (resp) write_to_transport(transport, resp.get());
+    if (resp) write_response_direct(sock_fd, transport, resp.get());
     fire_post_response_hook(self, req.method.data, req.method.len,
                             req.path.data, req.path.len, 500, request_start_time);
-    self->counters.active_requests.fetch_sub(1, std::memory_order_release);
-    self->counters.total_errors.fetch_add(1, std::memory_order_relaxed);
-    return make_consumed_true(req.total_consumed);
+    --self->counters.active_requests;
+    ++self->counters.total_errors;
+    return make_consumed_true(self, req.total_consumed);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3720,16 +3796,16 @@ static PyObject* CoreApp_parse_and_route(
     if (!match) {
         if (lock.owns_lock()) lock.unlock();
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
-        if (resp) return make_consumed_obj(req.total_consumed, resp.release());
-        return make_consumed_true(req.total_consumed);
+        if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
+        return make_consumed_true(self, req.total_consumed);
     }
 
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
         if (lock.owns_lock()) lock.unlock();
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
-        if (resp) return make_consumed_obj(req.total_consumed, resp.release());
-        return make_consumed_true(req.total_consumed);
+        if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
+        return make_consumed_true(self, req.total_consumed);
     }
 
     const auto& route = self->routes[idx];
@@ -3740,16 +3816,16 @@ static PyObject* CoreApp_parse_and_route(
         if (!(route.method_mask & req_method)) {
             if (lock.owns_lock()) lock.unlock();
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
-            if (resp) return make_consumed_obj(req.total_consumed, resp.release());
-            return make_consumed_true(req.total_consumed);
+            if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
+            return make_consumed_true(self, req.total_consumed);
         }
     }
 
     if (!route.fast_spec) {
         if (lock.owns_lock()) lock.unlock();
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive));
-        if (resp) return make_consumed_obj(req.total_consumed, resp.release());
-        return make_consumed_true(req.total_consumed);
+        if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
+        return make_consumed_true(self, req.total_consumed);
     }
 
     // Copy route data to locals and release lock early.
@@ -3935,7 +4011,7 @@ static PyObject* CoreApp_parse_and_route(
         ir->endpoint = endpoint_local;
         ir->body_params = body_params_local;
 
-        return make_consumed_obj(req.total_consumed, (PyObject*)ir);
+        return make_consumed_obj(self, req.total_consumed, (PyObject*)ir);
     }
 
     // Clean up body_params_local if not used
@@ -3969,7 +4045,7 @@ static PyObject* CoreApp_parse_and_route(
     prep->is_coroutine = is_coroutine_local ? Py_True : Py_False;
     Py_INCREF(prep->is_coroutine);
 
-    return make_consumed_obj(req.total_consumed, (PyObject*)prep);
+    return make_consumed_obj(self, req.total_consumed, (PyObject*)prep);
 }
 
 // ── configure_rate_limit(enabled, max_requests, window_seconds) ────────────
@@ -4001,6 +4077,43 @@ static PyObject* CoreApp_set_post_response_hook(CoreAppObject* self, PyObject* a
         Py_INCREF(arg);
         self->post_response_hook = arg;
     }
+    Py_RETURN_NONE;
+}
+
+// ── Warmup — exercise hot-path code to warm instruction caches ──────────────
+// Called once at server startup. Eliminates ~164ms first-request spike.
+
+static PyObject* CoreApp_warmup(CoreAppObject* self, PyObject*) {
+    // 1. Warm HTTP parser (llhttp state machine instructions)
+    const char* dummy = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    ParsedHttpRequest req = {};
+    parse_http_request(dummy, strlen(dummy), &req);
+
+    // 2. Warm buffer pool acquire/release cycle
+    auto buf = acquire_buffer();
+    buf_append(buf, "HTTP/1.1 200 OK\r\n", 17);
+    release_buffer(std::move(buf));
+
+    // 3. Warm JSON serializer (yyjson write path)
+    PyRef d(PyDict_New());
+    if (d) {
+        PyRef k(PyUnicode_InternFromString("s"));
+        PyRef v(PyUnicode_InternFromString("ok"));
+        if (k && v) {
+            PyDict_SetItem(d.get(), k.get(), v.get());
+            PyRef json(serialize_to_json_pybytes(d.get()));
+            (void)json;
+        }
+    }
+
+    // 4. Warm HTTP response builder
+    {
+        const char* body = "{\"s\":\"ok\"}";
+        PyRef resp(build_http_response_bytes(200, body, 10, true));
+        (void)resp;
+    }
+
+    PyErr_Clear();
     Py_RETURN_NONE;
 }
 
@@ -4038,6 +4151,12 @@ static PyMethodDef CoreApp_methods[] = {
     {"configure_rate_limit", (PyCFunction)CoreApp_configure_rate_limit, METH_VARARGS, nullptr},
     {"set_client_ip", (PyCFunction)CoreApp_set_client_ip, METH_O, nullptr},
     {"set_post_response_hook", (PyCFunction)CoreApp_set_post_response_hook, METH_O, nullptr},
+    {"warmup", (PyCFunction)CoreApp_warmup, METH_NOARGS, nullptr},
+    {nullptr}
+};
+
+static PyMemberDef CoreApp_members[] = {
+    {"last_consumed", Py_T_PYSSIZET, offsetof(CoreAppObject, last_consumed), Py_READONLY, nullptr},
     {nullptr}
 };
 
@@ -4048,6 +4167,7 @@ PyTypeObject CoreAppType = {
     .tp_dealloc = (destructor)CoreApp_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_methods = CoreApp_methods,
+    .tp_members = CoreApp_members,
     .tp_new = CoreApp_new,
 };
 

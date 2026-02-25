@@ -158,17 +158,22 @@ typedef struct {
     std::atomic<bool> routes_frozen{false};  // Skip lock after startup
     std::atomic<std::shared_ptr<CorsConfig>> cors_config;
     bool cors_enabled = false;  // Cached bool — avoids atomic shared_ptr load per request
+    const CorsConfig* cors_ptr_cached = nullptr;       // Raw pointer — set once in configure_cors
     std::atomic<std::shared_ptr<TrustedHostConfig>> trusted_host_config;
+    bool trusted_host_enabled = false;                  // Cached bool — skip atomic load per request
+    const TrustedHostConfig* th_ptr_cached = nullptr;   // Raw pointer — set once
     std::unordered_map<uint16_t, PyObject*> exception_handlers;
     std::atomic<uint64_t> route_counter{0};
 
     // ── Hot counters: cache-line aligned to prevent false sharing ────────
     // Under high concurrency, cores writing to these atomics would invalidate
     // each other's cache lines if mixed with cold fields. Own cache line = no contention.
+    // Single-threaded asyncio event loop — plain integers, no atomic overhead.
+    // Saves 3-5 atomic RMW ops per request under 10K connection contention.
     struct alignas(64) HotCounters {
-        std::atomic<uint64_t> total_requests{0};
-        std::atomic<int64_t>  active_requests{0};
-        std::atomic<uint64_t> total_errors{0};
+        uint64_t total_requests = 0;
+        int64_t  active_requests = 0;
+        uint64_t total_errors = 0;
     };
     HotCounters counters;
 
@@ -196,6 +201,11 @@ typedef struct {
 
     // Post-response hook (for logging middleware)
     PyObject* post_response_hook = nullptr;  // Python callable or NULL
+
+    // Fast-path return protocol: last sync-consumed byte count
+    // Set by handle_http before returning Py_True. Python reads via tp_members.
+    // Avoids per-request PyTuple_New(2) + PyLong_FromLongLong() allocation.
+    Py_ssize_t last_consumed = 0;
 } CoreAppObject;
 
 // ── MatchResult Python object ───────────────────────────────────────────────

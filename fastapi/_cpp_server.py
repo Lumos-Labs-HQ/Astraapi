@@ -21,6 +21,7 @@ import signal
 import socket
 import struct
 import sys
+import gc
 import time
 from collections import deque
 from typing import Any
@@ -946,7 +947,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_active_count")
+    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_active_count", "_sock_fd")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -969,6 +970,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_pong_received = True
         self._ws_task: asyncio.Task | None = None  # TS-2: tracked for cancellation
         self._pending_tasks: set | None = None  # Lazy — only allocated for async endpoints
+        self._sock_fd = -1  # Raw socket FD for direct C++ HTTP writes
 
     def _reinit(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
                 ka_timeout: float, connections_set: set | None) -> None:
@@ -986,6 +988,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws = None
         self._ws_ring_buf = None
         self._ws_fd = -1
+        self._sock_fd = -1
         self._ws_ping_handle = None
         self._ws_pong_received = True
         self._ws_task = None
@@ -1004,6 +1007,10 @@ class CppHttpProtocol(asyncio.Protocol):
                     sock.setsockopt(socket.IPPROTO_TCP, _TCP_QUICKACK, 1)
                 except OSError:
                     pass
+            try:
+                self._sock_fd = sock.fileno()
+            except (OSError, AttributeError):
+                self._sock_fd = -1
         # Reduced from 1MB/256KB — saves ~7.5GB potential buffer at 10K connections
         transport.set_write_buffer_limits(high=262144, low=65536)  # type: ignore[union-attr]
         peername = transport.get_extra_info("peername")
@@ -1038,6 +1045,7 @@ class CppHttpProtocol(asyncio.Protocol):
                 _ws_ring_buffer_reset(self._ws_ring_buf)
             self._ws_ring_buf = None
         self._ws_fd = -1
+        self._sock_fd = -1
         self._transport = None
         # Remove from active connections set (graceful shutdown tracking)
         if self._connections_set is not None:
@@ -1086,27 +1094,35 @@ class CppHttpProtocol(asyncio.Protocol):
         core = self._core
         offset = 0
         IR = _InlineResult
+        sock_fd = self._sock_fd
+        now = self._loop.time()
 
         while True:
-            result = core.handle_http(mv, transport, offset)
-            consumed, result_obj = result
+            result = core.handle_http(mv, transport, offset, sock_fd)
 
-            if consumed == 0:
+            # ── Fast-path: zero-alloc return protocol ──────────────────
+            # True  = sync endpoint handled (response already written)
+            # None  = need more data (incomplete HTTP request)
+            # False = parse error (400 already sent)
+            # tuple = async/WS/Pydantic dispatch (rare path)
+            if result is True:
+                offset += core.last_consumed
+                continue
+
+            if result is None:
                 break  # need more data
-            if consumed < 0:
+
+            if result is False:
                 # Parse error (400 sent by C++)
                 mv.release()
                 transport.close()
                 _http_buf_clear(http_buf)
                 return
 
+            # ── Async / WS / Pydantic dispatch (tuple return) ─────────
+            consumed, result_obj = result
             offset += consumed
 
-            if result_obj is True or result_obj is None:
-                # Sync endpoint handled — response already written
-                continue
-
-            # ── Async / WS dispatch ──────────────────────────────────
             if isinstance(result_obj, tuple):
                 tag = result_obj[0]
                 if tag == "ws":
@@ -1164,9 +1180,6 @@ class CppHttpProtocol(asyncio.Protocol):
 
                 elif tag == "async":
                     _, coro, first_yield, status_code, keep_alive = result_obj
-                    # C++ PyIter_Send intercepted the yield before asyncio's
-                    # Task.__step could reset _asyncio_future_blocking. Clear it
-                    # so the new await can proceed normally.
                     first_yield._asyncio_future_blocking = False
                     task = self._loop.create_task(
                         self._handle_async(coro, first_yield, status_code, keep_alive))
@@ -1199,7 +1212,7 @@ class CppHttpProtocol(asyncio.Protocol):
         if offset > 0:
             _http_buf_consume(http_buf, offset)
         if _http_buf_len(http_buf) == 0:
-            self._ka_reset()
+            self._ka_reset(now)
 
     # ── WebSocket frame handling ─────────────────────────────────────────
 
@@ -1581,9 +1594,11 @@ class CppHttpProtocol(asyncio.Protocol):
 
     # ── Keep-alive (batch sweep — no per-connection timers) ─────────────
 
-    def _ka_reset(self) -> None:
+    def _ka_reset(self, now: float = 0.0) -> None:
         # Update deadline only — batch sweep handles expiry checking
-        self._ka_deadline = time.monotonic() + self._ka_timeout
+        if now == 0.0:
+            now = self._loop.time()
+        self._ka_deadline = now + self._ka_timeout
 
     def _ka_cancel(self) -> None:
         # Mark as not subject to keep-alive timeout
@@ -1638,6 +1653,8 @@ async def _create_server(
     # ── Warm-up: eliminate first-request lazy initialization overhead ──
     _init_cached_refs()       # Pre-import modules + intern strings in C++
     _prewarm_buffer_pool(4)   # Pre-allocate thread-local response buffers
+    if hasattr(core_app, 'warmup'):
+        core_app.warmup()     # Exercise parse→route→serialize→build to warm icache
 
     # Cache OpenAPI schema
     if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
@@ -1703,6 +1720,13 @@ async def run_server(
 
     loop = asyncio.get_event_loop()
 
+    # ── GC control: disable automatic collection to prevent multi-second gen2 pauses
+    # Default thresholds (700/10/10) cause gen2 scans of ALL live objects.
+    # With 10K connections that's millions of objects → multi-second stalls.
+    # Rely on CPython refcounting for short-lived request objects.
+    gc.disable()
+    gc.collect(0)  # flush pending gen0 before disabling
+
     # Enable eager task execution (Python 3.12+)
     try:
         loop.set_task_factory(asyncio.eager_task_factory)  # type: ignore[attr-defined]
@@ -1756,6 +1780,16 @@ async def run_server(
     # ── Warm-up: eliminate first-request lazy initialization overhead ──
     _init_cached_refs()       # Pre-import modules + intern strings in C++
     _prewarm_buffer_pool(4)   # Pre-allocate thread-local response buffers
+    if hasattr(core_app, 'warmup'):
+        core_app.warmup()     # Exercise parse→route→serialize→build to warm icache
+
+    # ── Periodic GC maintenance: collect gen0+gen1 only (skip expensive gen2)
+    # gen0+gen1 handles cyclic garbage from asyncio tasks without scanning
+    # the full object graph. 30s interval amortizes the ~1ms cost.
+    def _gc_maintenance():
+        gc.collect(1)  # gen0 + gen1 only
+        loop.call_later(30.0, _gc_maintenance)
+    loop.call_later(30.0, _gc_maintenance)
 
     # ── Lifespan context manager detection ──────────────────────────────
     router = getattr(app, "router", None)
@@ -1862,9 +1896,18 @@ async def run_server(
         while not stop_event.is_set():
             await asyncio.sleep(5.0)
             now = time.monotonic()
-            to_close = [p for p in active_connections
-                        if p._ka_deadline > 0 and now > p._ka_deadline]
-            for proto in to_close:
+            batch: list = []
+            for p in active_connections:
+                if p._ka_deadline > 0 and now > p._ka_deadline:
+                    batch.append(p)
+                if len(batch) >= 100:
+                    for proto in batch:
+                        t = proto._transport
+                        if t and not t.is_closing():
+                            t.close()
+                    batch.clear()
+                    await asyncio.sleep(0)  # yield to event loop
+            for proto in batch:
                 t = proto._transport
                 if t and not t.is_closing():
                     t.close()
@@ -1877,6 +1920,7 @@ async def run_server(
     except KeyboardInterrupt:
         pass
     finally:
+        gc.enable()  # re-enable GC for clean interpreter shutdown
         sweep_task.cancel()
         # ── Graceful shutdown: stop accepting, drain active connections ─
         server.close()
