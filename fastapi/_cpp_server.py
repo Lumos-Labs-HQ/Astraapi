@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import signal
 import socket
 import struct
@@ -876,10 +877,21 @@ class _ProtocolPool:
         if len(self._pool) < self._max_size:
             self._pool.append(proto)
 
+    def trim(self, target_size: int) -> int:
+        """Trim pool to target_size, returning number of protocols freed."""
+        current = len(self._pool)
+        if current <= target_size:
+            return 0
+        del self._pool[target_size:]
+        return current - target_size
+
 _protocol_pool = _ProtocolPool()
 
-# Per-worker connection limit — fast 503 under overload instead of cascading slowdown
-_MAX_CONNECTIONS = 10000
+# Connection limit — no hardcoded cap by default (like uWebSockets, Fiber, Bun).
+# OS-level fd limits are the real constraint. Set FASTAPI_MAX_CONNECTIONS to enforce.
+_MAX_CONNECTIONS = int(os.environ.get("FASTAPI_MAX_CONNECTIONS", "0"))  # 0 = unlimited
+# At 80% capacity (if limit set), force Connection: close to cycle connections
+_PRESSURE_THRESHOLD = _MAX_CONNECTIONS * 4 // 5 if _MAX_CONNECTIONS > 0 else 0
 
 
 class _RejectProtocol(asyncio.Protocol):
@@ -1012,7 +1024,7 @@ class CppHttpProtocol(asyncio.Protocol):
             except (OSError, AttributeError):
                 self._sock_fd = -1
         # Reduced from 1MB/256KB — saves ~7.5GB potential buffer at 10K connections
-        transport.set_write_buffer_limits(high=262144, low=65536)  # type: ignore[union-attr]
+        transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
         peername = transport.get_extra_info("peername")
         if peername:
             self._core.set_client_ip(peername[0])
@@ -1050,9 +1062,11 @@ class CppHttpProtocol(asyncio.Protocol):
         # Remove from active connections set (graceful shutdown tracking)
         if self._connections_set is not None:
             self._connections_set.discard(self)
-        # Decrement fast connection counter
+        # Decrement fast connection counter + relieve pressure
         if self._active_count is not None:
             self._active_count[0] -= 1
+            if self._active_count[0] <= _PRESSURE_THRESHOLD and self._core.force_close:
+                self._core.force_close = 0
         # OPT-14: Return protocol to pool for reuse
         _protocol_pool.release(self)
 
@@ -1087,8 +1101,8 @@ class CppHttpProtocol(asyncio.Protocol):
             _http_buf_clear(http_buf)
             return
 
-        mv = _http_buf_get_view(http_buf)
-        if mv is None:
+        # Pass capsule directly to C++ — avoids PyMemoryView_FromMemory per call
+        if _http_buf_len(http_buf) == 0:
             return
 
         core = self._core
@@ -1098,7 +1112,7 @@ class CppHttpProtocol(asyncio.Protocol):
         now = self._loop.time()
 
         while True:
-            result = core.handle_http(mv, transport, offset, sock_fd)
+            result = core.handle_http(http_buf, transport, offset, sock_fd)
 
             # ── Fast-path: zero-alloc return protocol ──────────────────
             # True  = sync endpoint handled (response already written)
@@ -1114,7 +1128,6 @@ class CppHttpProtocol(asyncio.Protocol):
 
             if result is False:
                 # Parse error (400 sent by C++)
-                mv.release()
                 transport.close()
                 _http_buf_clear(http_buf)
                 return
@@ -1132,13 +1145,11 @@ class CppHttpProtocol(asyncio.Protocol):
                     ws_query_string = result_obj[5] if rlen >= 6 else b""
                     endpoint, path_params = result_obj[1], result_obj[2]
                     if endpoint is None:
-                        mv.release()
                         if transport and not transport.is_closing():
                             transport.close()
                         _http_buf_clear(http_buf)
                         return
                     # Consume bytes processed so far before switching to WS
-                    mv.release()
                     _http_buf_consume(http_buf, offset)
                     ws = CppWebSocket(
                         transport, self._loop,
@@ -1208,7 +1219,6 @@ class CppHttpProtocol(asyncio.Protocol):
                 task.add_done_callback(pt.discard)
                 pt.add(task)
 
-        mv.release()
         if offset > 0:
             _http_buf_consume(http_buf, offset)
         if _http_buf_len(http_buf) == 0:
@@ -1671,14 +1681,17 @@ async def _create_server(
     active_count = [0]  # mutable int via list — avoids nonlocal overhead
 
     # Pre-populate protocol pool to avoid __init__ on first connections
-    for _ in range(min(64, _MAX_CONNECTIONS)):
+    _PREWARM = 512
+    for _ in range(_PREWARM if _MAX_CONNECTIONS == 0 else min(_PREWARM, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
 
     def _protocol_factory() -> asyncio.Protocol:
-        if active_count[0] >= _MAX_CONNECTIONS:
+        if _MAX_CONNECTIONS > 0 and active_count[0] >= _MAX_CONNECTIONS:
             return _RejectProtocol()
         active_count[0] += 1
+        if _PRESSURE_THRESHOLD > 0 and active_count[0] > _PRESSURE_THRESHOLD and not core_app.force_close:
+            core_app.force_close = 1
         proto = _protocol_pool.acquire(
             core_app, loop, keep_alive_timeout, active_connections)
         proto._active_count = active_count
@@ -1716,6 +1729,18 @@ async def run_server(
         if soft < target:
             resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
     except (ImportError, ValueError, OSError):
+        pass
+
+    # Increase TCP connection queue limits (Linux/WSL — silent on other platforms)
+    try:
+        import subprocess
+        for _cmd in (
+            "sysctl -w net.core.somaxconn=65535",
+            "sysctl -w net.ipv4.tcp_max_syn_backlog=65535",
+            "sysctl -w net.core.netdev_max_backlog=65535",
+        ):
+            subprocess.run(_cmd.split(), capture_output=True, timeout=2)
+    except Exception:
         pass
 
     loop = asyncio.get_event_loop()
@@ -1783,14 +1808,6 @@ async def run_server(
     if hasattr(core_app, 'warmup'):
         core_app.warmup()     # Exercise parse→route→serialize→build to warm icache
 
-    # ── Periodic GC maintenance: collect gen0+gen1 only (skip expensive gen2)
-    # gen0+gen1 handles cyclic garbage from asyncio tasks without scanning
-    # the full object graph. 30s interval amortizes the ~1ms cost.
-    def _gc_maintenance():
-        gc.collect(1)  # gen0 + gen1 only
-        loop.call_later(30.0, _gc_maintenance)
-    loop.call_later(30.0, _gc_maintenance)
-
     # ── Lifespan context manager detection ──────────────────────────────
     router = getattr(app, "router", None)
     lifespan_handler = None
@@ -1815,23 +1832,50 @@ async def run_server(
                         setattr(app_state, k, v)
 
     # Detect reload worker for fast shutdown
-    import os as _os
-    _is_reload_worker = _os.environ.get("_FASTAPI_RELOAD_WORKER") == "1"
+    _is_reload_worker = os.environ.get("_FASTAPI_RELOAD_WORKER") == "1"
 
     # ── Track active connections for graceful shutdown ──────────────────
     active_connections: set[CppHttpProtocol] = set()
     active_count = [0]  # mutable int via list — faster than len(set) in hot path
 
-    # Pre-populate protocol pool to avoid __init__ on first connections
-    for _ in range(min(64, _MAX_CONNECTIONS)):
+    # Pre-populate protocol pool BEFORE gc.freeze() so protocols are frozen
+    _PREWARM = 512
+    for _ in range(_PREWARM if _MAX_CONNECTIONS == 0 else min(_PREWARM, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
 
+    # ── gc.freeze(): move ALL startup objects to permanent generation ──
+    # After warm-up + pool pre-warm, hundreds of thousands of objects exist
+    # (protocols, modules, cached strings, route tables). gc.freeze() moves
+    # them to a permanent generation that gc.collect(0/1/2) never scans.
+    # Result: gen0 only tracks objects created by live request processing.
+    # For sync endpoints, gen0 is nearly empty → scan < 0.1ms.
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)   # full collection — clean up any startup cycles
+    gc.freeze()     # move ALL survivors to permanent generation
+
+    # ── GC strategy: freeze + refcounting, no runtime collections ───────
+    # gc.freeze() above moved startup objects to permanent generation.
+    # CPython refcounting handles short-lived request objects (coroutines,
+    # tuples, dicts). NO periodic gc.collect() — it blocks the event loop
+    # scanning live async task objects (measured: 60-70ms at 88K req/s).
+    # Only collect during idle periods to prevent long-term cycle leaks.
+    def _gc_maintenance():
+        if active_count[0] == 0:
+            gc.collect(1)
+        loop.call_later(600.0, _gc_maintenance)
+
+    loop.call_later(600.0, _gc_maintenance)
+
     def _protocol_factory() -> asyncio.Protocol:
-        # Fast 503 reject when at capacity — prevents cascading slowdown
-        if active_count[0] >= _MAX_CONNECTIONS:
+        # Optional connection limit (disabled by default — no cap like uWS/Fiber/Bun)
+        if _MAX_CONNECTIONS > 0 and active_count[0] >= _MAX_CONNECTIONS:
             return _RejectProtocol()
         active_count[0] += 1
+        # Under pressure: force Connection: close to cycle connections and free slots
+        if _PRESSURE_THRESHOLD > 0 and active_count[0] > _PRESSURE_THRESHOLD and not core_app.force_close:
+            core_app.force_close = 1
         # OPT-14: Reuse protocol objects from pool to reduce __init__ + GC overhead
         proto = _protocol_pool.acquire(
             core_app, loop, keep_alive_timeout, active_connections)
@@ -1839,10 +1883,17 @@ async def run_server(
         active_connections.add(proto)
         return proto
 
-    server = await loop.create_server(
-        _protocol_factory, host, port,
-        reuse_address=True, backlog=65535,
-    )
+    try:
+        server = await loop.create_server(
+            _protocol_factory, host, port,
+            reuse_address=True, reuse_port=True, backlog=65535,
+        )
+    except OSError:
+        # reuse_port not supported on this platform — fall back
+        server = await loop.create_server(
+            _protocol_factory, host, port,
+            reuse_address=True, backlog=65535,
+        )
 
     # TCP_FASTOPEN: allow data in SYN packet, reducing handshake latency
     for s in server.sockets or []:
@@ -1890,11 +1941,11 @@ async def run_server(
         signal.signal(signal.SIGINT, lambda *_: loop.call_soon_threadsafe(_signal_handler))
         signal.signal(signal.SIGTERM, lambda *_: loop.call_soon_threadsafe(_signal_handler))
 
-    # Batch keep-alive sweep — one task checks all connections every 5s
+    # Batch keep-alive sweep — one task checks all connections every 15s
     # instead of per-connection call_later() timers (eliminates ~1K+ callbacks/sec)
     async def _ka_sweep() -> None:
         while not stop_event.is_set():
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(15.0)
             now = time.monotonic()
             batch: list = []
             for p in active_connections:
@@ -1914,14 +1965,25 @@ async def run_server(
 
     sweep_task = loop.create_task(_ka_sweep())
 
+    # ── Idle pool trim: reclaim memory when connections drop ─────────────
+    async def _pool_trim() -> None:
+        while not stop_event.is_set():
+            await asyncio.sleep(60.0)
+            target = max(256, active_count[0] // 2)
+            _protocol_pool.trim(target)
+
+    trim_task = loop.create_task(_pool_trim())
+
     try:
         async with server:
             await stop_event.wait()
     except KeyboardInterrupt:
         pass
     finally:
-        gc.enable()  # re-enable GC for clean interpreter shutdown
+        gc.unfreeze()  # move frozen objects back for cleanup
+        gc.enable()    # re-enable GC for clean interpreter shutdown
         sweep_task.cancel()
+        trim_task.cancel()
         # ── Graceful shutdown: stop accepting, drain active connections ─
         server.close()
         await server.wait_closed()

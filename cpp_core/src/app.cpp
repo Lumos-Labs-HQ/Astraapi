@@ -1930,12 +1930,123 @@ static int build_and_write_http_response(
     return rc;
 }
 
+// ── Fused JSON serialize + HTTP response + scatter-gather write ──────────────
+// Eliminates serialize_to_json_pybytes PyBytes alloc + extra buffer cycle.
+// Single buffer pool alloc for JSON body, headers built on stack, writev to socket.
+static int serialize_json_and_write_response(
+    int sock_fd, PyObject* transport,
+    PyObject* json_obj, int status_code, bool keep_alive,
+    const char* accept_encoding = nullptr, size_t ae_len = 0,
+    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0)
+{
+    // 1. Serialize JSON into buffer pool
+    auto buf = acquire_buffer();
+    if (write_json(json_obj, buf, 0) < 0) {
+        release_buffer(std::move(buf));
+        return -1;
+    }
+    size_t body_len = buf.size();
+    const char* body_data = buf.data();
+
+    // 2. Optional compression
+    const char* encoding = nullptr;
+    std::vector<char> compressed;
+    if (ae_len > 0 && body_len > 500) {
+        compressed = acquire_buffer();
+        encoding = try_compress_inline(body_data, body_len, accept_encoding, ae_len, compressed);
+        if (encoding) {
+            body_data = compressed.data();
+            body_len = compressed.size();
+        }
+    }
+
+    // 3. Ultra-fast path: no CORS, no compression, cached prefix
+    if (__builtin_expect(!!(!cors && !encoding &&
+        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data), 1))
+    {
+        const auto& jp = s_json_prefixes[status_code];
+        char header_buf[256];
+        char cl_buf[20];
+        int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
+        static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
+        static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
+        const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
+        size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
+
+        // Build header on stack
+        char* h = header_buf;
+        memcpy(h, jp.data, jp.len); h += jp.len;
+        memcpy(h, cl_buf, cl_len); h += cl_len;
+        memcpy(h, suffix, suffix_len); h += suffix_len;
+        size_t header_len = (size_t)(h - header_buf);
+
+        // Scatter-gather write: [headers on stack] + [body in pool buffer]
+        if (sock_fd >= 0) {
+            PlatformIoVec iov[2] = {
+                {header_buf, header_len},
+                {const_cast<char*>(body_data), body_len}
+            };
+            ssize_t total = (ssize_t)(header_len + body_len);
+            ssize_t sent = platform_socket_writev(sock_fd, iov, 2);
+            if (sent == total) {
+                release_buffer(std::move(buf));
+                if (!compressed.empty()) release_buffer(std::move(compressed));
+                return 0;  // ZERO heap allocations!
+            }
+            if (sent > 0) {
+                // Partial write — build remainder as PyBytes, send via transport
+                if ((size_t)sent < header_len) {
+                    size_t hdr_rem = header_len - (size_t)sent;
+                    PyRef rem(PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(hdr_rem + body_len)));
+                    if (rem) {
+                        char* dst = PyBytes_AS_STRING(rem.get());
+                        memcpy(dst, header_buf + sent, hdr_rem);
+                        memcpy(dst + hdr_rem, body_data, body_len);
+                        write_to_transport(transport, rem.get());
+                    }
+                } else {
+                    size_t body_sent = (size_t)sent - header_len;
+                    PyRef rem(PyBytes_FromStringAndSize(
+                        body_data + body_sent, (Py_ssize_t)(body_len - body_sent)));
+                    if (rem) write_to_transport(transport, rem.get());
+                }
+                release_buffer(std::move(buf));
+                if (!compressed.empty()) release_buffer(std::move(compressed));
+                return 0;
+            }
+            // EAGAIN — fall through to transport
+        }
+
+        // Fallback: combine into single PyBytes for transport.write
+        PyRef full(PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(header_len + body_len)));
+        if (full) {
+            char* dst = PyBytes_AS_STRING(full.get());
+            memcpy(dst, header_buf, header_len);
+            memcpy(dst + header_len, body_data, body_len);
+            write_to_transport(transport, full.get());
+        }
+        release_buffer(std::move(buf));
+        if (!compressed.empty()) release_buffer(std::move(compressed));
+        return full ? 0 : -1;
+    }
+
+    // Slow path: CORS or uncached status — use existing response builder
+    PyObject* resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive,
+                                                cors, origin, origin_len, encoding);
+    release_buffer(std::move(buf));
+    if (!compressed.empty()) release_buffer(std::move(compressed));
+    if (!resp) return -1;
+    int rc = write_response_direct(sock_fd, transport, resp);
+    Py_DECREF(resp);
+    return rc;
+}
+
 // ── HttpConnectionBuffer — replaces Python bytearray + memmove ──────────────
 // Linear buffer with read/write offsets. Compact only when read_pos > 50% capacity.
 // Eliminates: Python memoryview creation, slice ops, O(N) memmove per request.
 
 class HttpConnectionBuffer {
-    static constexpr size_t INITIAL_CAPACITY = 4096;
+    static constexpr size_t INITIAL_CAPACITY = 2048;
     static constexpr size_t MAX_CAPACITY = 1048576;  // 1MB
 
     uint8_t* buf_;
@@ -2151,25 +2262,41 @@ static PyObject* CoreApp_handle_http(
         if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
     }
 
-    // Accept any buffer protocol object (bytes, bytearray, memoryview)
-    Py_buffer view;
-    if (PyObject_GetBuffer(buffer_obj, &view, PyBUF_SIMPLE) < 0) {
-        return nullptr;
-    }
-    // RAII guard to release buffer on all return paths
-    struct BufferGuard {
-        Py_buffer* v;
-        ~BufferGuard() { PyBuffer_Release(v); }
-    } buf_guard{&view};
+    // Fast-path: PyCapsule (HttpConnectionBuffer) — skip memoryview creation entirely
+    char* buf_data;
+    Py_ssize_t buf_len;
+    Py_buffer view = {};
+    bool have_view = false;
 
-    // Apply offset (OPT-7: avoids Python memoryview slice creation per request)
-    if (offset > view.len) offset = view.len;
-    char* buf_data = (char*)view.buf + offset;
-    Py_ssize_t buf_len = view.len - offset;
+    if (PyCapsule_CheckExact(buffer_obj)) {
+        auto* hb = static_cast<HttpConnectionBuffer*>(
+            PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
+        if (!hb) return nullptr;
+        Py_ssize_t total = (Py_ssize_t)hb->size();
+        if (offset > total) offset = total;
+        buf_data = (char*)hb->data() + offset;
+        buf_len = total - offset;
+    } else {
+        // Slow path: any buffer protocol object (bytes, bytearray, memoryview)
+        if (PyObject_GetBuffer(buffer_obj, &view, PyBUF_SIMPLE) < 0) {
+            return nullptr;
+        }
+        have_view = true;
+        if (offset > view.len) offset = view.len;
+        buf_data = (char*)view.buf + offset;
+        buf_len = view.len - offset;
+    }
+    // RAII guard to release buffer on all return paths (no-op if capsule path)
+    struct BufferGuard {
+        Py_buffer* v; bool active;
+        ~BufferGuard() { if (active) PyBuffer_Release(v); }
+    } buf_guard{&view, have_view};
 
     // ── Parse HTTP request ───────────────────────────────────────────────
     ParsedHttpRequest req = {};
     int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
+    // Under connection pressure, force Connection: close to free slots
+    if (self->force_close) req.keep_alive = false;
 
     if (parse_result == 0) {
         // Need more data — return None (zero allocations)
@@ -3313,46 +3440,17 @@ body_done:
             PyFloat_Check(raw_result) || PyBool_Check(raw_result) ||
             PyTuple_Check(raw_result) || raw_result == Py_None) {
 
-            // Serialize to JSON bytes (buffer pool)
-            PyRef json_bytes(serialize_to_json_pybytes(raw_result));
+            // Fused: serialize JSON + build HTTP + write — zero intermediate PyBytes
+            int wrc = serialize_json_and_write_response(
+                sock_fd, transport, raw_result, status_code_local, req.keep_alive,
+                accept_encoding_sv.data, accept_encoding_sv.len,
+                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
             Py_DECREF(raw_result);
-
-            if (!json_bytes) {
-                PyRef resp(build_http_error_response(500, "JSON serialization failed", req.keep_alive,
-                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                if (resp) write_response_direct(sock_fd, transport, resp.get());
+            if (wrc < 0) {
                 --self->counters.active_requests;
                 ++self->counters.total_errors;
                 return make_consumed_true(self, req.total_consumed);
             }
-
-            char* json_data;
-            Py_ssize_t json_len;
-            PyBytes_AsStringAndSize(json_bytes.get(), &json_data, &json_len);
-
-            // ── Compress response if client accepts and body is large enough ──
-            const char* encoding = nullptr;
-            std::vector<char> compressed;
-            if (accept_encoding_sv.len > 0 && json_len > 500) {
-                compressed = acquire_buffer();
-                encoding = try_compress_inline(
-                    json_data, (size_t)json_len,
-                    accept_encoding_sv.data, accept_encoding_sv.len,
-                    compressed);
-                if (encoding) {
-                    json_data = compressed.data();
-                    json_len = (Py_ssize_t)compressed.size();
-                }
-            }
-
-            // Build + write HTTP response directly from buffer (skips PyBytes for common case)
-            build_and_write_http_response(
-                sock_fd, transport,
-                status_code_local, json_data, (size_t)json_len, req.keep_alive,
-                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                encoding);
-
-            if (!compressed.empty()) release_buffer(std::move(compressed));
 
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, status_code_local, request_start_time);
@@ -3768,6 +3866,7 @@ static PyObject* CoreApp_parse_and_route(
     // ── Parse HTTP request ───────────────────────────────────────────────
     ParsedHttpRequest req = {};
     int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
+    if (self->force_close) req.keep_alive = false;
 
     if (parse_result == 0) {
         PyRef zero(PyLong_FromLong(0));
@@ -4157,6 +4256,7 @@ static PyMethodDef CoreApp_methods[] = {
 
 static PyMemberDef CoreApp_members[] = {
     {"last_consumed", Py_T_PYSSIZET, offsetof(CoreAppObject, last_consumed), Py_READONLY, nullptr},
+    {"force_close", Py_T_INT, offsetof(CoreAppObject, force_close), 0, nullptr},
     {nullptr}
 };
 
