@@ -1433,16 +1433,19 @@ class CppHttpProtocol(asyncio.Protocol):
                         buf = bytearray(prefix)
                     else:
                         buf = bytearray(f"HTTP/1.1 {status} OK\r\ntransfer-encoding: chunked\r\n".encode())
+                    # Build headers with join (single alloc vs 4N extend calls)
+                    hdr_parts = []
                     for name, value in headers_list:
                         if isinstance(name, str):
                             name = name.encode("latin-1")
                         if isinstance(value, str):
                             value = value.encode("latin-1")
-                        buf.extend(name)
-                        buf.extend(b": ")
-                        buf.extend(value)
-                        buf.extend(b"\r\n")
-                    buf.extend(b"\r\n")
+                        hdr_parts.append(name)
+                        hdr_parts.append(b": ")
+                        hdr_parts.append(value)
+                        hdr_parts.append(b"\r\n")
+                    hdr_parts.append(b"\r\n")
+                    buf.extend(b"".join(hdr_parts))
                     transport.write(bytes(buf))
                     try:
                         async for chunk in raw.body_iterator:

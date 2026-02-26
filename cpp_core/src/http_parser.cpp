@@ -1,4 +1,5 @@
 #include "http_parser.hpp"
+#include "compat.hpp"
 
 extern "C" {
 #include "llhttp/llhttp.h"
@@ -216,7 +217,7 @@ int parse_http_request(const char* data, size_t len, ParsedHttpRequest* out) {
     // Execute parser
     llhttp_errno_t err = llhttp_execute(&parser, data, len);
 
-    if (__builtin_expect(!!(err == HPE_PAUSED || err == HPE_PAUSED_UPGRADE), 1)) {
+    if (LIKELY(err == HPE_PAUSED || err == HPE_PAUSED_UPGRADE)) {
         // Message complete or upgrade detected
         // Calculate consumed bytes
         const char* error_pos = llhttp_get_error_pos(&parser);

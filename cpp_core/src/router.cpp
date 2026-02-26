@@ -1,4 +1,5 @@
 #include "router.hpp"
+#include "compat.hpp"
 #include <algorithm>
 #include <cstring>
 
@@ -189,9 +190,9 @@ bool Router::match_recursive(
     // 1) First-byte dispatch for static child
     unsigned char fb = (unsigned char)path[pos];
     int16_t tried_idx = -1;
-    if (__builtin_expect(!!(fb < 128), 1)) {
+    if (LIKELY(fb < 128)) {
         int16_t idx = node.dispatch[fb];
-        if (__builtin_expect(!!(idx >= 0), 1)) {
+        if (LIKELY(idx >= 0)) {
             tried_idx = idx;
             const auto& child = node.children[idx];
             size_t plen = child.prefix.size();
@@ -205,7 +206,7 @@ bool Router::match_recursive(
 
     // 1b) Fallback: scan all static children — only needed when dispatch has collisions
     // Most route trees are collision-free, making this scan unreachable.
-    if (__builtin_expect(!!(node.has_dispatch_collision), 0)) {
+    if (UNLIKELY(node.has_dispatch_collision)) {
         for (int16_t ci = 0; ci < (int16_t)node.children.size(); ci++) {
             if (ci == tried_idx) continue;
             const auto& child = node.children[ci];

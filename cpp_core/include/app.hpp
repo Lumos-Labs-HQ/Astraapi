@@ -2,6 +2,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "router.hpp"
+#include "compat.hpp"
 #include <vector>
 #include <string>
 #include <string_view>

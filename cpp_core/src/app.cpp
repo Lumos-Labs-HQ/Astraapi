@@ -19,6 +19,7 @@
 #include <string_view>
 #include <charconv>
 #include <chrono>
+#include <array>
 #include <zlib.h>
 
 // ── buf_append: resize+memcpy (5-15% faster than buf.insert iterator path) ──
@@ -30,6 +31,17 @@ static inline void buf_append(std::vector<char>& buf, const char* s, size_t len)
 static inline void buf_append(std::vector<char>& buf, const std::string& s) {
     buf_append(buf, s.data(), s.size());
 }
+
+// ── Header normalization lookup table: lowercase + '-' → '_' in one table lookup ──
+// Eliminates 3 branches per character in the header normalization loop.
+static constexpr std::array<char, 256> make_header_norm_table() {
+    std::array<char, 256> t{};
+    for (int i = 0; i < 256; i++) t[i] = (char)i;
+    for (int i = 'A'; i <= 'Z'; i++) t[i] = (char)(i + 32);
+    t[(unsigned char)'-'] = '_';
+    return t;
+}
+static constexpr auto s_header_norm = make_header_norm_table();
 
 // ── Case-insensitive helpers (zero-allocation, for content-type/origin checks) ──
 static inline bool ci_starts_with(const char* s, size_t s_len, const char* prefix, size_t p_len) {
@@ -1734,6 +1746,27 @@ static const char* try_compress_inline(
     return result;
 }
 
+// ── Shared ultra-fast JSON response buffer builder ────────────────────────────
+// Used by both build_http_response_bytes and build_and_write_http_response.
+static inline void build_fast_json_response_buf(
+    std::vector<char>& buf, const CachedJsonPrefix& jp,
+    const char* body_data, size_t body_len, bool keep_alive)
+{
+    char cl_buf[20];
+    int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
+    static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
+    static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
+    const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
+    size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
+    size_t total = jp.len + cl_len + suffix_len + body_len;
+    buf.resize(total);
+    char* dst = buf.data();
+    memcpy(dst, jp.data, jp.len); dst += jp.len;
+    memcpy(dst, cl_buf, cl_len); dst += cl_len;
+    memcpy(dst, suffix, suffix_len); dst += suffix_len;
+    memcpy(dst, body_data, body_len);
+}
+
 // ── Response builder with optional CORS + compression headers ────────────────
 
 static PyObject* build_http_response_bytes(
@@ -1756,22 +1789,10 @@ static PyObject* build_http_response_bytes(
 
     // Ultra-fast path: any status code with cached JSON prefix, no CORS, no compression
     // Covers ~99% of API responses. Single resize + 4 memcpy — zero buf_append calls.
-    if (__builtin_expect(!!(!cors && !content_encoding &&
-        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data), 1)) {
-        const auto& jp = s_json_prefixes[status_code];
-        char cl_buf[20];
-        int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
-        static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
-        static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
-        const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
-        size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
-        size_t total = jp.len + cl_len + suffix_len + body_len;
-        buf.resize(total);
-        char* dst = buf.data();
-        memcpy(dst, jp.data, jp.len); dst += jp.len;
-        memcpy(dst, cl_buf, cl_len); dst += cl_len;
-        memcpy(dst, suffix, suffix_len); dst += suffix_len;
-        memcpy(dst, body_data, body_len);
+    if (LIKELY(!cors && !content_encoding &&
+        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
+        build_fast_json_response_buf(buf, s_json_prefixes[status_code],
+                                     body_data, body_len, keep_alive);
         PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
         release_buffer(std::move(buf));
         return result;
@@ -1859,11 +1880,11 @@ static PyObject* build_http_error_response(int status_code, const char* message,
     const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0) {
     // Build JSON error body: {"detail":"message"} with proper escaping
     auto body_buf = acquire_buffer();
-    const char* pre = "{\"detail\":\"";
-    body_buf.insert(body_buf.end(), pre, pre + 11);
+    static constexpr char pre[] = "{\"detail\":\"";
+    buf_append(body_buf, pre, sizeof(pre) - 1);
     json_escape_cstr(body_buf, message, strlen(message));
-    const char* post = "\"}";
-    body_buf.insert(body_buf.end(), post, post + 2);
+    static constexpr char post[] = "\"}";
+    buf_append(body_buf, post, sizeof(post) - 1);
 
     PyObject* result = build_http_response_bytes(
         status_code, body_buf.data(), body_buf.size(), keep_alive, cors, origin, origin_len);
@@ -1921,24 +1942,12 @@ static int build_and_write_http_response(
     const char* content_encoding = nullptr)
 {
     // Ultra-fast path: cached JSON prefix, no CORS, no compression
-    if (__builtin_expect(!!(!cors && !content_encoding &&
-        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data), 1)) {
+    if (LIKELY(!cors && !content_encoding &&
+        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
         auto buf = acquire_buffer();
         buf.reserve(256 + body_len);
-        const auto& jp = s_json_prefixes[status_code];
-        char cl_buf[20];
-        int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
-        static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
-        static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
-        const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
-        size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
-        size_t total = jp.len + cl_len + suffix_len + body_len;
-        buf.resize(total);
-        char* dst = buf.data();
-        memcpy(dst, jp.data, jp.len); dst += jp.len;
-        memcpy(dst, cl_buf, cl_len); dst += cl_len;
-        memcpy(dst, suffix, suffix_len); dst += suffix_len;
-        memcpy(dst, body_data, body_len);
+        build_fast_json_response_buf(buf, s_json_prefixes[status_code],
+                                     body_data, body_len, keep_alive);
 
         // Direct write from buffer — skip PyBytes entirely
 #ifndef _WIN32
@@ -2006,8 +2015,8 @@ static int serialize_json_and_write_response(
     }
 
     // 3. Ultra-fast path: no CORS, no compression, cached prefix
-    if (__builtin_expect(!!(!cors && !encoding &&
-        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data), 1))
+    if (LIKELY(!cors && !encoding &&
+        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data))
     {
         const auto& jp = s_json_prefixes[status_code];
         char header_buf[256];
@@ -2417,7 +2426,7 @@ static PyObject* CoreApp_handle_http(
     const CorsConfig* cors_ptr = self->cors_enabled ? self->cors_ptr_cached : nullptr;
     bool has_cors = cors_ptr && !origin_sv.empty() && cors_origin_allowed(cors_ptr, origin_sv.data, origin_sv.len);
 
-    if (__builtin_expect(!!(has_cors && req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0), 0)) {
+    if (UNLIKELY(has_cors && req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0)) {
         // Full CORS preflight response — entirely in C++, no route needed
         --self->counters.active_requests;
         PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive));
@@ -2454,7 +2463,7 @@ static PyObject* CoreApp_handle_http(
     }
 
     // ── WebSocket upgrade detection ────────────────────────────────────
-    if (__builtin_expect(!!(req.upgrade), 0)) {
+    if (UNLIKELY(req.upgrade)) {
         // Extract Sec-WebSocket-Key header
         StringView ws_key;
         for (int i = 0; i < req.header_count; i++) {
@@ -2552,7 +2561,7 @@ static PyObject* CoreApp_handle_http(
     }
 
     auto match = self->router.at(req.path.data, req.path.len);
-    if (__builtin_expect(!!(!match), 0)) {
+    if (UNLIKELY(!match)) {
         // ── Trailing slash redirect: try with/without '/' ───────────
         // Use stack buffer to avoid heap allocation for path probe
         char alt_buf[512];
@@ -2640,7 +2649,7 @@ static PyObject* CoreApp_handle_http(
     }
 
     // ── Rate limiting (C++ native, per client IP) — sharded for low contention
-    if (__builtin_expect(!!(self->rate_limit_enabled && !self->current_client_ip.empty()), 0)) {
+    if (UNLIKELY(self->rate_limit_enabled && !self->current_client_ip.empty())) {
         auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
         int64_t window_ns = (int64_t)self->rate_limit_window_seconds * 1'000'000'000LL;
         size_t shard_idx = self->current_shard_idx;  // cached at connection time
@@ -2764,10 +2773,9 @@ static PyObject* CoreApp_handle_http(
                 const char* raw_val = eq + 1;
                 size_t raw_val_len = p - eq - 1;
 
-                // Fast path: skip decode if no percent-encoded chars (common case)
+                // Single-pass decode: skip if no encoding needed (common case)
                 std::string_view key_sv;
-                if (needs_percent_decode(raw_key, raw_key_len)) {
-                    percent_decode_into(decoded_key, raw_key, raw_key_len);
+                if (percent_decode_into_if_needed(decoded_key, raw_key, raw_key_len)) {
                     key_sv = std::string_view(decoded_key);
                 } else {
                     key_sv = std::string_view(raw_key, raw_key_len);
@@ -2776,10 +2784,9 @@ static PyObject* CoreApp_handle_http(
                 auto qit = spec.query_map.find(key_sv);
                 if (qit != spec.query_map.end()) {
                     const auto& fs = spec.query_specs[qit->second];
-                    // Percent-decode value before coercion
+                    // Single-pass percent-decode value before coercion
                     std::string_view val_sv;
-                    if (needs_percent_decode(raw_val, raw_val_len)) {
-                        percent_decode_into(decoded_val, raw_val, raw_val_len);
+                    if (percent_decode_into_if_needed(decoded_val, raw_val, raw_val_len)) {
                         val_sv = std::string_view(decoded_val);
                     } else {
                         val_sv = std::string_view(raw_val, raw_val_len);
@@ -2829,8 +2836,7 @@ static PyObject* CoreApp_handle_http(
                 char norm_buf[256];
                 size_t norm_len = hdr.name.len < 255 ? hdr.name.len : 255;
                 for (size_t j = 0; j < norm_len; j++) {
-                    char c = hdr.name.data[j];
-                    norm_buf[j] = (c >= 'A' && c <= 'Z') ? c + 32 : (c == '-') ? '_' : c;
+                    norm_buf[j] = s_header_norm[(unsigned char)hdr.name.data[j]];
                 }
                 std::string_view normalized(norm_buf, norm_len);
                 auto hit = spec.header_map.find(normalized);
@@ -2846,9 +2852,9 @@ static PyObject* CoreApp_handle_http(
     // ── Fill defaults for missing params ─────────────────────────────────
     auto fill_defaults_http = [&](const std::vector<FieldSpec>& specs) {
         for (const auto& fs : specs) {
-            // Single hash+lookup instead of Contains(hash+lookup) + SetItem(hash+lookup)
-            if (fs.default_value && !PyDict_GetItem(kwargs.get(), fs.py_field_name)) {
-                PyDict_SetItem(kwargs.get(), fs.py_field_name, fs.default_value);
+            // PyDict_SetDefault: single hash+lookup — sets only if key absent
+            if (fs.default_value) {
+                PyDict_SetDefault(kwargs.get(), fs.py_field_name, fs.default_value);
             }
         }
     };
@@ -2875,6 +2881,8 @@ static PyObject* CoreApp_handle_http(
                 const char* p = req.body.data;
                 const char* end = p + req.body.len;
                 PyRef form_dict(PyDict_New());
+                // Scratch buffers — reused across iterations (same pattern as query params)
+                std::string decoded_form_key, decoded_form_val;
                 while (p < end) {
                     const char* key_start = p;
                     const char* eq = nullptr;
@@ -2883,9 +2891,25 @@ static PyObject* CoreApp_handle_http(
                         p++;
                     }
                     if (eq) {
-                        // Percent-decode inline (simple form values)
-                        std::string_view key_sv(key_start, eq - key_start);
-                        std::string_view val_sv(eq + 1, p - eq - 1);
+                        const char* raw_key = key_start;
+                        size_t raw_key_len = eq - key_start;
+                        const char* raw_val = eq + 1;
+                        size_t raw_val_len = p - eq - 1;
+
+                        // Single-pass percent-decode key and value (handles %XX and + → space)
+                        std::string_view key_sv;
+                        if (percent_decode_into_if_needed(decoded_form_key, raw_key, raw_key_len)) {
+                            key_sv = std::string_view(decoded_form_key);
+                        } else {
+                            key_sv = std::string_view(raw_key, raw_key_len);
+                        }
+                        std::string_view val_sv;
+                        if (percent_decode_into_if_needed(decoded_form_val, raw_val, raw_val_len)) {
+                            val_sv = std::string_view(decoded_form_val);
+                        } else {
+                            val_sv = std::string_view(raw_val, raw_val_len);
+                        }
+
                         PyRef pk(PyUnicode_FromStringAndSize(key_sv.data(), key_sv.size()));
                         PyRef pv(PyUnicode_FromStringAndSize(val_sv.data(), val_sv.size()));
                         if (pk && pv) {
@@ -4246,8 +4270,7 @@ static PyObject* CoreApp_parse_and_route(
                 char norm_buf[256];
                 size_t norm_len = hdr.name.len < 255 ? hdr.name.len : 255;
                 for (size_t j = 0; j < norm_len; j++) {
-                    char c = hdr.name.data[j];
-                    norm_buf[j] = (c >= 'A' && c <= 'Z') ? c + 32 : (c == '-') ? '_' : c;
+                    norm_buf[j] = s_header_norm[(unsigned char)hdr.name.data[j]];
                 }
                 std::string_view normalized(norm_buf, norm_len);
                 auto hit = spec.header_map.find(normalized);

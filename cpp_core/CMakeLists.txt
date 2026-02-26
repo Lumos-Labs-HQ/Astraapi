@@ -69,7 +69,7 @@ option(ENABLE_PGO_USE "Build with PGO data" OFF)
 if(MSVC)
     # MSVC (Windows)
     target_compile_options(_fastapi_core PRIVATE
-        /O2 /Ob3 /GL /fp:fast
+        /O2 /Ob3 /GL /fp:fast /arch:AVX2
         /W3 /wd4244 /wd4267 /wd4996
     )
     target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GR->)
@@ -98,6 +98,8 @@ else()
         -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type
     )
     target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
+    target_compile_options(_fastapi_core PRIVATE -fvisibility=hidden)
+    target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>)
 
     # -Wno-free-nonheap-object: suppress GCC 14 false positive in LTO-inlined vector::push_back
     target_link_options(_fastapi_core PRIVATE -flto -Wno-free-nonheap-object)

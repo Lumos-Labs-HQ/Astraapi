@@ -44,3 +44,30 @@ inline bool needs_percent_decode(const char* s, size_t len) {
     }
     return false;
 }
+
+// Single-pass decode: returns true if decoding was needed (out was modified).
+// If returns false, out is untouched and caller should use the original string_view.
+// Eliminates the double-scan of needs_percent_decode() + percent_decode_into().
+inline bool percent_decode_into_if_needed(std::string& out, const char* s, size_t len) {
+    out.clear();
+    bool modified = false;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] == '%' && i + 2 < len) {
+            int hi = hex_val(s[i + 1]);
+            int lo = hex_val(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                if (!modified) { out.append(s, i); modified = true; }
+                out.push_back((char)((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        if (s[i] == '+') {
+            if (!modified) { out.append(s, i); modified = true; }
+            out.push_back(' ');
+        } else if (modified) {
+            out.push_back(s[i]);
+        }
+    }
+    return modified;
+}
