@@ -191,9 +191,12 @@ typedef struct {
     int rate_limit_window_seconds = 60;
     struct RateLimitEntry { int count; int64_t window_start_ns; };
     // Cache-line aligned: prevents inter-shard contention from mutex invalidation
+    // Transparent hash allows string_view lookups without copying the key string,
+    // avoiding a per-request std::string hash+copy for the client IP.
     struct alignas(64) RateLimitShard {
         std::mutex mutex;
-        std::unordered_map<std::string, RateLimitEntry> counters;
+        std::unordered_map<std::string, RateLimitEntry,
+                           TransparentStringHash, TransparentStringEqual> counters;
     };
     RateLimitShard rate_limit_shards[RATE_LIMIT_SHARDS];
     std::string current_client_ip;

@@ -19,3 +19,10 @@ yyjson_doc* yyjson_parse_raw(const char* data, size_t len);
 // Phase 2: Convert yyjson_doc to Python objects (requires GIL).
 // Frees the doc internally. Returns new reference or NULL with exception set.
 PyObject* yyjson_doc_to_pyobject(yyjson_doc* doc);
+
+// Phase 2b: Merge yyjson object keys directly into an existing PyDict (requires GIL).
+// For top-level JSON objects only — merges key-value pairs into target_dict.
+// Avoids creating an intermediate Python dict + PyDict_Update.
+// Frees the doc internally. Returns 0 on success, -1 on error with exception set.
+// Also sets *out_full_dict to a new Python dict of the full body (for later paths that need it).
+int yyjson_doc_merge_to_dict(yyjson_doc* doc, PyObject* target_dict, PyObject** out_full_dict);

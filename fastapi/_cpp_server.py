@@ -1413,16 +1413,14 @@ class CppHttpProtocol(asyncio.Protocol):
             raw = await _drive_coro(coro, first_yield)
             transport = self._transport
             if transport and not transport.is_closing():
-                # FAST PATH — dict/list are the most common return types (90%+)
-                raw_type = type(raw)
-                if raw_type is dict or raw_type is list or raw_type is str or raw_type is int or raw_type is float or raw_type is bool or raw is None:
-                    resp = self._core.build_response(raw, status_code, keep_alive)
-                    if resp:
-                        transport.write(resp)
-                    else:
-                        transport.write(_500_RESP)
-                # StreamingResponse — chunked transfer encoding
-                elif hasattr(raw, 'body_iterator'):
+                # OPT-3.4: Unified type dispatch in C++ — handles dict/list/str/int/float/
+                # bool/None/Response objects/Pydantic models in a single C function call.
+                # Returns None only for StreamingResponse (needs Python async iteration).
+                resp = self._core.build_response_from_any(raw, status_code, keep_alive)
+                if resp is not None:
+                    transport.write(resp)
+                else:
+                    # StreamingResponse — chunked transfer encoding (must stay in Python)
                     status = getattr(raw, 'status_code', 200)
                     headers_list = []
                     if hasattr(raw, 'raw_headers'):
@@ -1430,7 +1428,6 @@ class CppHttpProtocol(asyncio.Protocol):
                     elif hasattr(raw, 'headers'):
                         for k, v in raw.headers.items():
                             headers_list.append((k, v))
-                    # Pre-built status line replaces 4× extend() with single lookup + extend
                     prefix = _STREAMING_STATUS_LINES.get(status)
                     if prefix is not None:
                         buf = bytearray(prefix)
@@ -1460,18 +1457,6 @@ class CppHttpProtocol(asyncio.Protocol):
                             transport.write(b"0\r\n\r\n")
                         except Exception:
                             logger.debug("Failed to write chunked trailer", exc_info=True)
-                # Handle Response objects (HTMLResponse, etc.)
-                elif hasattr(raw, "body") and hasattr(raw, "status_code"):
-                    self._write_response_obj(raw, keep_alive)
-                else:
-                    # Pydantic models → dict for JSON serialization
-                    if hasattr(raw, 'model_dump'):
-                        raw = raw.model_dump(mode='json')
-                    resp = self._core.build_response(raw, status_code, keep_alive)
-                    if resp:
-                        transport.write(resp)
-                    else:
-                        transport.write(_500_RESP)
             # BackgroundTasks support
             background = getattr(raw, 'background', None)
             if background is not None:
@@ -1863,9 +1848,28 @@ async def run_server(
     # tuples, dicts). NO periodic gc.collect() — it blocks the event loop
     # scanning live async task objects (measured: 60-70ms at 88K req/s).
     # Only collect during idle periods to prevent long-term cycle leaks.
+    # Safety net: if RSS grows >100MB since last check under sustained load,
+    # do a fast gen0 collection to catch cyclic refs from user code.
+    _last_rss = [0]
+    try:
+        import resource as _resource
+        _last_rss[0] = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+    except (ImportError, AttributeError):
+        pass  # Windows — fall back to no RSS tracking
+
     def _gc_maintenance():
         if active_count[0] == 0:
             gc.collect(1)
+        else:
+            # Safety net: prevent unbounded memory growth from cyclic user code
+            try:
+                import resource as _resource
+                current_rss = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+                if _last_rss[0] > 0 and current_rss > _last_rss[0] + 100_000:
+                    gc.collect(0)  # fast gen0 only (<1ms)
+                _last_rss[0] = current_rss
+            except (ImportError, AttributeError):
+                pass
         loop.call_later(600.0, _gc_maintenance)
 
     loop.call_later(600.0, _gc_maintenance)

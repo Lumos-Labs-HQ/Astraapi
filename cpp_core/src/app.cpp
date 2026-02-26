@@ -1,5 +1,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+
+
 #include "app.hpp"
 #include "asgi_constants.hpp"
 #include "json_writer.hpp"
@@ -7,6 +9,7 @@
 #include "buffer_pool.hpp"
 #include "http_parser.hpp"
 #include "ws_frame_parser.hpp"
+#include "percent_decode.hpp"
 #include "pyref.hpp"
 #include <cstring>
 #include "platform.hpp"
@@ -88,6 +91,32 @@ static PyObject* s_validate_str = nullptr;           // "validate_python"
 static PyObject* s_fut_blocking = nullptr;           // "_asyncio_future_blocking"
 static PyObject* s_async_tag = nullptr;              // "async"
 
+// Cached HTTP method strings — only 7 possible values, avoids per-request allocation
+static PyObject* s_method_GET = nullptr;
+static PyObject* s_method_POST = nullptr;
+static PyObject* s_method_PUT = nullptr;
+static PyObject* s_method_DELETE = nullptr;
+static PyObject* s_method_PATCH = nullptr;
+static PyObject* s_method_HEAD = nullptr;
+static PyObject* s_method_OPTIONS = nullptr;
+
+// Returns cached PyObject* (borrowed ref) for common methods, or creates a new one.
+// For cached methods: returns borrowed ref (caller must NOT Py_DECREF).
+// For unknown methods: returns new ref (caller must Py_DECREF).
+// Sets *is_cached to true if a cached ref was returned.
+static inline PyObject* get_cached_method(const char* data, size_t len, bool& is_cached) {
+    is_cached = true;
+    if (len == 3 && data[0] == 'G' && data[1] == 'E' && data[2] == 'T') return s_method_GET;
+    if (len == 4 && data[0] == 'P' && data[1] == 'O' && data[2] == 'S' && data[3] == 'T') return s_method_POST;
+    if (len == 3 && data[0] == 'P' && data[1] == 'U' && data[2] == 'T') return s_method_PUT;
+    if (len == 6 && data[0] == 'D') return s_method_DELETE;
+    if (len == 5 && data[0] == 'P' && data[1] == 'A') return s_method_PATCH;
+    if (len == 4 && data[0] == 'H') return s_method_HEAD;
+    if (len == 7 && data[0] == 'O') return s_method_OPTIONS;
+    is_cached = false;
+    return PyUnicode_FromStringAndSize(data, (Py_ssize_t)len);
+}
+
 void cleanup_cached_refs() {
     Py_CLEAR(s_http_exc_type);
     Py_CLEAR(s_fastapi_http_exc_type);
@@ -109,6 +138,13 @@ void cleanup_cached_refs() {
     Py_CLEAR(s_fut_blocking);
     Py_CLEAR(s_async_tag);
     Py_CLEAR(s_need_more_data);
+    Py_CLEAR(s_method_GET);
+    Py_CLEAR(s_method_POST);
+    Py_CLEAR(s_method_PUT);
+    Py_CLEAR(s_method_DELETE);
+    Py_CLEAR(s_method_PATCH);
+    Py_CLEAR(s_method_HEAD);
+    Py_CLEAR(s_method_OPTIONS);
 }
 
 // ── Eager initialization — called at server startup to eliminate first-request overhead ──
@@ -158,6 +194,15 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     if (!s_validate_str) s_validate_str = PyUnicode_InternFromString("validate_python");
     if (!s_fut_blocking) s_fut_blocking = PyUnicode_InternFromString("_asyncio_future_blocking");
     if (!s_async_tag) s_async_tag = PyUnicode_InternFromString("async");
+
+    // Pre-intern HTTP method strings (only 7 values — eliminates per-request allocation)
+    if (!s_method_GET) s_method_GET = PyUnicode_InternFromString("GET");
+    if (!s_method_POST) s_method_POST = PyUnicode_InternFromString("POST");
+    if (!s_method_PUT) s_method_PUT = PyUnicode_InternFromString("PUT");
+    if (!s_method_DELETE) s_method_DELETE = PyUnicode_InternFromString("DELETE");
+    if (!s_method_PATCH) s_method_PATCH = PyUnicode_InternFromString("PATCH");
+    if (!s_method_HEAD) s_method_HEAD = PyUnicode_InternFromString("HEAD");
+    if (!s_method_OPTIONS) s_method_OPTIONS = PyUnicode_InternFromString("OPTIONS");
 
     // Cached return tuples
     if (!s_need_more_data) {
@@ -235,7 +280,7 @@ PyTypeObject InlineResultType = {
     .tp_name = "_fastapi_core.InlineResult",
     .tp_basicsize = sizeof(InlineResultObject),
     .tp_dealloc = (destructor)InlineResult_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
     .tp_members = InlineResult_members,
 };
 
@@ -317,7 +362,7 @@ PyTypeObject MatchResultType = {
     .tp_name = "_fastapi_core.MatchResult",
     .tp_basicsize = sizeof(MatchResultObject),
     .tp_dealloc = (destructor)MatchResult_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
     .tp_methods = MatchResult_methods,
     .tp_getset = MatchResult_getset,
 };
@@ -401,7 +446,7 @@ PyTypeObject ResponseDataType = {
     .tp_name = "_fastapi_core.ResponseData",
     .tp_basicsize = sizeof(ResponseDataObject),
     .tp_dealloc = (destructor)ResponseData_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
     .tp_methods = ResponseData_methods,
     .tp_getset = ResponseData_getset,
 };
@@ -2601,7 +2646,14 @@ static PyObject* CoreApp_handle_http(
         size_t shard_idx = self->current_shard_idx;  // cached at connection time
         auto& shard = self->rate_limit_shards[shard_idx];
         std::lock_guard<std::mutex> rl_lock(shard.mutex);
-        auto& entry = shard.counters[self->current_client_ip];
+        // OPT-3.7: Use transparent find with string_view to avoid per-request
+        // std::string copy+hash. Only insert (which needs a key copy) on first miss.
+        std::string_view ip_sv(self->current_client_ip);
+        auto it = shard.counters.find(ip_sv);
+        if (it == shard.counters.end()) {
+            it = shard.counters.try_emplace(self->current_client_ip).first;
+        }
+        auto& entry = it->second;
         if (now_ns - entry.window_start_ns > window_ns) {
             entry.count = 1;
             entry.window_start_ns = now_ns;
@@ -2691,10 +2743,14 @@ static PyObject* CoreApp_handle_http(
         }
     }
 
-    // ── Query parameters (O(1) hash map lookup) ────────────────────────
+    // ── Query parameters (O(1) hash map lookup + percent-decoding) ─────
     if (spec.has_query_params && !req.query_string.empty()) {
         const char* p = req.query_string.data;
         const char* end = p + req.query_string.len;
+        // Scratch buffers — reused across iterations (eliminates 2N allocs)
+        std::string decoded_key, decoded_val;
+        decoded_key.reserve(64);
+        decoded_val.reserve(256);
         while (p < end) {
             const char* key_start = p;
             const char* eq = nullptr;
@@ -2703,12 +2759,31 @@ static PyObject* CoreApp_handle_http(
                 p++;
             }
             if (eq) {
-                std::string_view key_sv(key_start, eq - key_start);
-                std::string_view val_sv(eq + 1, p - eq - 1);
+                const char* raw_key = key_start;
+                size_t raw_key_len = eq - key_start;
+                const char* raw_val = eq + 1;
+                size_t raw_val_len = p - eq - 1;
+
+                // Fast path: skip decode if no percent-encoded chars (common case)
+                std::string_view key_sv;
+                if (needs_percent_decode(raw_key, raw_key_len)) {
+                    percent_decode_into(decoded_key, raw_key, raw_key_len);
+                    key_sv = std::string_view(decoded_key);
+                } else {
+                    key_sv = std::string_view(raw_key, raw_key_len);
+                }
 
                 auto qit = spec.query_map.find(key_sv);
                 if (qit != spec.query_map.end()) {
                     const auto& fs = spec.query_specs[qit->second];
+                    // Percent-decode value before coercion
+                    std::string_view val_sv;
+                    if (needs_percent_decode(raw_val, raw_val_len)) {
+                        percent_decode_into(decoded_val, raw_val, raw_val_len);
+                        val_sv = std::string_view(decoded_val);
+                    } else {
+                        val_sv = std::string_view(raw_val, raw_val_len);
+                    }
                     PyObject* py_val = coerce_param(val_sv, fs.type_tag);
                     if (!py_val) return nullptr;
                     PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
@@ -2902,23 +2977,31 @@ static PyObject* CoreApp_handle_http(
             doc = yyjson_parse_raw(req.body.data, req.body.len);
             Py_END_ALLOW_THREADS
             if (doc) {
-                PyRef parsed(yyjson_doc_to_pyobject(doc));
-                if (parsed) {
-                    json_body_obj = parsed.release();
+                if (spec.embed_body_fields && kwargs) {
+                    // OPT: merge yyjson keys directly into kwargs in one pass,
+                    // avoiding intermediate dict + PyDict_Update overhead
+                    PyObject* full_dict = nullptr;
+                    if (yyjson_doc_merge_to_dict(doc, kwargs.get(), &full_dict) == 0 && full_dict) {
+                        json_body_obj = full_dict;  // for model_validate / InlineResult
+                    }
+                    // doc freed by yyjson_doc_merge_to_dict
                 } else {
-                    PyErr_Clear();
+                    PyRef parsed(yyjson_doc_to_pyobject(doc));
+                    if (parsed) {
+                        json_body_obj = parsed.release();
+                    } else {
+                        PyErr_Clear();
+                    }
                 }
             }
 
             if (json_body_obj != Py_None && spec.body_param_name) {
-                if (spec.embed_body_fields) {
-                    if (PyDict_Check(json_body_obj)) {
-                        PyDict_Update(kwargs.get(), json_body_obj);
-                    }
-                } else {
+                if (!spec.embed_body_fields) {
+                    // Non-embed: set full body as a named kwarg
                     PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
                     PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
                 }
+                // embed case already merged directly above
             }
         }
     }
@@ -2953,8 +3036,13 @@ static PyObject* CoreApp_handle_http(
             }
 
             // s_m_key, s_p_key pre-cached at startup
-            PyRef method_str(PyUnicode_FromStringAndSize(req.method.data, (Py_ssize_t)req.method.len));
-            if (method_str) PyDict_SetItem(kwargs.get(), s_m_key, method_str.get());
+            // Use cached method string if available (avoids per-request allocation)
+            bool method_cached = false;
+            PyObject* method_str = get_cached_method(req.method.data, req.method.len, method_cached);
+            if (method_str) {
+                PyDict_SetItem(kwargs.get(), s_m_key, method_str);
+                if (!method_cached) Py_DECREF(method_str);
+            }
 
             PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
             if (path_str) PyDict_SetItem(kwargs.get(), s_p_key, path_str.get());
@@ -3782,6 +3870,132 @@ static PyObject* CoreApp_build_response(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// build_response_from_any — unified type dispatch + serialization in C++
+//
+// Takes: (raw_result, status_code, keep_alive)
+// Returns: HTTP response bytes (PyBytes) for JSON-serializable / Response objects,
+//          Py_None if raw_result is a StreamingResponse (Python must handle it),
+//          NULL on error.
+// Handles: dict, list, str, int, float, bool, None, Response objects, Pydantic models
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static PyObject* CoreApp_build_response_from_any(
+    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
+{
+    if (nargs != 3) {
+        PyErr_SetString(PyExc_TypeError, "build_response_from_any requires 3 args");
+        return nullptr;
+    }
+
+    PyObject* raw = args[0];
+    int status_code = (int)PyLong_AsLong(args[1]);
+    if (status_code == -1 && PyErr_Occurred()) return nullptr;
+    bool keep_alive = PyObject_IsTrue(args[2]);
+
+    // FAST PATH: JSON-serializable primitives (90%+ of responses)
+    if (PyDict_Check(raw) || PyList_Check(raw) || PyUnicode_Check(raw) ||
+        PyLong_Check(raw) || PyFloat_Check(raw) || PyBool_Check(raw) ||
+        PyTuple_Check(raw) || raw == Py_None) {
+        return CoreApp_build_response(self, args, nargs);
+    }
+
+    // StreamingResponse: has body_iterator → return None, let Python handle async iteration
+    if (PyObject_HasAttrString(raw, "body_iterator")) {
+        Py_RETURN_NONE;
+    }
+
+    // Response objects (HTMLResponse, etc.): has .body + .status_code
+    if (PyObject_HasAttrString(raw, "body") && PyObject_HasAttrString(raw, "status_code")) {
+        PyRef body_attr(PyObject_GetAttrString(raw, "body"));
+        PyRef sc_attr(PyObject_GetAttrString(raw, "status_code"));
+        if (body_attr && PyBytes_Check(body_attr.get()) && sc_attr && PyLong_Check(sc_attr.get())) {
+            int resp_sc = (int)PyLong_AsLong(sc_attr.get());
+            char* resp_body; Py_ssize_t resp_body_len;
+            PyBytes_AsStringAndSize(body_attr.get(), &resp_body, &resp_body_len);
+
+            PyRef raw_hdrs(PyObject_GetAttrString(raw, "raw_headers"));
+            auto buf = acquire_buffer();
+            buf.reserve(256 + (size_t)resp_body_len);
+
+            // Status line
+            if (resp_sc > 0 && resp_sc < 600 && s_status_lines[resp_sc].data) {
+                const auto& sl = s_status_lines[resp_sc];
+                buf_append(buf, sl.data, sl.len - 2);
+            } else {
+                static const char prefix[] = "HTTP/1.1 ";
+                buf_append(buf, prefix, sizeof(prefix) - 1);
+                char sc_buf[8];
+                int sn = fast_i64_to_buf(sc_buf, resp_sc);
+                buf_append(buf, sc_buf, sn);
+                buf.push_back(' ');
+                const char* reason = status_reason(resp_sc);
+                buf_append(buf, reason, strlen(reason));
+            }
+
+            // Headers from raw_headers
+            if (raw_hdrs && PyList_Check(raw_hdrs.get())) {
+                Py_ssize_t nhdr = PyList_GET_SIZE(raw_hdrs.get());
+                for (Py_ssize_t hi = 0; hi < nhdr; hi++) {
+                    PyObject* htuple = PyList_GET_ITEM(raw_hdrs.get(), hi);
+                    if (PyTuple_Check(htuple) && PyTuple_GET_SIZE(htuple) >= 2) {
+                        PyObject* hname = PyTuple_GET_ITEM(htuple, 0);
+                        PyObject* hval = PyTuple_GET_ITEM(htuple, 1);
+                        if (PyBytes_Check(hname) && PyBytes_Check(hval)) {
+                            buf_append(buf, "\r\n", 2);
+                            buf_append(buf, PyBytes_AS_STRING(hname), (size_t)PyBytes_GET_SIZE(hname));
+                            buf_append(buf, ": ", 2);
+                            buf_append(buf, PyBytes_AS_STRING(hval), (size_t)PyBytes_GET_SIZE(hval));
+                        }
+                    }
+                }
+            }
+
+            // Connection header + end
+            static const char CONN_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
+            static const char CONN_CLOSE[] = "\r\nconnection: close\r\n\r\n";
+            if (keep_alive) {
+                buf_append(buf, CONN_KA, sizeof(CONN_KA) - 1);
+            } else {
+                buf_append(buf, CONN_CLOSE, sizeof(CONN_CLOSE) - 1);
+            }
+            buf_append(buf, resp_body, resp_body_len);
+
+            PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+            release_buffer(std::move(buf));
+            return result;
+        }
+        // body not bytes — fall through to Pydantic/fallback
+    }
+
+    // Pydantic model: has .model_dump → convert to dict, then serialize
+    if (PyObject_HasAttrString(raw, "model_dump")) {
+        static PyObject* s_mode_json = nullptr;
+        if (!s_mode_json) {
+            s_mode_json = PyUnicode_InternFromString("json");
+        }
+        PyRef kw(PyDict_New());
+        if (kw && s_mode_json) {
+            static PyObject* s_mode_key = nullptr;
+            if (!s_mode_key) s_mode_key = PyUnicode_InternFromString("mode");
+            PyDict_SetItem(kw.get(), s_mode_key, s_mode_json);
+        }
+        PyRef method(PyObject_GetAttrString(raw, "model_dump"));
+        PyRef empty_args(PyTuple_New(0));
+        if (method && empty_args) {
+            PyRef dumped(PyObject_Call(method.get(), empty_args.get(), kw.get()));
+            if (dumped) {
+                PyObject* new_args[3] = { dumped.get(), args[1], args[2] };
+                return CoreApp_build_response(self, new_args, 3);
+            }
+        }
+        PyErr_Clear();
+    }
+
+    // Ultimate fallback: try to serialize whatever it is
+    return CoreApp_build_response(self, args, nargs);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PreparedRequest — returned by parse_and_route() for async dispatch
 // All PyObject* fields, T_OBJECT_EX for zero-overhead attribute access.
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3819,7 +4033,7 @@ PyTypeObject PreparedRequestType = {
     .tp_name = "_fastapi_core.PreparedRequest",
     .tp_basicsize = sizeof(PreparedRequestObject),
     .tp_dealloc = (destructor)PreparedRequest_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
     .tp_members = PreparedRequest_members,
 };
 
@@ -4066,20 +4280,24 @@ static PyObject* CoreApp_parse_and_route(
         doc = yyjson_parse_raw(req.body.data, req.body.len);
         Py_END_ALLOW_THREADS
         if (doc) {
-            PyRef parsed(yyjson_doc_to_pyobject(doc));
-            if (parsed) {
-                json_body_obj = parsed.release();
+            if (spec.embed_body_fields && kwargs) {
+                // OPT: merge yyjson keys directly into kwargs in one pass
+                PyObject* full_dict = nullptr;
+                if (yyjson_doc_merge_to_dict(doc, kwargs.get(), &full_dict) == 0 && full_dict) {
+                    json_body_obj = full_dict;
+                }
             } else {
-                PyErr_Clear();
+                PyRef parsed(yyjson_doc_to_pyobject(doc));
+                if (parsed) {
+                    json_body_obj = parsed.release();
+                } else {
+                    PyErr_Clear();
+                }
             }
         }
 
         if (json_body_obj != Py_None && spec.body_param_name) {
-            if (spec.embed_body_fields) {
-                if (PyDict_Check(json_body_obj)) {
-                    PyDict_Update(kwargs.get(), json_body_obj);
-                }
-            } else {
+            if (!spec.embed_body_fields) {
                 PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
                 if (bp_key) PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
             }
@@ -4242,6 +4460,8 @@ static PyMethodDef CoreApp_methods[] = {
     {"serialize_and_write_http", (PyCFunction)(void(*)(void))CoreApp_serialize_and_write_http, METH_FASTCALL, nullptr},
     // Returns complete HTTP response as single PyBytes (no transport calls)
     {"build_response", (PyCFunction)(void(*)(void))CoreApp_build_response, METH_FASTCALL, nullptr},
+    // Unified type dispatch + serialization — handles dict/list/Response/Pydantic, returns None for StreamingResponse
+    {"build_response_from_any", (PyCFunction)(void(*)(void))CoreApp_build_response_from_any, METH_FASTCALL, nullptr},
     // Non-blocking parse+route — returns PreparedRequest for async dispatch
     {"parse_and_route", (PyCFunction)(void(*)(void))CoreApp_parse_and_route, METH_FASTCALL, nullptr},
     {"freeze_routes", (PyCFunction)CoreApp_freeze_routes, METH_NOARGS, nullptr},

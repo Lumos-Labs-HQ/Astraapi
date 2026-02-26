@@ -129,3 +129,62 @@ PyObject* yyjson_doc_to_pyobject(yyjson_doc* doc) {
     yyjson_doc_free(doc);
     return result;
 }
+
+// ── Phase 2b: Merge yyjson object directly into existing dict ───────────────
+// For embed_body_fields: merges top-level JSON object key-value pairs directly
+// into target_dict (kwargs), avoiding intermediate dict + PyDict_Update.
+// Also produces out_full_dict (the full body dict) for paths that need it
+// (model_validate, request_body_to_args, InlineResult).
+// Frees doc internally. Returns 0 on success, -1 on error.
+
+int yyjson_doc_merge_to_dict(yyjson_doc* doc, PyObject* target_dict, PyObject** out_full_dict) {
+    if (!doc) {
+        PyErr_SetString(PyExc_ValueError, "NULL yyjson_doc");
+        return -1;
+    }
+    yyjson_val* root = yyjson_doc_get_root(doc);
+    if (!root || yyjson_get_type(root) != YYJSON_TYPE_OBJ) {
+        // Not a JSON object — fall back to full conversion
+        PyObject* result = val_to_pyobject(root);
+        yyjson_doc_free(doc);
+        if (!result) return -1;
+        *out_full_dict = result;
+        // Can't merge non-object into dict
+        return 0;
+    }
+
+    size_t count = yyjson_obj_size(root);
+    PyRef full_dict(PyDict_New());
+    if (!full_dict) { yyjson_doc_free(doc); return -1; }
+
+    // Single pass: create each key-value pair once, insert into BOTH dicts
+    yyjson_obj_iter iter;
+    yyjson_obj_iter_init(root, &iter);
+    for (size_t i = 0; i < count; i++) {
+        yyjson_val* key = yyjson_obj_iter_next(&iter);
+        yyjson_val* value = yyjson_obj_iter_get_val(key);
+
+        const char* ks = yyjson_get_str(key);
+        size_t klen = yyjson_get_len(key);
+        PyRef py_key(PyUnicode_FromStringAndSize(ks, (Py_ssize_t)klen));
+        if (!py_key) { yyjson_doc_free(doc); return -1; }
+
+        PyRef py_val(val_to_pyobject(value));
+        if (!py_val) { yyjson_doc_free(doc); return -1; }
+
+        // Insert into kwargs (target) — the embed merge
+        if (PyDict_SetItem(target_dict, py_key.get(), py_val.get()) < 0) {
+            yyjson_doc_free(doc);
+            return -1;
+        }
+        // Insert into full_dict — for later use by model_validate etc.
+        if (PyDict_SetItem(full_dict.get(), py_key.get(), py_val.get()) < 0) {
+            yyjson_doc_free(doc);
+            return -1;
+        }
+    }
+
+    yyjson_doc_free(doc);
+    *out_full_dict = full_dict.release();
+    return 0;
+}
