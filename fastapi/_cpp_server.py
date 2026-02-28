@@ -893,6 +893,7 @@ _MAX_CONNECTIONS = int(os.environ.get("FASTAPI_MAX_CONNECTIONS", "0"))  # 0 = un
 # At 80% capacity (if limit set), force Connection: close to cycle connections
 _PRESSURE_THRESHOLD = _MAX_CONNECTIONS * 4 // 5 if _MAX_CONNECTIONS > 0 else 16384
 _WORKER_MODE = os.environ.get("_FASTAPI_WORKER") == "1"
+_RATE_LIMIT_ENABLED = False  # Set True after middleware config if RateLimitMiddleware present
 
 
 class _RejectProtocol(asyncio.Protocol):
@@ -1030,9 +1031,10 @@ class CppHttpProtocol(asyncio.Protocol):
             transport.set_write_buffer_limits(high=65536, low=16384)  # type: ignore[union-attr]
         else:
             transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
-        peername = transport.get_extra_info("peername")
-        if peername:
-            self._core.set_client_ip(peername[0])
+        if _RATE_LIMIT_ENABLED:
+            peername = transport.get_extra_info("peername")
+            if peername:
+                self._core.set_client_ip(peername[0])
         self._ka_reset()
 
     def connection_lost(self, exc: Exception | None) -> None:
@@ -1104,10 +1106,6 @@ class CppHttpProtocol(asyncio.Protocol):
             transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
             transport.close()
             _http_buf_clear(http_buf)
-            return
-
-        # Pass capsule directly to C++ — avoids PyMemoryView_FromMemory per call
-        if _http_buf_len(http_buf) == 0:
             return
 
         core = self._core
@@ -1879,6 +1877,8 @@ async def run_server(
                 max_req = kw.get("max_requests", 100)
                 window = kw.get("window_seconds", 60)
                 core_app.configure_rate_limit(True, max_req, window)
+                global _RATE_LIMIT_ENABLED
+                _RATE_LIMIT_ENABLED = True
 
         elif cls_name == "LoggingMiddleware":
             if hasattr(core_app, "set_post_response_hook"):

@@ -1914,7 +1914,7 @@ static int write_response_direct(int fd, PyObject* transport, PyObject* data) {
 #ifndef _WIN32
     if (fd >= 0 && PyBytes_Check(data)) {
         Py_ssize_t len = PyBytes_GET_SIZE(data);
-        if (len > 0 && len <= 4096) {
+        if (len > 0 && len <= 16384) {
             ssize_t sent = platform_socket_write(fd, PyBytes_AS_STRING(data), (size_t)len);
             if (sent == len) return 0;  // Full write — bypassed Python entirely
             if (sent > 0) {
@@ -1995,7 +1995,7 @@ static int serialize_json_and_write_response(
 {
     // 1. Serialize JSON into buffer pool
     auto buf = acquire_buffer();
-    if (write_json(json_obj, buf, 0) < 0) {
+    if (UNLIKELY(write_json(json_obj, buf, 0) < 0)) {
         release_buffer(std::move(buf));
         return -1;
     }
@@ -2005,7 +2005,7 @@ static int serialize_json_and_write_response(
     // 2. Optional compression
     const char* encoding = nullptr;
     std::vector<char> compressed;
-    if (ae_len > 0 && body_len > 500) {
+    if (UNLIKELY(ae_len > 0 && body_len > 500)) {
         compressed = acquire_buffer();
         encoding = try_compress_inline(body_data, body_len, accept_encoding, ae_len, compressed);
         if (encoding) {
@@ -2634,9 +2634,9 @@ static PyObject* CoreApp_handle_http(
     const auto& route = self->routes[idx];
 
     // ── Method check (O(1) bitmask) ────────────────────────────────────
-    if (route.method_mask) {
+    if (LIKELY(route.method_mask)) {
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
-        if (!(route.method_mask & req_method)) {
+        if (UNLIKELY(!(route.method_mask & req_method))) {
             if (!rt_frozen) lock.unlock();
             --self->counters.active_requests;
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
@@ -2691,7 +2691,7 @@ static PyObject* CoreApp_handle_http(
         }
     }
 
-    if (!route.fast_spec) {
+    if (UNLIKELY(!route.fast_spec)) {
         if (!rt_frozen) lock.unlock();
         --self->counters.active_requests;
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive,
@@ -3547,10 +3547,10 @@ body_done:
         }
 
         // Endpoint completed immediately — serialize + build HTTP response + write
-        if (PyDict_Check(raw_result) || PyList_Check(raw_result) ||
+        if (LIKELY(PyDict_Check(raw_result) || PyList_Check(raw_result) ||
             PyUnicode_Check(raw_result) || PyLong_Check(raw_result) ||
             PyFloat_Check(raw_result) || PyBool_Check(raw_result) ||
-            PyTuple_Check(raw_result) || raw_result == Py_None) {
+            PyTuple_Check(raw_result) || raw_result == Py_None)) {
 
             // Fused: serialize JSON + build HTTP + write — zero intermediate PyBytes
             int wrc = serialize_json_and_write_response(

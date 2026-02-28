@@ -107,9 +107,11 @@ struct PlatformIoVec {
     #include <strings.h>
     #include <unistd.h>
     #include <sys/uio.h>
+    #include <sys/socket.h>
 
+    // Use send(MSG_NOSIGNAL) instead of write() to avoid SIGPIPE on closed sockets
     inline ssize_t platform_socket_write(int fd, const void* buf, size_t len) {
-        return write(fd, buf, len);
+        return send(fd, buf, len, MSG_NOSIGNAL);
     }
 
     // Scatter-gather write: POSIX writev() — zero-copy cast since PlatformIoVec

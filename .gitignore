@@ -36,3 +36,5 @@ archive.zip
 **/build/
 .claude
 target/
+
+tmps/

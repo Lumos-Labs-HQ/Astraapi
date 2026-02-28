@@ -3,17 +3,9 @@
 import time
 import os
 import sys
-import tracemalloc
 from datetime import datetime, timezone
 
-# Measure import time
-# import_start = time.perf_counter()
 from fastapi import FastAPI
-# import_end = time.perf_counter()
-# print(f"⏱️  Module import time: {(import_end - import_start) * 1000:.2f}ms")
-
-# Start tracemalloc to track Python memory allocations
-tracemalloc.start()
 
 app = FastAPI(title="FastAPI + Core")
 
@@ -59,16 +51,20 @@ def _humanize_time(seconds: float) -> str:
 
 
 @app.get("/")
+def root():
+    return {"message": "Hello World"}
+
+@app.get("/async")
 async def root():
     return {"message": "Hello World"}
 
 
 @app.get("/hlth")
-async def health():
+def health():
     elapsed = time.time() - _startup_time
 
-    # Memory via tracemalloc + /proc
-    current_alloc, peak_alloc = tracemalloc.get_traced_memory()
+    # Memory via /proc
+    current_alloc = peak_alloc = 0
     proc = _read_proc_self()
     rss = proc.get("VmRSS", 0)
     vms = proc.get("VmSize", 0)
