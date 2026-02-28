@@ -7,10 +7,10 @@ import tracemalloc
 from datetime import datetime, timezone
 
 # Measure import time
-import_start = time.perf_counter()
+# import_start = time.perf_counter()
 from fastapi import FastAPI
-import_end = time.perf_counter()
-print(f"⏱️  Module import time: {(import_end - import_start) * 1000:.2f}ms")
+# import_end = time.perf_counter()
+# print(f"⏱️  Module import time: {(import_end - import_start) * 1000:.2f}ms")
 
 # Start tracemalloc to track Python memory allocations
 tracemalloc.start()
@@ -101,9 +101,6 @@ if __name__ == "__main__":
         elif arg.startswith("--host="):
             host = arg.split("=")[1]
     
-    # Measure server startup time
-    server_start = time.perf_counter()
     print(f"🚀 Starting server at {host}:{port}...")
-    app.run(host=host, port=port)
-    server_end = time.perf_counter()
-    print(f"⏱️  Server run time: {(server_end - server_start) * 1000:.2f}ms")
+    app.run(host=host, port=port, workers=2)
+    

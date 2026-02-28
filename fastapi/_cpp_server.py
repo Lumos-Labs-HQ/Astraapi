@@ -892,6 +892,7 @@ _protocol_pool = _ProtocolPool()
 _MAX_CONNECTIONS = int(os.environ.get("FASTAPI_MAX_CONNECTIONS", "0"))  # 0 = unlimited
 # At 80% capacity (if limit set), force Connection: close to cycle connections
 _PRESSURE_THRESHOLD = _MAX_CONNECTIONS * 4 // 5 if _MAX_CONNECTIONS > 0 else 16384
+_WORKER_MODE = os.environ.get("_FASTAPI_WORKER") == "1"
 
 
 class _RejectProtocol(asyncio.Protocol):
@@ -1023,8 +1024,12 @@ class CppHttpProtocol(asyncio.Protocol):
                 self._sock_fd = sock.fileno()
             except (OSError, AttributeError):
                 self._sock_fd = -1
-        # Reduced from 1MB/256KB — saves ~7.5GB potential buffer at 10K connections
-        transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
+        # Workers handle fewer connections each — use smaller buffers to reduce
+        # memory pressure (833 conns × 64KB = 52MB vs 833 × 128KB = 106MB)
+        if _WORKER_MODE:
+            transport.set_write_buffer_limits(high=65536, low=16384)  # type: ignore[union-attr]
+        else:
+            transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
         peername = transport.get_extra_info("peername")
         if peername:
             self._core.set_client_ip(peername[0])
@@ -1495,24 +1500,13 @@ class CppHttpProtocol(asyncio.Protocol):
 
             # Call endpoint
             raw = await endpoint(**kwargs)
-            if self._transport and not self._transport.is_closing():
-                # FAST PATH — dict/list are the most common return types
-                raw_type = type(raw)
-                if raw_type is dict or raw_type is list or raw_type is str or raw_type is int or raw_type is float or raw_type is bool or raw is None:
-                    resp = self._core.build_response(raw, status_code, keep_alive)
-                    if resp:
-                        self._transport.write(resp)
-                    else:
-                        self._transport.write(_500_RESP)
+            transport = self._transport
+            if transport and not transport.is_closing():
+                resp = self._core.build_response_from_any(raw, status_code, keep_alive)
+                if resp is not None:
+                    transport.write(resp)
                 else:
-                    # Pydantic models → dict for JSON serialization
-                    if hasattr(raw, 'model_dump'):
-                        raw = raw.model_dump(mode='json')
-                    resp = self._core.build_response(raw, status_code, keep_alive)
-                    if resp:
-                        self._transport.write(resp)
-                    else:
-                        self._transport.write(_500_RESP)
+                    transport.write(_500_RESP)
             # BackgroundTasks support
             background = getattr(raw, 'background', None)
             if background is not None:
@@ -1544,14 +1538,13 @@ class CppHttpProtocol(asyncio.Protocol):
 
             raw = await ir.endpoint(**ir.kwargs)
             status_code = int(ir.status_code) if ir.status_code else 200
-            if self._transport and not self._transport.is_closing():
-                if hasattr(raw, 'model_dump'):
-                    raw = raw.model_dump(mode='json')
-                resp = self._core.build_response(raw, status_code, True)
-                if resp:
-                    self._transport.write(resp)
+            transport = self._transport
+            if transport and not transport.is_closing():
+                resp = self._core.build_response_from_any(raw, status_code, True)
+                if resp is not None:
+                    transport.write(resp)
                 else:
-                    self._transport.write(_500_RESP)
+                    transport.write(_500_RESP)
             # BackgroundTasks support
             background = getattr(raw, 'background', None)
             if background is not None:
@@ -1702,14 +1695,118 @@ async def _create_server(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Master-accept fd receiver (multi-worker connection dispatch)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _setup_fd_receiver(
+    loop: asyncio.AbstractEventLoop,
+    unix_sock: socket.socket,
+    protocol_factory: Any,
+) -> None:
+    """Receive accepted connection fds from master via SCM_RIGHTS.
+
+    Master process does all accept() and round-robins fds to workers over
+    Unix domain socketpairs.  This callback fires when the master sends a
+    fd, wraps it in a native asyncio transport via connect_accepted_socket(),
+    and request processing begins at full uvloop speed.
+
+    Pattern: Node.js cluster SCHED_RR (default on Linux).
+    """
+    import struct as _struct
+
+    unix_sock.setblocking(False)
+    _cmsg_size = socket.CMSG_LEN(_struct.calcsize("i"))
+
+    def _on_readable() -> None:
+        while True:
+            try:
+                msg, ancdata, _, _ = unix_sock.recvmsg(1, _cmsg_size)
+                if not msg:
+                    loop.remove_reader(unix_sock.fileno())
+                    return
+                for level, type_, data in ancdata:
+                    if level == socket.SOL_SOCKET and type_ == socket.SCM_RIGHTS:
+                        fd = _struct.unpack("i", data[: _struct.calcsize("i")])[0]
+                        conn_sock = socket.fromfd(
+                            fd, socket.AF_INET, socket.SOCK_STREAM
+                        )
+                        os.close(fd)
+                        conn_sock.setblocking(False)
+                        loop.create_task(
+                            loop.connect_accepted_socket(
+                                protocol_factory, conn_sock
+                            )
+                        )
+            except BlockingIOError:
+                return
+            except OSError:
+                loop.remove_reader(unix_sock.fileno())
+                return
+
+    loop.add_reader(unix_sock.fileno(), _on_readable)
+
+
+def _setup_fd_receiver_win(
+    loop: asyncio.AbstractEventLoop,
+    dispatch_sock: socket.socket,
+    protocol_factory: Any,
+) -> None:
+    """Receive accepted connections from master via socket.share() (Windows).
+
+    Uses a dedicated reader thread because ProactorEventLoop doesn't support
+    add_reader(). Reads length-prefixed share_data from the dispatch socket,
+    reconstructs the connection with fromshare(), and schedules
+    connect_accepted_socket on the event loop.
+    """
+    import threading as _threading_win
+
+    def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _reader() -> None:
+        while True:
+            try:
+                hdr = _recv_exact(dispatch_sock, 4)
+                if not hdr:
+                    break
+                length = int.from_bytes(hdr, "little")
+                share_data = _recv_exact(dispatch_sock, length)
+                if not share_data:
+                    break
+                conn_sock = socket.fromshare(share_data)
+                conn_sock.setblocking(False)
+                asyncio.run_coroutine_threadsafe(
+                    loop.connect_accepted_socket(protocol_factory, conn_sock),
+                    loop,
+                )
+            except OSError:
+                break
+
+    t = _threading_win.Thread(target=_reader, daemon=True)
+    t.start()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Server startup
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def run_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
     keep_alive_timeout: float = 30.0,
+    sock: Any = None,
+    unix_sock: Any = None,
 ) -> None:
     """Start the C++ HTTP server with optimal event loop configuration."""
+    from fastapi._multiworker import is_worker as _is_worker_check
+    _is_worker = _is_worker_check()
+
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -1719,19 +1816,20 @@ async def run_server(
     except (ImportError, ValueError, OSError):
         pass
 
-    # Increase TCP connection queue limits (Linux/WSL — silent on other platforms)
-    try:
-        import subprocess
-        for _cmd in (
-            "sysctl -w net.core.somaxconn=65535",
-            "sysctl -w net.ipv4.tcp_max_syn_backlog=65535",
-            "sysctl -w net.core.netdev_max_backlog=65535",
-            "sysctl -w net.ipv4.tcp_tw_reuse=1",
-            "sysctl -w net.ipv4.tcp_fin_timeout=10",
-        ):
-            subprocess.run(_cmd.split(), capture_output=True, timeout=2)
-    except Exception:
-        pass
+    # Sysctl tuning — skip in worker mode (parent already ran it)
+    if not _is_worker:
+        try:
+            import subprocess
+            for _cmd in (
+                "sysctl -w net.core.somaxconn=65535",
+                "sysctl -w net.ipv4.tcp_max_syn_backlog=65535",
+                "sysctl -w net.core.netdev_max_backlog=65535",
+                "sysctl -w net.ipv4.tcp_tw_reuse=1",
+                "sysctl -w net.ipv4.tcp_fin_timeout=10",
+            ):
+                subprocess.run(_cmd.split(), capture_output=True, timeout=2)
+        except Exception:
+            pass
 
     loop = asyncio.get_event_loop()
 
@@ -1789,7 +1887,8 @@ async def run_server(
                 core_app.set_post_response_hook(_log_hook)
 
     # Freeze routes — skip shared_lock in hot path after startup
-    if hasattr(core_app, "freeze_routes"):
+    # Workers skip: parent already froze before fork (avoids COW page fault)
+    if not _is_worker and hasattr(core_app, "freeze_routes"):
         core_app.freeze_routes()
 
     # ── Warm-up: eliminate first-request lazy initialization overhead ──
@@ -1829,7 +1928,8 @@ async def run_server(
     active_count = [0]  # mutable int via list — faster than len(set) in hot path
 
     # Pre-populate protocol pool BEFORE gc.freeze() so protocols are frozen
-    _PREWARM = 512
+    # Workers use smaller pool — 512 per worker wastes memory (COW page faults)
+    _PREWARM = 256 if _is_worker else 512
     for _ in range(_PREWARM if _MAX_CONNECTIONS == 0 else min(_PREWARM, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
@@ -1892,39 +1992,51 @@ async def run_server(
         active_connections.add(proto)
         return proto
 
-    try:
+    if unix_sock is not None and _is_worker:
+        # Master-accept mode: master does all accept() and round-robins
+        # connections to workers. Platform-specific dispatch mechanism.
+        if sys.platform == "win32":
+            _setup_fd_receiver_win(loop, unix_sock, _protocol_factory)
+        else:
+            _setup_fd_receiver(loop, unix_sock, _protocol_factory)
+        server = None
+    elif sock is not None:
+        # Shared socket (Windows subprocess via socket.fromshare)
         server = await loop.create_server(
-            _protocol_factory, host, port,
-            reuse_address=True, reuse_port=True, backlog=65535,
+            _protocol_factory, sock=sock, backlog=65535,
         )
-    except OSError:
-        # reuse_port not supported on this platform — fall back
+    else:
+        # Single-process mode — create own socket
         server = await loop.create_server(
             _protocol_factory, host, port,
             reuse_address=True, backlog=65535,
         )
 
-    # TCP_FASTOPEN: allow data in SYN packet, reducing handshake latency
-    for s in server.sockets or []:
-        try:
-            s.setsockopt(socket.IPPROTO_TCP, 23, 5)  # TCP_FASTOPEN = 23
-        except (OSError, AttributeError):
-            pass
-        # TCP_DEFER_ACCEPT: kernel holds connection until first data arrives
-        # Reduces event loop wakeups for half-open connections
-        try:
-            s.setsockopt(socket.IPPROTO_TCP, 9, 5)  # TCP_DEFER_ACCEPT = 9
-        except (OSError, AttributeError):
-            pass
+    # TCP_FASTOPEN / TCP_DEFER_ACCEPT on server sockets (not for accept thread)
+    if server is not None:
+        for s in server.sockets or []:
+            try:
+                s.setsockopt(socket.IPPROTO_TCP, 23, 5)  # TCP_FASTOPEN = 23
+            except (OSError, AttributeError):
+                pass
+            try:
+                s.setsockopt(socket.IPPROTO_TCP, 9, 5)  # TCP_DEFER_ACCEPT = 9
+            except (OSError, AttributeError):
+                pass
 
-    print(f"C++ HTTP server running on http://{host}:{port}")
-    print("Press Ctrl+C to stop")
+    # Print only in single-process mode — parent already printed in multi-worker
+    if not _is_worker:
+        print(f"C++ HTTP server running on http://{host}:{port}")
+        print("Press Ctrl+C to stop")
 
     # ── Defer OpenAPI schema generation to background (non-blocking) ──────
     # OpenAPI is only needed for /docs and /openapi.json — no need to block
     # startup for it.  The openapi() method caches its result, so if a user
     # hits /docs before this task finishes, it generates on-demand once.
-    if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
+    # Workers skip: each would redundantly compute the same schema.
+    # Only run for single-process or worker 0.
+    _worker_id = os.environ.get("_FASTAPI_WORKER_ID", "0")
+    if _worker_id == "0" and hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
         async def _deferred_openapi() -> None:
             try:
                 from fastapi._json_utils import json_dumps_str as _json_dumps_str
@@ -1961,7 +2073,7 @@ async def run_server(
     async def _ka_sweep() -> None:
         while not stop_event.is_set():
             await asyncio.sleep(5.0)
-            now = time.monotonic()
+            now = loop.time()
             batch: list = []
             for p in active_connections:
                 if p._ka_deadline > 0 and now > p._ka_deadline:
@@ -1990,7 +2102,11 @@ async def run_server(
     trim_task = loop.create_task(_pool_trim())
 
     try:
-        async with server:
+        if server is not None:
+            async with server:
+                await stop_event.wait()
+        else:
+            # Accept thread mode — just wait for stop signal
             await stop_event.wait()
     except KeyboardInterrupt:
         pass
@@ -2000,8 +2116,16 @@ async def run_server(
         sweep_task.cancel()
         trim_task.cancel()
         # ── Graceful shutdown: stop accepting, drain active connections ─
-        server.close()
-        await server.wait_closed()
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        elif unix_sock is not None:
+            try:
+                if sys.platform != "win32":
+                    loop.remove_reader(unix_sock.fileno())
+                unix_sock.close()
+            except OSError:
+                pass
 
         # Short drain for reload workers; normal drain otherwise
         drain_timeout = 0.5 if _is_reload_worker else 5.0

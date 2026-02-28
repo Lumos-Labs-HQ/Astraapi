@@ -4789,6 +4789,7 @@ class FastAPI(AppBase):
         reload_dirs: Optional[Sequence[str]] = None,
         reload_includes: Optional[Sequence[str]] = None,
         reload_excludes: Optional[Sequence[str]] = None,
+        workers: int = 1,
     ) -> None:
         """Run the app with the built-in C++ HTTP server.
 
@@ -4801,6 +4802,9 @@ class FastAPI(AppBase):
             reload_dirs: Directories to watch. Defaults to cwd.
             reload_includes: Extra glob patterns to include (e.g. ``"*.yaml"``).
             reload_excludes: Paths to exclude from watching.
+            workers: Number of worker processes. Each worker has its own GIL,
+                memory space, and event loop — zero locks, zero shared state.
+                Kernel load-balances via SO_REUSEPORT. Default 1 (single process).
         """
         import asyncio
 
@@ -4827,7 +4831,29 @@ class FastAPI(AppBase):
                 return
             # Worker subprocess — fall through to normal startup
 
+        # Multi-worker mode: fork N independent processes, each with its own
+        # GIL + memory + event loop. Zero locks, zero shared state.
+        # Skip if this process is already a spawned worker.
+        from fastapi._multiworker import is_worker
+        if workers > 1 and not is_worker():
+            from fastapi._multiworker import run_multiworker
+            run_multiworker(self, host, port, workers)
+            return
+
         from fastapi._cpp_server import run_server
 
         self._sync_routes_to_core()
-        asyncio.run(run_server(self, host, port))
+
+        # Workers receive either a dispatch socket (master-accept mode) or
+        # a shared listen socket (fallback) from the supervisor via stdin.
+        shared_sock = None
+        dispatch_sock = None
+        from fastapi._multiworker import has_shared_socket, has_dispatch_socket
+        if has_dispatch_socket():
+            from fastapi._multiworker import receive_dispatch_socket
+            dispatch_sock = receive_dispatch_socket()
+        elif has_shared_socket():
+            from fastapi._multiworker import receive_shared_socket
+            shared_sock = receive_shared_socket()
+
+        asyncio.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
