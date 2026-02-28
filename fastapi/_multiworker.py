@@ -417,7 +417,7 @@ def _run_fork_supervisor(
                 children[new_pid] = worker_id
                 print(f"  Worker {worker_id} restarted (pid {new_pid})")
         else:
-            time.sleep(0.1)
+            time.sleep(1.0)
 
     # ── Shutdown ──
     print("\nShutting down workers...")
@@ -529,7 +529,7 @@ def _run_subprocess_supervisor(
             print(f"  Worker {worker_id} restarted (pid {proc.pid})")
 
         if not _shutdown:
-            time.sleep(0.2)
+            time.sleep(1.0)
 
     # Shutdown
     print("\nShutting down workers...")

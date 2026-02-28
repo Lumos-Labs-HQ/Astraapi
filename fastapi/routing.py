@@ -1341,7 +1341,6 @@ class APIRoute(routing.Route):
             actual_rc = actual_rc.value
         self._fast_path_eligible: bool = bool(
             self.dependant.call is not None
-            and self.dependant.is_coroutine_callable
             and not getattr(self.dependant, 'is_gen_callable', False)
             and not getattr(self.dependant, 'is_async_gen_callable', False)
             and not self.dependant.request_param_name
