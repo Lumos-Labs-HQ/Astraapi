@@ -347,6 +347,14 @@ def _run_fork_supervisor(
                     s.close()
             os.environ[_WORKER_ENV] = "1"
             os.environ[_WORKER_ID_ENV] = str(worker_id)
+            # Pin worker to a dedicated core — eliminates cross-core cache
+            # thrashing (L2/L3 invalidations, TLB flushes between migrations).
+            if hasattr(os, "sched_setaffinity"):
+                cpu_count = os.cpu_count() or 1
+                try:
+                    os.sched_setaffinity(0, {worker_id % cpu_count})
+                except OSError:
+                    pass
             try:
                 _run_worker_fork(app, host, port, child_socks[worker_id])
             except KeyboardInterrupt:
@@ -404,6 +412,12 @@ def _run_fork_supervisor(
                 new_p.close()
                 os.environ[_WORKER_ENV] = "1"
                 os.environ[_WORKER_ID_ENV] = str(worker_id)
+                if hasattr(os, "sched_setaffinity"):
+                    cpu_count = os.cpu_count() or 1
+                    try:
+                        os.sched_setaffinity(0, {worker_id % cpu_count})
+                    except OSError:
+                        pass
                 try:
                     _run_worker_fork(app, host, port, new_c)
                 except KeyboardInterrupt:

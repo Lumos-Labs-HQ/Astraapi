@@ -1135,16 +1135,16 @@ class CppHttpProtocol(asyncio.Protocol):
         now = self._loop.time()
 
         while True:
-            result = core.handle_http(http_buf, transport, offset, sock_fd)
+            result = core.handle_http_batch(http_buf, transport, offset, sock_fd)
 
             # ── Fast-path: zero-alloc return protocol ──────────────────
-            # True  = sync endpoint handled (response already written)
-            # None  = need more data (incomplete HTTP request)
+            # True  = all sync requests done (last_consumed = total consumed)
+            # None  = need more data (nothing consumed)
             # False = parse error (400 already sent)
-            # tuple = async/WS/Pydantic dispatch (rare path)
+            # tuple = async/WS/Pydantic; tuple[0] = total consumed incl. sync prefix
             if result is True:
                 offset += core.last_consumed
-                continue
+                break  # batch consumed everything — no more requests this call
 
             if result is None:
                 break  # need more data
@@ -1156,6 +1156,7 @@ class CppHttpProtocol(asyncio.Protocol):
                 return
 
             # ── Async / WS / Pydantic dispatch (tuple return) ─────────
+            # Loop continues: handle async work then re-enter batch for remainder.
             consumed, result_obj = result
             offset += consumed
 

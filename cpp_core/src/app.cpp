@@ -2331,6 +2331,10 @@ static inline void fire_post_response_hook(
     }
 }
 
+static PyObject* dispatch_one_request(
+    CoreAppObject* self, const char* buf_data, Py_ssize_t buf_len,
+    PyObject* transport, int sock_fd);
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // handle_http — C++ HTTP Server Hot Path (METH_FASTCALL)
 //
@@ -2404,6 +2408,13 @@ static PyObject* CoreApp_handle_http(
         ~BufferGuard() { if (active) PyBuffer_Release(v); }
     } buf_guard{&view, have_view};
 
+    return dispatch_one_request(self, buf_data, buf_len, transport, sock_fd);
+}
+
+static PyObject* dispatch_one_request(
+    CoreAppObject* self, const char* buf_data, Py_ssize_t buf_len,
+    PyObject* transport, int sock_fd)
+{
     // ── Parse HTTP request ───────────────────────────────────────────────
     ParsedHttpRequest req = {};
     int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
@@ -3892,6 +3903,120 @@ body_done:
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// handle_http_batch — Batch HTTP dispatch (METH_FASTCALL)
+//
+// Processes ALL complete requests in the buffer in a single C++ call.
+// For N pipelined/batched requests: N Python→C++ boundary crossings → 1.
+// Eliminates N PyLong allocations (offset/last_consumed) per TCP segment.
+//
+// Returns:
+//   True  = all sync requests processed, last_consumed = total bytes consumed
+//   None  = need more data (nothing consumed)
+//   False = parse error (400 already sent)
+//   tuple = async/WS/Pydantic endpoint hit; tuple[0] = total consumed so far
+// ═══════════════════════════════════════════════════════════════════════════════
+static PyObject* CoreApp_handle_http_batch(
+    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
+{
+    if (nargs < 2 || nargs > 4) {
+        PyErr_SetString(PyExc_TypeError, "handle_http_batch requires 2-4 args");
+        return nullptr;
+    }
+
+    PyObject* buffer_obj = args[0];
+    PyObject* transport  = args[1];
+    Py_ssize_t base_offset = 0;
+    if (nargs >= 3) {
+        base_offset = PyLong_AsSsize_t(args[2]);
+        if (base_offset < 0 && PyErr_Occurred()) return nullptr;
+    }
+    int sock_fd = -1;
+    if (nargs >= 4) {
+        sock_fd = (int)PyLong_AsLong(args[3]);
+        if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+    }
+
+    // Re-arm TCP_QUICKACK once for the whole batch (one syscall per data_received).
+    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+
+    // Buffer access — same dual-path as handle_http.
+    const char* raw_base;
+    Py_ssize_t  raw_len;
+    Py_buffer   view = {};
+    bool        have_view = false;
+
+    if (PyCapsule_CheckExact(buffer_obj)) {
+        auto* hb = static_cast<HttpConnectionBuffer*>(
+            PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
+        if (!hb) return nullptr;
+        Py_ssize_t total = (Py_ssize_t)hb->size();
+        if (base_offset > total) base_offset = total;
+        raw_base = (const char*)hb->data() + base_offset;
+        raw_len  = total - base_offset;
+    } else {
+        if (PyObject_GetBuffer(buffer_obj, &view, PyBUF_SIMPLE) < 0) return nullptr;
+        have_view = true;
+        if (base_offset > view.len) base_offset = view.len;
+        raw_base = (const char*)view.buf + base_offset;
+        raw_len  = view.len - base_offset;
+    }
+    struct BufferGuard {
+        Py_buffer* v; bool active;
+        ~BufferGuard() { if (active) PyBuffer_Release(v); }
+    } buf_guard{&view, have_view};
+
+    // ── Batch loop: process all complete requests in C++ ────────────────────────
+    // Only exits to Python for: async/WS/Pydantic endpoints, incomplete data,
+    // or parse errors.  All sync requests are handled inline with zero Python cost.
+    Py_ssize_t prefix = 0;  // bytes consumed by sync requests so far
+
+    while (true) {
+        PyObject* r = dispatch_one_request(
+            self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
+
+        if (r == Py_True) {
+            // Sync request completed — accumulate and loop.
+            prefix += self->last_consumed;
+            // Py_True is immortal in 3.12+; DECREF is safe on all versions.
+            Py_DECREF(r);
+            continue;
+        }
+
+        if (r == Py_None) {
+            // Buffer exhausted (no more complete requests).
+            Py_DECREF(r);
+            if (prefix > 0) {
+                // We processed some requests before stalling — report total.
+                self->last_consumed = prefix;
+                Py_RETURN_TRUE;
+            }
+            Py_RETURN_NONE;  // Genuinely nothing consumed — need more data.
+        }
+
+        if (r == Py_False) {
+            // Parse error — 400 already sent, transport will be closed.
+            // Report how many bytes were successfully consumed before the error.
+            self->last_consumed = prefix;
+            return r;
+        }
+
+        // Async / WS / Pydantic tuple — adjust tuple[0] to include the sync prefix
+        // so Python's `offset += consumed` accounts for all processed requests.
+        if (prefix > 0 && LIKELY(PyTuple_Check(r) && PyTuple_GET_SIZE(r) == 2)) {
+            Py_ssize_t req_consumed = self->last_consumed; // set by make_consumed_obj
+            Py_ssize_t total_c = prefix + req_consumed;
+            PyObject* new_c = PyLong_FromSsize_t(total_c);
+            if (LIKELY(new_c)) {
+                Py_DECREF(PyTuple_GET_ITEM(r, 0));
+                PyTuple_SET_ITEM(r, 0, new_c);
+                self->last_consumed = total_c;
+            }
+        }
+        return r;  // Python handles async work, then loops back with new offset.
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // serialize_and_write_http — for async endpoint results (METH_FASTCALL)
 //
 // Called from Python after awaiting an async endpoint's coroutine.
@@ -4599,6 +4724,7 @@ static PyMethodDef CoreApp_methods[] = {
     {"add_exception_handler", (PyCFunction)CoreApp_add_exception_handler, METH_VARARGS, nullptr},
     // C++ HTTP server path — bypass ASGI entirely
     {"handle_http", (PyCFunction)(void(*)(void))CoreApp_handle_http, METH_FASTCALL, nullptr},
+    {"handle_http_batch", (PyCFunction)(void(*)(void))CoreApp_handle_http_batch, METH_FASTCALL, nullptr},
     {"serialize_and_write_http", (PyCFunction)(void(*)(void))CoreApp_serialize_and_write_http, METH_FASTCALL, nullptr},
     // Returns complete HTTP response as single PyBytes (no transport calls)
     {"build_response", (PyCFunction)(void(*)(void))CoreApp_build_response, METH_FASTCALL, nullptr},
