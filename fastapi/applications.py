@@ -1162,6 +1162,52 @@ class FastAPI(AppBase):
             })
         return result
 
+    @staticmethod
+    def _make_form_endpoint_shim(route: Any) -> Callable[..., Any]:
+        """Create an async endpoint shim for form-based (UploadFile/File) routes.
+
+        The C++ multipart parser produces raw dicts for file fields:
+            {"name": "file", "filename": "upload.txt", "data": b"...", "content_type": "..."}
+
+        This shim converts those dicts to proper ``UploadFile`` objects before
+        calling the original endpoint, enabling the C++ fast path (which handles
+        multipart parsing natively) to work correctly with UploadFile parameters.
+        """
+        import io
+        from fastapi.params import File as _FileParam
+        from fastapi._datastructures_impl import UploadFile as _UploadFile, Headers as _Headers
+
+        original_endpoint = route.endpoint
+
+        # Collect the names of File/UploadFile body parameters
+        file_param_names: set[str] = set()
+        for bp in route.dependant.body_params:
+            fi = getattr(bp, 'field_info', None)
+            if fi is not None and isinstance(fi, _FileParam):
+                file_param_names.add(bp.name)
+
+        if not file_param_names:
+            # No file params — original endpoint is fine as-is
+            return original_endpoint
+
+        async def _form_shim(**kwargs: Any) -> Any:
+            for name in file_param_names:
+                raw = kwargs.get(name)
+                # C++ passes a dict: {name, filename, data, content_type}
+                if isinstance(raw, dict) and 'data' in raw:
+                    data: bytes = raw.get('data') or b''
+                    kwargs[name] = _UploadFile(
+                        filename=raw.get('filename') or '',
+                        file=io.BytesIO(data),
+                        content_type=raw.get('content_type') or 'application/octet-stream',
+                        headers=_Headers(raw=[]),
+                        size=len(data),
+                    )
+            return await original_endpoint(**kwargs)
+
+        _form_shim.__name__ = getattr(original_endpoint, '__name__', '_form_shim')
+        return _form_shim
+
     def _sync_routes_to_core(self) -> None:
         """Register all router routes with CoreApp.
 
@@ -1174,7 +1220,8 @@ class FastAPI(AppBase):
             return
         self._routes_synced = True
 
-        from fastapi.routing import APIRoute, APIWebSocketRoute
+        from fastapi.routing import APIRoute, APIWebSocketRoute, _make_dep_solver
+        from fastapi import params as _fastapi_params
 
         for route in self.routes:
             if not isinstance(route, APIRoute):
@@ -1182,13 +1229,30 @@ class FastAPI(AppBase):
             endpoint = route.endpoint
             _is_coro = asyncio.iscoroutinefunction(endpoint)
             _methods = sorted(route.methods) if route.methods else ["GET"]
-            _has_body = any(m in ("POST", "PUT", "PATCH") for m in _methods)
+            # HTTP spec §9.3.1: any resource supporting GET MUST also support HEAD.
+            # Auto-register HEAD so clients/proxies get correct HEAD responses
+            # without needing a separate route definition.
+            if "GET" in _methods and "HEAD" not in _methods:
+                _methods = sorted(_methods + ["HEAD"])
+            _has_body = any(m in ("POST", "PUT", "PATCH", "DELETE") for m in _methods)
+
+            # Detect form-based routes (File / UploadFile / Form body params)
+            _is_form = bool(
+                route.body_field
+                and isinstance(route.body_field.field_info, _fastapi_params.Form)
+            )
+
+            # For form routes: wrap endpoint so C++ raw file dicts become UploadFile
+            _registered_endpoint = endpoint
+            if _is_form:
+                _registered_endpoint = self._make_form_endpoint_shim(route)
+                _is_coro = True  # shim is always async
 
             try:
                 self._core_app.add_route(
                     route.path,
                     _methods,
-                    endpoint,
+                    _registered_endpoint,
                     _is_coro,
                     status_code=route.status_code or 200,
                     tags=[],
@@ -1196,13 +1260,14 @@ class FastAPI(AppBase):
                     description=route.description,
                     operation_id=route.operation_id,
                     has_body=_has_body,
+                    is_form=_is_form,
                     exclude_unset=False,
                     exclude_defaults=False,
                     exclude_none=False,
                 )
+                route_index = self._core_app.route_count() - 1
                 # Register fast-path metadata for eligible routes
                 if getattr(route, '_fast_path_eligible', False):
-                    route_index = self._core_app.route_count() - 1
                     dep = route.dependant
                     body_param_name = (
                         dep.body_params[0].name if dep.body_params else None
@@ -1219,6 +1284,33 @@ class FastAPI(AppBase):
                         field_specs,
                         dep.body_params if dep.body_params else None,
                         getattr(route, '_embed_body_fields', False),
+                        dep if dep.dependencies else None,
+                        dep_solver,
+                    )
+                elif _is_form:
+                    # Form route not on the standard fast path: still register fast_spec
+                    # so the C++ trie entry has a valid spec (prevents "Route not
+                    # configured" 500 errors).  Dependencies (e.g. auth) are resolved
+                    # via a freshly-built dep_solver; body/file params are handled by
+                    # the _form_shim wrapper above.
+                    dep = route.dependant
+                    dep_solver = None
+                    if dep.dependencies:
+                        try:
+                            dep_solver = _make_dep_solver(dep)
+                        except Exception:
+                            pass
+                    raw_specs = getattr(route, '_batch_specs', [])
+                    field_specs = (
+                        self._convert_batch_specs(raw_specs) if raw_specs
+                        else None
+                    )
+                    self._core_app.register_fast_spec(
+                        route_index,
+                        None,       # body_param_name: handled by shim
+                        field_specs,
+                        None,       # body_params: handled by C++ form parser + shim
+                        False,      # embed_body_fields
                         dep if dep.dependencies else None,
                         dep_solver,
                     )

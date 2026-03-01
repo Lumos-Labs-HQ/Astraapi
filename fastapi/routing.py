@@ -95,8 +95,17 @@ from fastapi._core_bridge import (
 
 # Atomic counter for unique route IDs (used by Core param extractor)
 import itertools as _itertools
+import base64 as _base64
 
 _route_id_counter = _itertools.count(1)
+
+from fastapi.exceptions import HTTPException as _DepHTTPExc
+_DEP_HTTP_EXC_TYPES: tuple = (_DepHTTPExc,)
+
+from fastapi.security.http import (
+    HTTPAuthorizationCredentials as _HTTPAuthCreds,
+    HTTPBasicCredentials as _HTTPBasicCreds,
+)
 
 
 # Copy of starlette.routing.request_response modified to include the
@@ -826,6 +835,17 @@ def _flatten_deps(
 
         dep_id = id(sub_dep.call)
         if dep_id in visited_ids:
+            # Same callable already in dep_nodes, but this occurrence may have an
+            # explicit injectable name (e.g. `current_user: X = Depends(f)` when
+            # the router also declares `Depends(f)` at router level with name=None).
+            # Record the name as an alias so resolvers can key the result by it.
+            if sub_dep.name:
+                for node in result:
+                    if id(node['call']) == dep_id:
+                        aliases: list = node.setdefault('aliases', [])
+                        if sub_dep.name not in aliases:
+                            aliases.append(sub_dep.name)
+                        break
             continue
         visited_ids.add(dep_id)
 
@@ -868,6 +888,13 @@ def _flatten_deps(
         is_security = isinstance(sub_dep.call, HTTPBase)
         security_type = type(sub_dep.call).__name__ if is_security else None
         auto_error = getattr(sub_dep.call, 'auto_error', True) if is_security else True
+        # Pre-bake credential class references so resolvers need zero imports per call
+        security_cred_cls = None
+        if is_security:
+            if security_type in ('HTTPBearer', 'HTTPBase'):
+                security_cred_cls = _HTTPAuthCreds
+            elif security_type == 'HTTPBasic':
+                security_cred_cls = _HTTPBasicCreds
 
         result.append({
             'name': name,
@@ -882,6 +909,7 @@ def _flatten_deps(
             'is_security': is_security,
             'security_type': security_type,
             'auto_error': auto_error,
+            'security_cred_cls': security_cred_cls,
         })
 
 
@@ -892,8 +920,7 @@ def _make_lightweight_request(raw_headers, method, path):
     to extract Authorization tokens. This builds a minimal Request from the
     raw header tuples that C++ injected into kwargs.
     """
-    from starlette.requests import Request
-
+    # Use the FastAPI Request class (already imported at module level).
     # raw_headers is list of (name_bytes, value_bytes) from C++.
     # ASGI requires header names as lowercase bytes. C++ passes them as-is
     # from the HTTP parser (e.g., b"Authorization"), so we must lowercase here.
@@ -922,15 +949,12 @@ def _make_lightweight_request(raw_headers, method, path):
     return Request(scope)
 
 
-def _resolve_deps_sync(dep_nodes, kwargs_dict):
-    """Resolve dependencies in topological order (sync version)."""
-    from fastapi.exceptions import HTTPException as _FastAPIHTTPExc
-    try:
-        from starlette.exceptions import HTTPException as _StarletteHTTPExc
-        _http_exc_types = (_FastAPIHTTPExc, _StarletteHTTPExc)
-    except ImportError:
-        _http_exc_types = (_FastAPIHTTPExc,)
+def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
+    """Resolve dependencies in topological order (sync version).
 
+    Uses module-level pre-imported constants (_DEP_HTTP_EXC_TYPES, _HTTPAuthCreds,
+    _HTTPBasicCreds, _base64) to eliminate sys.modules lookups on every request.
+    """
     resolved = {}
     errors = []
 
@@ -945,30 +969,33 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict):
     for node in dep_nodes:
         try:
             # C++ native security extraction — no Starlette Request needed
-            if node.get('is_security'):
+            if node['is_security']:
                 sec_type = node['security_type']
                 if sec_type in ('HTTPBearer', 'HTTPBase'):
                     if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
                         if node['auto_error']:
-                            raise _FastAPIHTTPExc(status_code=403, detail="Not authenticated")
-                        resolved[node['name']] = None
-                        continue
-                    from fastapi.security.http import HTTPAuthorizationCredentials
-                    resolved[node['name']] = HTTPAuthorizationCredentials(
-                        scheme=auth_scheme, credentials=auth_credentials)
+                            raise _DepHTTPExc(status_code=403, detail="Not authenticated")
+                        creds_val = None
+                    else:
+                        # Use pre-baked class ref — zero import overhead
+                        creds_val = node['security_cred_cls'](
+                            scheme=auth_scheme, credentials=auth_credentials)
+                    resolved[node['name']] = creds_val
+                    for alias in node.get('aliases', ()):
+                        resolved[alias] = creds_val
                     continue
                 elif sec_type == 'HTTPBasic':
                     if not auth_scheme or auth_scheme.lower() != 'basic' or not auth_credentials:
                         if node['auto_error']:
-                            raise _FastAPIHTTPExc(status_code=401, detail="Not authenticated")
-                        resolved[node['name']] = None
-                        continue
-                    import base64
-                    decoded = base64.b64decode(auth_credentials).decode('utf-8')
-                    username, _, password = decoded.partition(':')
-                    from fastapi.security.http import HTTPBasicCredentials
-                    resolved[node['name']] = HTTPBasicCredentials(
-                        username=username, password=password)
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated")
+                        creds_val = None
+                    else:
+                        decoded = _base64.b64decode(auth_credentials).decode('utf-8')
+                        username, _, password = decoded.partition(':')
+                        creds_val = node['security_cred_cls'](username=username, password=password)
+                    resolved[node['name']] = creds_val
+                    for alias in node.get('aliases', ()):
+                        resolved[alias] = creds_val
                     continue
 
             dep_kwargs = {}
@@ -995,8 +1022,10 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict):
 
             result = node['call'](**dep_kwargs)
             resolved[node['name']] = result
+            for alias in node.get('aliases', ()):
+                resolved[alias] = result
 
-        except _http_exc_types:
+        except _exc_types:
             raise  # Propagate auth/permission errors — C++ handles these
         except Exception as exc:
             errors.append({
@@ -1008,15 +1037,12 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict):
     return (resolved, errors)
 
 
-async def _resolve_deps_async(dep_nodes, kwargs_dict):
-    """Resolve dependencies in topological order (async version)."""
-    from fastapi.exceptions import HTTPException as _FastAPIHTTPExc
-    try:
-        from starlette.exceptions import HTTPException as _StarletteHTTPExc
-        _http_exc_types = (_FastAPIHTTPExc, _StarletteHTTPExc)
-    except ImportError:
-        _http_exc_types = (_FastAPIHTTPExc,)
+async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
+    """Resolve dependencies in topological order (async version).
 
+    Uses module-level pre-imported constants (_DEP_HTTP_EXC_TYPES, _HTTPAuthCreds,
+    _HTTPBasicCreds, _base64) to eliminate sys.modules lookups on every request.
+    """
     resolved = {}
     errors = []
 
@@ -1031,30 +1057,33 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict):
     for node in dep_nodes:
         try:
             # C++ native security extraction — no Starlette Request needed
-            if node.get('is_security'):
+            if node['is_security']:
                 sec_type = node['security_type']
                 if sec_type in ('HTTPBearer', 'HTTPBase'):
                     if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
                         if node['auto_error']:
-                            raise _FastAPIHTTPExc(status_code=403, detail="Not authenticated")
-                        resolved[node['name']] = None
-                        continue
-                    from fastapi.security.http import HTTPAuthorizationCredentials
-                    resolved[node['name']] = HTTPAuthorizationCredentials(
-                        scheme=auth_scheme, credentials=auth_credentials)
+                            raise _DepHTTPExc(status_code=403, detail="Not authenticated")
+                        creds_val = None
+                    else:
+                        # Use pre-baked class ref — zero import overhead
+                        creds_val = node['security_cred_cls'](
+                            scheme=auth_scheme, credentials=auth_credentials)
+                    resolved[node['name']] = creds_val
+                    for alias in node.get('aliases', ()):
+                        resolved[alias] = creds_val
                     continue
                 elif sec_type == 'HTTPBasic':
                     if not auth_scheme or auth_scheme.lower() != 'basic' or not auth_credentials:
                         if node['auto_error']:
-                            raise _FastAPIHTTPExc(status_code=401, detail="Not authenticated")
-                        resolved[node['name']] = None
-                        continue
-                    import base64
-                    decoded = base64.b64decode(auth_credentials).decode('utf-8')
-                    username, _, password = decoded.partition(':')
-                    from fastapi.security.http import HTTPBasicCredentials
-                    resolved[node['name']] = HTTPBasicCredentials(
-                        username=username, password=password)
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated")
+                        creds_val = None
+                    else:
+                        decoded = _base64.b64decode(auth_credentials).decode('utf-8')
+                        username, _, password = decoded.partition(':')
+                        creds_val = node['security_cred_cls'](username=username, password=password)
+                    resolved[node['name']] = creds_val
+                    for alias in node.get('aliases', ()):
+                        resolved[alias] = creds_val
                     continue
 
             dep_kwargs = {}
@@ -1085,8 +1114,10 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict):
             else:
                 result = node['call'](**dep_kwargs)
             resolved[node['name']] = result
+            for alias in node.get('aliases', ()):
+                resolved[alias] = result
 
-        except _http_exc_types:
+        except _exc_types:
             raise  # Propagate auth/permission errors — C++ handles these
         except Exception as exc:
             errors.append({

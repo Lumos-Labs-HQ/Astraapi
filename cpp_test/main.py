@@ -1,50 +1,49 @@
 """Main application entry point"""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from middleware import LoggingMiddleware, RateLimitMiddleware
 from routes import users, posts, auth, files
 from database import init_db
 from contextlib import asynccontextmanager
+from models import MessageResponse, HealthResponse
+import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     await init_db()
     yield
-    # Shutdown
     from database import close_db
     await close_db()
 
-app = FastAPI(title="Complete C++ Backend Test", lifespan=lifespan, )
+app = FastAPI(
+    title="FastAPI Backend",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
-# Middleware stack
-# app.add_middleware(RateLimitMiddleware, max_requests=100)
-# app.add_middleware(LoggingMiddleware)
+# Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 
-# Include routers
+# Routers
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(users.router, prefix="/users", tags=["users"])
 app.include_router(posts.router, prefix="/posts", tags=["posts"])
 app.include_router(files.router, prefix="/files", tags=["files"])
 
-@app.get("/")
+@app.get("/", response_model=MessageResponse)
 async def root():
-    return {"message": "C++ Backend raing", "status": "o"}
+    return MessageResponse(message="FastAPI Backend", status="running")
 
-@app.get("/health")
-async def health():
-    return {"status": "health"}
+@app.get("/health", response_model=HealthResponse)
+def health():
+    return HealthResponse()
 
 if __name__ == "__main__":   
     host = "0.0.0.0"
-    port = 8003
+    port = 8001
     app.run(host=host, port=port, reload=True)

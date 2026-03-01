@@ -1,6 +1,6 @@
 """Custom middleware implementations"""
 from fastapi import Request
-from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.middleware import BaseHTTPMiddleware
 import time
 
 class LoggingMiddleware(BaseHTTPMiddleware):

@@ -1,72 +1,49 @@
-"""Authentication utilities and decorators"""
-from fastapi import HTTPException, Depends
+"""Authentication utilities and dependencies"""
+from fastapi import HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 import hashlib
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from database import get_db
+from models import CurrentUser
+import os
 
-# Security scheme for Bearer token
 security = HTTPBearer()
 
-# Secret key for JWT - in production, use environment variable
-SECRET_KEY = "your-secret-key-change-in-production"
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """Create JWT access token"""
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(token: str) -> dict:
-    """Verify and decode JWT token"""
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except jwt.JWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Get current user from JWT token"""
-    token = credentials.credentials
-    payload = verify_token(token)
-    
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> CurrentUser:
+    payload = verify_token(credentials.credentials)
     user_id = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     
     db = get_db()
-    cursor = await db.execute("SELECT * FROM users WHERE id = ? AND is_active = 1", (user_id,))
+    cursor = await db.execute("SELECT id, email, username FROM users WHERE id = ? AND is_active = 1", (user_id,))
     user = await cursor.fetchone()
     
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     
-    return {"id": user[0], "email": user[1], "username": user[2]}
-
-def require_auth(func):
-    """Decorator for protected routes.
-
-    Prefer using ``APIRouter(dependencies=[Depends(get_current_user)])``
-    for router-level protection instead.
-    """
-    from functools import wraps
-
-    @wraps(func)
-    async def wrapper(*args, current_user: dict = Depends(get_current_user), **kwargs):
-        return await func(*args, **kwargs)
-    return wrapper
+    return CurrentUser(id=user[0], email=user[1], username=user[2])

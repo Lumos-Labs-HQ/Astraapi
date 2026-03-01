@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -59,7 +60,11 @@ struct ParsedHttpRequest {
     bool upgrade;               // Connection: Upgrade (WebSocket, h2c, etc.)
     bool chunked;               // Transfer-Encoding: chunked (body is reassembled)
     bool body_too_large;        // Set true if chunked body exceeds MAX_CHUNKED_BODY
-    size_t total_consumed;      // Total bytes consumed from input
+    bool no_body;               // True for GET/HEAD/OPTIONS — body bytes skipped via F_SKIPBODY
+    bool is_head;               // True for HEAD method (response body must be stripped)
+    size_t total_consumed;      // Total bytes consumed from input (headers + body)
+    uint64_t body_skip_len;     // Declared Content-Length saved from on_headers_complete
+                                // Used to advance total_consumed past F_SKIPBODY-skipped bytes
 
     // Max chunked body size: 10 MB (prevents OOM from malicious chunked streams)
     static constexpr size_t MAX_CHUNKED_BODY = 10 * 1024 * 1024;

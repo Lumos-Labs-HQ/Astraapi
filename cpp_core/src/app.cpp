@@ -1768,21 +1768,22 @@ static const char* try_compress_inline(
 // Used by both build_http_response_bytes and build_and_write_http_response.
 static inline void build_fast_json_response_buf(
     std::vector<char>& buf, const CachedJsonPrefix& jp,
-    const char* body_data, size_t body_len, bool keep_alive)
+    const char* body_data, size_t body_len, bool keep_alive, bool head_only = false)
 {
     char cl_buf[20];
-    int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
+    int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);  // real size for Content-Length
     static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
     static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
     const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
     size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
-    size_t total = jp.len + cl_len + suffix_len + body_len;
+    // HEAD: exclude body bytes but keep Content-Length accurate (RFC 7231 §4.3.2)
+    size_t total = jp.len + cl_len + suffix_len + (head_only ? 0 : body_len);
     buf.resize(total);
     char* dst = buf.data();
     memcpy(dst, jp.data, jp.len); dst += jp.len;
     memcpy(dst, cl_buf, cl_len); dst += cl_len;
     memcpy(dst, suffix, suffix_len); dst += suffix_len;
-    memcpy(dst, body_data, body_len);
+    if (!head_only) { memcpy(dst, body_data, body_len); }
 }
 
 // ── Response builder with optional CORS + compression headers ────────────────
@@ -1790,7 +1791,7 @@ static inline void build_fast_json_response_buf(
 static PyObject* build_http_response_bytes(
     int status_code, const char* body_data, size_t body_len, bool keep_alive,
     const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
-    const char* content_encoding = nullptr)
+    const char* content_encoding = nullptr, bool head_only = false)
 {
     // Pre-built header templates — single memcpy for common case
     static const char HDR_200_JSON[] =
@@ -1810,7 +1811,7 @@ static PyObject* build_http_response_bytes(
     if (LIKELY(!cors && !content_encoding &&
         status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
         build_fast_json_response_buf(buf, s_json_prefixes[status_code],
-                                     body_data, body_len, keep_alive);
+                                     body_data, body_len, keep_alive, head_only);
         PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
         release_buffer(std::move(buf));
         return result;
@@ -1868,8 +1869,8 @@ static PyObject* build_http_response_bytes(
         buf_append(buf, CONN_CLOSE, sizeof(CONN_CLOSE) - 1);
     }
 
-    // Body
-    buf_append(buf, body_data, body_len);
+    // Body (skip for HEAD — Content-Length already set correctly above)
+    if (!head_only) { buf_append(buf, body_data, body_len); }
 
     PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
@@ -1957,15 +1958,15 @@ static int build_and_write_http_response(
     int sock_fd, PyObject* transport,
     int status_code, const char* body_data, size_t body_len, bool keep_alive,
     const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
-    const char* content_encoding = nullptr)
+    const char* content_encoding = nullptr, bool head_only = false)
 {
     // Ultra-fast path: cached JSON prefix, no CORS, no compression
     if (LIKELY(!cors && !content_encoding &&
         status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
         auto buf = acquire_buffer();
-        buf.reserve(256 + body_len);
+        buf.reserve(256 + (head_only ? 0 : body_len));
         build_fast_json_response_buf(buf, s_json_prefixes[status_code],
-                                     body_data, body_len, keep_alive);
+                                     body_data, body_len, keep_alive, head_only);
 
         // Direct write from buffer — skip PyBytes entirely
 #ifndef _WIN32
@@ -1995,7 +1996,7 @@ static int build_and_write_http_response(
 
     // Slow path: CORS, compression, or uncached status — use existing builder
     PyObject* resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive,
-                                                cors, origin, origin_len, content_encoding);
+                                                cors, origin, origin_len, content_encoding, head_only);
     if (!resp) return -1;
     int rc = write_response_direct(sock_fd, transport, resp);
     Py_DECREF(resp);
@@ -2009,7 +2010,8 @@ static int serialize_json_and_write_response(
     int sock_fd, PyObject* transport,
     PyObject* json_obj, int status_code, bool keep_alive,
     const char* accept_encoding = nullptr, size_t ae_len = 0,
-    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0)
+    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
+    bool head_only = false)
 {
     // 1. Serialize JSON into buffer pool
     auto buf = acquire_buffer();
@@ -2053,43 +2055,70 @@ static int serialize_json_and_write_response(
         size_t header_len = (size_t)(h - header_buf);
 
         // Scatter-gather write: [headers on stack] + [body in pool buffer]
+        // HEAD: send headers only — Content-Length already reflects real body_len (RFC 7231)
         if (sock_fd >= 0) {
-            PlatformIoVec iov[2] = {
-                {header_buf, header_len},
-                {const_cast<char*>(body_data), body_len}
-            };
-            ssize_t total = (ssize_t)(header_len + body_len);
-            ssize_t sent = platform_socket_writev(sock_fd, iov, 2);
-            if (sent == total) {
-                release_buffer(std::move(buf));
-                if (!compressed.empty()) release_buffer(std::move(compressed));
-                return 0;  // ZERO heap allocations!
-            }
-            if (sent > 0) {
-                // Partial write — build remainder as PyBytes, send via transport
-                if ((size_t)sent < header_len) {
-                    size_t hdr_rem = header_len - (size_t)sent;
-                    PyRef rem(PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(hdr_rem + body_len)));
-                    if (rem) {
-                        char* dst = PyBytes_AS_STRING(rem.get());
-                        memcpy(dst, header_buf + sent, hdr_rem);
-                        memcpy(dst + hdr_rem, body_data, body_len);
-                        write_to_transport(transport, rem.get());
-                    }
-                } else {
-                    size_t body_sent = (size_t)sent - header_len;
-                    PyRef rem(PyBytes_FromStringAndSize(
-                        body_data + body_sent, (Py_ssize_t)(body_len - body_sent)));
-                    if (rem) write_to_transport(transport, rem.get());
+            if (UNLIKELY(head_only)) {
+                // HEAD request: write headers only, no body bytes
+                ssize_t sent = platform_socket_write(sock_fd, header_buf, header_len);
+                if (sent == (ssize_t)header_len) {
+                    release_buffer(std::move(buf));
+                    if (!compressed.empty()) release_buffer(std::move(compressed));
+                    return 0;
                 }
-                release_buffer(std::move(buf));
-                if (!compressed.empty()) release_buffer(std::move(compressed));
-                return 0;
+                if (sent > 0) {
+                    size_t rem_len = header_len - (size_t)sent;
+                    PyRef rem(PyBytes_FromStringAndSize(header_buf + sent, (Py_ssize_t)rem_len));
+                    if (rem) write_to_transport(transport, rem.get());
+                    release_buffer(std::move(buf));
+                    if (!compressed.empty()) release_buffer(std::move(compressed));
+                    return 0;
+                }
+                // EAGAIN — fall through to transport
+            } else {
+                PlatformIoVec iov[2] = {
+                    {header_buf, header_len},
+                    {const_cast<char*>(body_data), body_len}
+                };
+                ssize_t total = (ssize_t)(header_len + body_len);
+                ssize_t sent = platform_socket_writev(sock_fd, iov, 2);
+                if (sent == total) {
+                    release_buffer(std::move(buf));
+                    if (!compressed.empty()) release_buffer(std::move(compressed));
+                    return 0;  // ZERO heap allocations!
+                }
+                if (sent > 0) {
+                    // Partial write — build remainder as PyBytes, send via transport
+                    if ((size_t)sent < header_len) {
+                        size_t hdr_rem = header_len - (size_t)sent;
+                        PyRef rem(PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(hdr_rem + body_len)));
+                        if (rem) {
+                            char* dst = PyBytes_AS_STRING(rem.get());
+                            memcpy(dst, header_buf + sent, hdr_rem);
+                            memcpy(dst + hdr_rem, body_data, body_len);
+                            write_to_transport(transport, rem.get());
+                        }
+                    } else {
+                        size_t body_sent = (size_t)sent - header_len;
+                        PyRef rem(PyBytes_FromStringAndSize(
+                            body_data + body_sent, (Py_ssize_t)(body_len - body_sent)));
+                        if (rem) write_to_transport(transport, rem.get());
+                    }
+                    release_buffer(std::move(buf));
+                    if (!compressed.empty()) release_buffer(std::move(compressed));
+                    return 0;
+                }
+                // EAGAIN — fall through to transport
             }
-            // EAGAIN — fall through to transport
         }
 
-        // Fallback: combine into single PyBytes for transport.write
+        // Fallback: PyBytes for transport.write (HEAD: headers only; GET/POST: headers+body)
+        if (UNLIKELY(head_only)) {
+            PyRef hdr_only(PyBytes_FromStringAndSize(header_buf, (Py_ssize_t)header_len));
+            if (hdr_only) write_to_transport(transport, hdr_only.get());
+            release_buffer(std::move(buf));
+            if (!compressed.empty()) release_buffer(std::move(compressed));
+            return hdr_only ? 0 : -1;
+        }
         PyRef full(PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(header_len + body_len)));
         if (full) {
             char* dst = PyBytes_AS_STRING(full.get());
@@ -2104,7 +2133,7 @@ static int serialize_json_and_write_response(
 
     // Slow path: CORS or uncached status — use existing response builder
     PyObject* resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive,
-                                                cors, origin, origin_len, encoding);
+                                                cors, origin, origin_len, encoding, head_only);
     release_buffer(std::move(buf));
     if (!compressed.empty()) release_buffer(std::move(compressed));
     if (!resp) return -1;
@@ -2392,6 +2421,13 @@ static PyObject* CoreApp_handle_http(
     ++self->counters.total_requests;
     ++self->counters.active_requests;
 
+    // ── Method flags (pre-computed by HTTP parser using llhttp enum) ──────
+    // GET, HEAD, OPTIONS: body bytes were consumed by llhttp but discarded
+    // (on_body is a no-op). req.body is empty, no body processing needed.
+    // HEAD additionally requires stripping the response body while keeping headers.
+    const bool is_head_method = req.is_head;
+    const bool skip_body_parse = req.no_body;
+
     // Capture start time only if post-response hook is configured (skip ~25ns rdtsc otherwise)
     auto request_start_time = self->post_response_hook
         ? std::chrono::steady_clock::now()
@@ -2407,7 +2443,8 @@ static PyObject* CoreApp_handle_http(
         // Only look for origin if CORS is configured — cached bool avoids atomic shared_ptr load
         bool want_origin = self->cors_enabled;
         int found = 0;
-        const int need = want_origin ? 5 : 4;
+        // Content-Type only needed for POST/PUT/PATCH body parsing — skip for GET/HEAD/OPTIONS
+        const int need = want_origin ? (skip_body_parse ? 4 : 5) : (skip_body_parse ? 3 : 4);
         for (int i = 0; i < req.header_count && found < need; i++) {
             const auto& hdr = req.headers[i];
             size_t nlen = hdr.name.len;
@@ -2422,7 +2459,8 @@ static PyObject* CoreApp_handle_http(
                         { origin_sv = hdr.value; found++; }
                     break;
                 case 12:
-                    if (content_type_sv.empty() && fb == 'c' && hdr.name.iequals("content-type", 12))
+                    // Skip content-type for body-less methods (GET, HEAD, OPTIONS)
+                    if (!skip_body_parse && content_type_sv.empty() && fb == 'c' && hdr.name.iequals("content-type", 12))
                         { content_type_sv = hdr.value; found++; }
                     break;
                 case 13:
@@ -2889,8 +2927,9 @@ static PyObject* CoreApp_handle_http(
     fill_defaults_http(spec.cookie_specs);
 
     // ── Body parsing: JSON or Form data ────────────────────────────────────
+    // Skip entirely for GET, HEAD, OPTIONS — these methods carry no request body.
     PyObject* json_body_obj = Py_None;
-    if (!req.body.empty()) {
+    if (!skip_body_parse && !req.body.empty()) {
         if (is_form_local && content_type_sv.len > 0) {
             // ── Form data parsing (urlencoded or multipart) ──────────────
             // Check content-type to determine form type
@@ -3582,7 +3621,8 @@ body_done:
             int wrc = serialize_json_and_write_response(
                 sock_fd, transport, raw_result, status_code_local, req.keep_alive,
                 accept_encoding_sv.data, accept_encoding_sv.len,
-                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
+                is_head_method);
             Py_DECREF(raw_result);
             if (wrc < 0) {
                 --self->counters.active_requests;
@@ -3699,7 +3739,45 @@ body_done:
             return make_consumed_true(self, req.total_consumed);
         }
 
-        // ── Fallback: serialize as string ────────────────────────────────
+        // ── Pydantic model: no response_model_field configured ──────────────────
+        // model_dump_json() returns JSON bytes directly — zero re-encode overhead.
+        // Fixes endpoints that return Pydantic models without response_model_field
+        // (previously fell through to PyObject_Str → Python repr).
+        {
+            static PyObject* s_mdj = nullptr;
+            if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
+            if (PyObject_HasAttr(raw_result, s_mdj)) {
+                PyRef mdj_method(PyObject_GetAttr(raw_result, s_mdj));
+                Py_DECREF(raw_result);
+                raw_result = nullptr;
+                if (mdj_method) {
+                    PyRef json_bytes(PyObject_CallNoArgs(mdj_method.get()));
+                    if (json_bytes) {
+                        const char* body_ptr = nullptr;
+                        Py_ssize_t body_sz = 0;
+                        if (PyBytes_Check(json_bytes.get())) {
+                            body_ptr = PyBytes_AS_STRING(json_bytes.get());
+                            body_sz  = PyBytes_GET_SIZE(json_bytes.get());
+                        } else if (PyUnicode_Check(json_bytes.get())) {
+                            body_ptr = PyUnicode_AsUTF8AndSize(json_bytes.get(), &body_sz);
+                        }
+                        if (body_ptr) {
+                            build_and_write_http_response(
+                                sock_fd, transport, status_code_local,
+                                body_ptr, (size_t)body_sz, req.keep_alive,
+                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
+                                nullptr, is_head_method);
+                        }
+                    } else { PyErr_Clear(); }
+                }
+                fire_post_response_hook(self, req.method.data, req.method.len,
+                                        req.path.data, req.path.len, status_code_local, request_start_time);
+                --self->counters.active_requests;
+                return make_consumed_true(self, req.total_consumed);
+            }
+        }
+
+        // ── Fallback: serialize as string ───────────────────────────────
         PyRef str_repr(PyObject_Str(raw_result));
         Py_DECREF(raw_result);
         if (str_repr) {
@@ -4017,28 +4095,32 @@ static PyObject* CoreApp_build_response_from_any(
         // body not bytes — fall through to Pydantic/fallback
     }
 
-    // Pydantic model: has .model_dump → convert to dict, then serialize
-    if (PyObject_HasAttrString(raw, "model_dump")) {
-        static PyObject* s_mode_json = nullptr;
-        if (!s_mode_json) {
-            s_mode_json = PyUnicode_InternFromString("json");
-        }
-        PyRef kw(PyDict_New());
-        if (kw && s_mode_json) {
-            static PyObject* s_mode_key = nullptr;
-            if (!s_mode_key) s_mode_key = PyUnicode_InternFromString("mode");
-            PyDict_SetItem(kw.get(), s_mode_key, s_mode_json);
-        }
-        PyRef method(PyObject_GetAttrString(raw, "model_dump"));
-        PyRef empty_args(PyTuple_New(0));
-        if (method && empty_args) {
-            PyRef dumped(PyObject_Call(method.get(), empty_args.get(), kw.get()));
-            if (dumped) {
-                PyObject* new_args[3] = { dumped.get(), args[1], args[2] };
-                return CoreApp_build_response(self, new_args, 3);
+    // Pydantic model: use model_dump_json() → JSON bytes directly (zero re-encode overhead).
+    // Faster than model_dump(mode='json') + yyjson re-serialization.
+    {
+        static PyObject* s_mdj = nullptr;
+        if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
+        if (PyObject_HasAttr(raw, s_mdj)) {
+            PyRef mdj_method(PyObject_GetAttr(raw, s_mdj));
+            if (mdj_method) {
+                PyRef json_bytes(PyObject_CallNoArgs(mdj_method.get()));
+                if (json_bytes) {
+                    const char* body_data = nullptr;
+                    Py_ssize_t body_len = 0;
+                    if (PyBytes_Check(json_bytes.get())) {
+                        body_data = PyBytes_AS_STRING(json_bytes.get());
+                        body_len  = PyBytes_GET_SIZE(json_bytes.get());
+                    } else if (PyUnicode_Check(json_bytes.get())) {
+                        body_data = PyUnicode_AsUTF8AndSize(json_bytes.get(), &body_len);
+                    }
+                    if (body_data) {
+                        return build_http_response_bytes(
+                            status_code, body_data, (size_t)body_len, keep_alive);
+                    }
+                }
+                PyErr_Clear();
             }
         }
-        PyErr_Clear();
     }
 
     // Ultimate fallback: try to serialize whatever it is
