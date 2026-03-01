@@ -977,7 +977,7 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_active_count", "_sock_fd", "_sock")
+    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_active_count", "_sock_fd")
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -1000,8 +1000,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_pong_received = True
         self._ws_task: asyncio.Task | None = None  # TS-2: tracked for cancellation
         self._pending_tasks: set | None = None  # Lazy — only allocated for async endpoints
-        self._sock_fd = -1  # Raw socket FD for direct C++ HTTP writes
-        self._sock: socket.socket | None = None  # Cached socket object (TCP_QUICKACK re-arm)
+        self._sock_fd = -1  # Raw socket FD for direct C++ HTTP writes (TCP_QUICKACK re-armed in C++)
 
     def _reinit(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
                 ka_timeout: float, connections_set: set | None) -> None:
@@ -1020,7 +1019,6 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ring_buf = None
         self._ws_fd = -1
         self._sock_fd = -1
-        self._sock = None
         self._ws_ping_handle = None
         self._ws_pong_received = True
         self._ws_task = None
@@ -1041,10 +1039,8 @@ class CppHttpProtocol(asyncio.Protocol):
                     pass
             try:
                 self._sock_fd = sock.fileno()
-                self._sock = sock  # cache for TCP_QUICKACK re-arm in data_received
             except (OSError, AttributeError):
                 self._sock_fd = -1
-                self._sock = None
         # Workers handle fewer connections each — use smaller buffers to reduce
         # memory pressure (833 conns × 64KB = 52MB vs 833 × 128KB = 106MB)
         if _WORKER_MODE:
@@ -1085,7 +1081,6 @@ class CppHttpProtocol(asyncio.Protocol):
             self._ws_ring_buf = None
         self._ws_fd = -1
         self._sock_fd = -1
-        self._sock = None
         self._transport = None
         # Remove from active connections set (graceful shutdown tracking)
         if self._connections_set is not None:
@@ -1101,18 +1096,9 @@ class CppHttpProtocol(asyncio.Protocol):
     # ── Data handling — the hot path ─────────────────────────────────────
 
     def data_received(self, data: bytes) -> None:
-        # Re-arm TCP_QUICKACK so server ACKs received data immediately, preventing
-        # the Nagle+delayed-ACK deadlock when clients split headers and body into
-        # separate sends (e.g. GET with form data, POST with large body).
-        # On Linux TCP_QUICKACK is one-shot: kernel clears it after each ACK, so
-        # it must be re-set every time new data arrives on the socket.
-        if _HAS_QUICKACK:
-            _sock = self._sock
-            if _sock is not None:
-                try:
-                    _sock.setsockopt(socket.IPPROTO_TCP, _TCP_QUICKACK, 1)
-                except OSError:
-                    pass
+        # TCP_QUICKACK re-armed inside C++ handle_http() via platform_rearm_quickack(sock_fd).
+        # This eliminates the Python setsockopt overhead (~5-8 µs) on every request
+        # while still preventing the Nagle+delayed-ACK 40ms deadlock.
 
         # WebSocket frame handling (after upgrade) — dispatch to mode-specific handler
         if self._ws is not None:
@@ -1859,6 +1845,7 @@ async def run_server(
                 "sysctl -w net.core.netdev_max_backlog=65535",
                 "sysctl -w net.ipv4.tcp_tw_reuse=1",
                 "sysctl -w net.ipv4.tcp_fin_timeout=10",
+                # "sysctl -w net.ipv4.tcp_fastopen=3",    # TFO client+server: saves 1 RTT on reconnect
             ):
                 subprocess.run(_cmd.split(), capture_output=True, timeout=2)
         except Exception:

@@ -1935,7 +1935,10 @@ static int write_response_direct(int fd, PyObject* transport, PyObject* data) {
         Py_ssize_t len = PyBytes_GET_SIZE(data);
         if (len > 0 && len <= 16384) {
             ssize_t sent = platform_socket_write(fd, PyBytes_AS_STRING(data), (size_t)len);
-            if (sent == len) return 0;  // Full write — bypassed Python entirely
+            if (sent == len) {
+                platform_rearm_quickack(fd);  // next pipelined/keep-alive request ACK'd immediately
+                return 0;  // Full write — bypassed Python entirely
+            }
             if (sent > 0) {
                 // Partial write: send remainder through Python transport
                 PyRef remainder(PyBytes_FromStringAndSize(
@@ -1973,6 +1976,7 @@ static int build_and_write_http_response(
         if (sock_fd >= 0) {
             ssize_t sent = platform_socket_write(sock_fd, buf.data(), buf.size());
             if (sent == (ssize_t)buf.size()) {
+                platform_rearm_quickack(sock_fd);
                 release_buffer(std::move(buf));
                 return 0;  // Zero Python allocations!
             }
@@ -2082,6 +2086,7 @@ static int serialize_json_and_write_response(
                 ssize_t total = (ssize_t)(header_len + body_len);
                 ssize_t sent = platform_socket_writev(sock_fd, iov, 2);
                 if (sent == total) {
+                    platform_rearm_quickack(sock_fd);  // next keep-alive request ACK'd immediately
                     release_buffer(std::move(buf));
                     if (!compressed.empty()) release_buffer(std::move(compressed));
                     return 0;  // ZERO heap allocations!
@@ -2362,6 +2367,12 @@ static PyObject* CoreApp_handle_http(
         sock_fd = (int)PyLong_AsLong(args[3]);
         if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
     }
+
+    // Re-arm TCP_QUICKACK immediately — ensures the kernel ACKs the just-received
+    // data without waiting 40ms (delayed ACK). One-shot on Linux; must be re-set
+    // per data_received. Done here in C++ to eliminate the Python setsockopt
+    // call overhead (~5-8 µs) that was previously in data_received().
+    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
     // Fast-path: PyCapsule (HttpConnectionBuffer) — skip memoryview creation entirely
     char* buf_data;

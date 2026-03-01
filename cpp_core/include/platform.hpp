@@ -108,6 +108,7 @@ struct PlatformIoVec {
     #include <unistd.h>
     #include <sys/uio.h>
     #include <sys/socket.h>
+    #include <netinet/in.h>  // IPPROTO_TCP
 
     // Use send(MSG_NOSIGNAL) instead of write() to avoid SIGPIPE on closed sockets
     inline ssize_t platform_socket_write(int fd, const void* buf, size_t len) {
@@ -121,4 +122,19 @@ struct PlatformIoVec {
                       "PlatformIoVec must match struct iovec layout");
         return writev(fd, reinterpret_cast<struct iovec*>(iov), iovcnt);
     }
+
+    // Re-arm TCP_QUICKACK (one-shot on Linux: kernel clears it after each ACK).
+    // Call at the start of handle_http to immediately ACK received data and break
+    // the Nagle+delayed-ACK deadlock for multi-segment requests (headers + body).
+    // Also call after writing a response to immediately ACK the client's next
+    // pipelined or keep-alive request.
+    inline void platform_rearm_quickack(int fd) {
+        static const int one = 1;
+        setsockopt(fd, IPPROTO_TCP, 12 /* TCP_QUICKACK */, &one, sizeof(one));
+    }
+#endif
+
+#ifdef _WIN32
+    // No TCP_QUICKACK on Windows — no-op.
+    inline void platform_rearm_quickack(int /*fd*/) {}
 #endif
