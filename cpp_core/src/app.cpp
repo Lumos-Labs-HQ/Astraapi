@@ -1328,6 +1328,16 @@ static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyO
         config->allow_origins_set.insert(o);
     }
     config->allow_origin_regex = origin_regex ? std::optional<std::string>(origin_regex) : std::nullopt;
+    if (config->allow_origin_regex.has_value()) {
+        try {
+            config->allow_origin_regex_compiled = std::regex(config->allow_origin_regex.value());
+        } catch (const std::regex_error&) {
+            PyErr_SetString(PyExc_ValueError, "Invalid CORS origin regex pattern");
+            return nullptr;
+        }
+    } else {
+        config->allow_origin_regex_compiled = std::nullopt;
+    }
     config->allow_methods = list_to_vec(methods);
     config->allow_headers = list_to_vec(headers);
     config->allow_credentials = (bool)credentials;
@@ -1524,7 +1534,15 @@ static bool cors_origin_allowed(const CorsConfig* cors, const char* origin, size
     if (!cors || !origin || origin_len == 0) return false;
     if (cors->allow_any_origin) return true;
     // Transparent hash: looks up string_view directly — zero heap allocation
-    return cors->allow_origins_set.count(std::string_view(origin, origin_len)) > 0;
+    if (cors->allow_origins_set.count(std::string_view(origin, origin_len)) > 0) return true;
+    // Regex match (pre-compiled at configure time)
+    if (cors->allow_origin_regex_compiled.has_value()) {
+        try {
+            if (std::regex_match(origin, origin + origin_len, cors->allow_origin_regex_compiled.value()))
+                return true;
+        } catch (...) {}
+    }
+    return false;
 }
 
 // Check for CRLF injection in origin strings (memchr = SIMD-accelerated on most platforms)
@@ -2364,6 +2382,13 @@ static PyObject* CoreApp_handle_http(
         Py_RETURN_FALSE;
     }
 
+    if (UNLIKELY(req.body_too_large)) {
+        // Chunked body exceeded MAX_CHUNKED_BODY — send 413
+        PyRef err_resp(build_http_error_response(413, "Payload Too Large", false));
+        if (err_resp) write_response_direct(sock_fd, transport, err_resp.get());
+        Py_RETURN_FALSE;
+    }
+
     ++self->counters.total_requests;
     ++self->counters.active_requests;
 
@@ -2833,8 +2858,9 @@ static PyObject* CoreApp_handle_http(
 
             // Header params
             if (spec.has_header_params) {
+                if (hdr.name.len > 255) continue;  // Skip oversized header names
                 char norm_buf[256];
-                size_t norm_len = hdr.name.len < 255 ? hdr.name.len : 255;
+                size_t norm_len = hdr.name.len;
                 for (size_t j = 0; j < norm_len; j++) {
                     norm_buf[j] = s_header_norm[(unsigned char)hdr.name.data[j]];
                 }

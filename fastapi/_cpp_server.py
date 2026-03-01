@@ -49,21 +49,37 @@ _NOOP = _NoopAwaitable()
 _STATUS_PHRASES: dict[int, str] = {
     200: "OK",
     201: "Created",
+    202: "Accepted",
+    203: "Non-Authoritative Information",
     204: "No Content",
+    205: "Reset Content",
+    206: "Partial Content",
+    207: "Multi-Status",
+    208: "Already Reported",
     301: "Moved Permanently",
     302: "Found",
+    303: "See Other",
     304: "Not Modified",
     307: "Temporary Redirect",
+    308: "Permanent Redirect",
     400: "Bad Request",
     401: "Unauthorized",
     403: "Forbidden",
     404: "Not Found",
     405: "Method Not Allowed",
+    406: "Not Acceptable",
+    408: "Request Timeout",
+    409: "Conflict",
+    410: "Gone",
     413: "Payload Too Large",
+    415: "Unsupported Media Type",
     422: "Unprocessable Entity",
+    429: "Too Many Requests",
     500: "Internal Server Error",
+    501: "Not Implemented",
     502: "Bad Gateway",
     503: "Service Unavailable",
+    504: "Gateway Timeout",
 }
 # Pre-computed bytes version — avoids .encode() per streaming response
 # Pre-built streaming status line prefixes — avoids 4× bytearray.extend() per streaming response
@@ -1435,7 +1451,8 @@ class CppHttpProtocol(asyncio.Protocol):
                     if prefix is not None:
                         buf = bytearray(prefix)
                     else:
-                        buf = bytearray(f"HTTP/1.1 {status} OK\r\ntransfer-encoding: chunked\r\n".encode())
+                        phrase = _STATUS_PHRASES.get(status, "")
+                        buf = bytearray(f"HTTP/1.1 {status} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
                     # Build headers with join (single alloc vs 4N extend calls)
                     hdr_parts = []
                     for name, value in headers_list:

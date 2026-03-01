@@ -105,9 +105,12 @@ PyObject* py_register_route_params(PyObject* self, PyObject* args, PyObject* kwa
         PyObject* req = PyDict_GetItemString(spec_dict, "required");
         PyObject* def = PyDict_GetItemString(spec_dict, "default_value");
 
-        ps.field_name = fn ? PyUnicode_AsUTF8(fn) : "";
-        ps.alias = al && PyUnicode_Check(al) ? PyUnicode_AsUTF8(al) : ps.field_name;
-        ps.header_lookup_key = hlk && PyUnicode_Check(hlk) ? PyUnicode_AsUTF8(hlk) : "";
+        const char* fn_str = fn ? PyUnicode_AsUTF8(fn) : nullptr;
+        ps.field_name = fn_str ? fn_str : "";
+        const char* al_str = (al && PyUnicode_Check(al)) ? PyUnicode_AsUTF8(al) : nullptr;
+        ps.alias = al_str ? al_str : ps.field_name;
+        const char* hlk_str = (hlk && PyUnicode_Check(hlk)) ? PyUnicode_AsUTF8(hlk) : nullptr;
+        ps.header_lookup_key = hlk_str ? hlk_str : "";
         ps.location = loc ? (int)PyLong_AsLong(loc) : 0;
         ps.type_tag = tt ? (int)PyLong_AsLong(tt) : 0;
         ps.required = req ? PyObject_IsTrue(req) : false;
@@ -273,9 +276,12 @@ PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObjec
         PyObject* tt = PyDict_GetItemString(sd, "type_tag");
         PyObject* def = PyDict_GetItemString(sd, "default_value");
 
-        ps.field_name = fn ? PyUnicode_AsUTF8(fn) : "";
-        ps.alias = al && PyUnicode_Check(al) ? PyUnicode_AsUTF8(al) : ps.field_name;
-        ps.header_lookup_key = hlk && PyUnicode_Check(hlk) ? PyUnicode_AsUTF8(hlk) : "";
+        const char* fn_str = fn ? PyUnicode_AsUTF8(fn) : nullptr;
+        ps.field_name = fn_str ? fn_str : "";
+        const char* al_str = (al && PyUnicode_Check(al)) ? PyUnicode_AsUTF8(al) : nullptr;
+        ps.alias = al_str ? al_str : ps.field_name;
+        const char* hlk_str = (hlk && PyUnicode_Check(hlk)) ? PyUnicode_AsUTF8(hlk) : nullptr;
+        ps.header_lookup_key = hlk_str ? hlk_str : "";
         ps.location = loc ? (int)PyLong_AsLong(loc) : 0;
         ps.type_tag = tt ? (int)PyLong_AsLong(tt) : 0;
         ps.default_value = (def && def != Py_None) ? def : nullptr;

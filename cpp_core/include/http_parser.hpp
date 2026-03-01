@@ -58,7 +58,11 @@ struct ParsedHttpRequest {
     bool keep_alive;            // Connection: keep-alive (default true for HTTP/1.1)
     bool upgrade;               // Connection: Upgrade (WebSocket, h2c, etc.)
     bool chunked;               // Transfer-Encoding: chunked (body is reassembled)
+    bool body_too_large;        // Set true if chunked body exceeds MAX_CHUNKED_BODY
     size_t total_consumed;      // Total bytes consumed from input
+
+    // Max chunked body size: 10 MB (prevents OOM from malicious chunked streams)
+    static constexpr size_t MAX_CHUNKED_BODY = 10 * 1024 * 1024;
 
     // For chunked TE: reassembled body buffer (body.data points into this)
     // Lazy: only allocated for chunked requests (99%+ of requests skip this)
@@ -71,6 +75,10 @@ struct ParsedHttpRequest {
             tl_chunked.clear();
             tl_chunked.reserve(4096);
             chunked_body_ptr = &tl_chunked;
+        }
+        if (chunked_body_ptr->size() + length > MAX_CHUNKED_BODY) {
+            body_too_large = true;
+            return;
         }
         size_t old = chunked_body_ptr->size();
         chunked_body_ptr->resize(old + length);

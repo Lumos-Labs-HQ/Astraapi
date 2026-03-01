@@ -476,7 +476,18 @@ class FileResponse(Response):
 
         # stat the file
         if self.stat_result is None:
-            self.stat_result = os.stat(self.path)
+            try:
+                self.stat_result = os.stat(self.path)
+            except FileNotFoundError:
+                self.status_code = 404
+                self.body = b"Not Found"
+                self._set_raw_header(b"content-length", b"9")
+                return
+            except PermissionError:
+                self.status_code = 403
+                self.body = b"Forbidden"
+                self._set_raw_header(b"content-length", b"9")
+                return
         st = self.stat_result
 
         # content-length

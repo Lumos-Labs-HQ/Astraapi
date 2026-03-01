@@ -16,7 +16,7 @@ async def lifespan(app: FastAPI):
     from database import close_db
     await close_db()
 
-app = FastAPI(title="Complete C++ Backend Test", lifespan=lifespan, docs_url="/docs")
+app = FastAPI(title="Complete C++ Backend Test", lifespan=lifespan, )
 
 # Middleware stack
 # app.add_middleware(RateLimitMiddleware, max_requests=100)

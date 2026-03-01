@@ -10,6 +10,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <regex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -33,6 +34,7 @@ struct CorsConfig {
     TransparentStringSet allow_origins_set;              // O(1) origin lookup (zero-alloc with string_view)
     bool allow_any_origin = false;                       // true if "*" in origins
     std::optional<std::string> allow_origin_regex;
+    std::optional<std::regex> allow_origin_regex_compiled;  // Pre-compiled at configure time
     std::vector<std::string> allow_methods;
     std::vector<std::string> allow_headers;
     bool allow_credentials = false;
