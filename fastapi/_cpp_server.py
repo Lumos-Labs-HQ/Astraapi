@@ -1665,7 +1665,7 @@ async def _create_server(
         core_app.warmup()     # Exercise parse→route→serialize→build to warm icache
 
     # Cache OpenAPI schema
-    if hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
+    if app.openapi_url and hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
         try:
             from fastapi._json_utils import json_dumps_str
             schema = app.openapi()
@@ -2057,7 +2057,7 @@ async def run_server(
     # Workers skip: each would redundantly compute the same schema.
     # Only run for single-process or worker 0.
     _worker_id = os.environ.get("_FASTAPI_WORKER_ID", "0")
-    if _worker_id == "0" and hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
+    if _worker_id == "0" and app.openapi_url and hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):
         async def _deferred_openapi() -> None:
             try:
                 from fastapi._json_utils import json_dumps_str as _json_dumps_str

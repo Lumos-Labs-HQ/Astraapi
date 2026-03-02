@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI
 
-app = FastAPI(title="FastAPI + Core")
+app = FastAPI()
 
 
 def _fmt(bytes_val: int) -> str:
@@ -98,5 +98,5 @@ if __name__ == "__main__":
             host = arg.split("=")[1]
     
     print(f"🚀 Starting server at {host}:{port}...")
-    app.run(host=host, port=port, workers=1 )
+    app.run(host=host, port=port, workers=1)
     

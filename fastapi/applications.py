@@ -237,7 +237,7 @@ class FastAPI(AppBase):
                 ```
                 """
             ),
-        ] = "/openapi.json",
+        ] = None,
         openapi_tags: Annotated[
             Optional[list[dict[str, Any]]],
             Doc(
@@ -437,7 +437,7 @@ class FastAPI(AppBase):
                 ```
                 """
             ),
-        ] = "/docs",
+        ] = None,
         redoc_url: Annotated[
             Optional[str],
             Doc(
@@ -461,7 +461,7 @@ class FastAPI(AppBase):
                 ```
                 """
             ),
-        ] = "/redoc",
+        ] = None,
         swagger_ui_oauth2_redirect_url: Annotated[
             Optional[str],
             Doc(
@@ -875,6 +875,9 @@ class FastAPI(AppBase):
         self.terms_of_service = terms_of_service
         self.contact = contact
         self.license_info = license_info
+        # Auto-enable OpenAPI schema if user requested any docs endpoint
+        if openapi_url is None and (docs_url is not None or redoc_url is not None):
+            openapi_url = "/openapi.json"
         self.openapi_url = openapi_url
         self.openapi_tags = openapi_tags
         self.root_path_in_servers = root_path_in_servers
