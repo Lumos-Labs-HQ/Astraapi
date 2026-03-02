@@ -152,6 +152,10 @@ def _run_worker_reuseport(app: Any, host: str, port: int) -> None:
         sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
     except (OSError, AttributeError):
         pass
+    try:
+        sock.setsockopt(_socket.IPPROTO_TCP, 9, 1)  # TCP_DEFER_ACCEPT
+    except (OSError, AttributeError):
+        pass
 
     from fastapi._cpp_server import run_server
     asyncio.run(run_server(app, host, port, sock=sock))

@@ -1127,7 +1127,6 @@ class CppHttpProtocol(asyncio.Protocol):
         offset = 0
         IR = _InlineResult
         sock_fd = self._sock_fd
-        now = _monotonic()
 
         while True:
             result = core.handle_http_batch(http_buf, transport, offset, sock_fd)
@@ -1241,7 +1240,7 @@ class CppHttpProtocol(asyncio.Protocol):
         if offset > 0:
             _http_buf_consume(http_buf, offset)
         if _http_buf_len(http_buf) == 0:
-            self._ka_reset(now)
+            self._ka_reset()
 
     # ── WebSocket frame handling ─────────────────────────────────────────
 
@@ -1355,7 +1354,7 @@ class CppHttpProtocol(asyncio.Protocol):
             return
         # Process buffered data that arrived during backpressure.
         # Data is already in the C++ buffer — just trigger processing with 0 new bytes.
-        self.buffer_updated(0)
+        self.data_received(b"")
 
     # ── WebSocket heartbeat (PING/PONG) ───────────────────────────────────
 
@@ -1701,10 +1700,14 @@ async def _create_server(
         reuse_address=True, backlog=65535,
     )
 
-    # TCP_FASTOPEN
+    # TCP_FASTOPEN + TCP_DEFER_ACCEPT (Linux)
     for s in server.sockets or []:
         try:
-            s.setsockopt(socket.IPPROTO_TCP, 23, 5)
+            s.setsockopt(socket.IPPROTO_TCP, 23, 5)  # TCP_FASTOPEN
+        except (OSError, AttributeError):
+            pass
+        try:
+            s.setsockopt(socket.IPPROTO_TCP, 9, 1)  # TCP_DEFER_ACCEPT
         except (OSError, AttributeError):
             pass
 
@@ -1950,7 +1953,7 @@ async def run_server(
     # Pre-populate protocol pool BEFORE gc.freeze() so protocols are frozen
     # Workers use smaller pool — high per-worker counts waste memory (COW page faults)
     # With N workers sharing C connections, each worker handles ~C/N connections.
-    _PREWARM = 64 if _is_worker else 512
+    _PREWARM = 128 if _is_worker else 512
     for _ in range(_PREWARM if _MAX_CONNECTIONS == 0 else min(_PREWARM, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
@@ -2041,7 +2044,7 @@ async def run_server(
             except (OSError, AttributeError):
                 pass
             try:
-                s.setsockopt(socket.IPPROTO_TCP, 9, 5)  # TCP_DEFER_ACCEPT = 9
+                s.setsockopt(socket.IPPROTO_TCP, 9, 1)  # TCP_DEFER_ACCEPT = 9
             except (OSError, AttributeError):
                 pass
 
