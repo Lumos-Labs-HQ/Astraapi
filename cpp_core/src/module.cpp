@@ -23,6 +23,8 @@ extern PyObject* py_http_buf_get_view(PyObject* self, PyObject* capsule);
 extern PyObject* py_http_buf_consume(PyObject* self, PyObject* args);
 extern PyObject* py_http_buf_clear(PyObject* self, PyObject* capsule);
 extern PyObject* py_http_buf_len(PyObject* self, PyObject* capsule);
+extern PyObject* py_http_buf_get_write_buf(PyObject* self, PyObject* args);
+extern PyObject* py_http_buf_commit_write(PyObject* self, PyObject* args);
 
 // buffer_pool.cpp
 extern PyObject* py_prewarm_buffer_pool(PyObject* self, PyObject* args);
@@ -296,6 +298,8 @@ static PyMethodDef module_methods[] = {
     {"http_buf_consume", (PyCFunction)py_http_buf_consume, METH_VARARGS, nullptr},
     {"http_buf_clear", (PyCFunction)py_http_buf_clear, METH_O, nullptr},
     {"http_buf_len", (PyCFunction)py_http_buf_len, METH_O, nullptr},
+    {"http_buf_get_write_buf", (PyCFunction)py_http_buf_get_write_buf, METH_VARARGS, nullptr},
+    {"http_buf_commit_write", (PyCFunction)py_http_buf_commit_write, METH_VARARGS, nullptr},
 
     {nullptr, nullptr, 0, nullptr}
 };

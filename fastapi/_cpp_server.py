@@ -24,6 +24,7 @@ import struct
 import sys
 import gc
 import time
+from time import monotonic as _monotonic
 from collections import deque
 from typing import Any
 
@@ -197,11 +198,11 @@ try:
         ws_handle_and_feed as _ws_handle_and_feed,
         # HTTP connection buffer (replaces Python bytearray + memmove)
         http_buf_create as _http_buf_create,
-        http_buf_append as _http_buf_append,
         http_buf_get_view as _http_buf_get_view,
         http_buf_consume as _http_buf_consume,
         http_buf_clear as _http_buf_clear,
         http_buf_len as _http_buf_len,
+        http_buf_append as _http_buf_append,
         # Warm-up / eager initialization
         init_cached_refs as _init_cached_refs,
         prewarm_buffer_pool as _prewarm_buffer_pool,
@@ -1097,8 +1098,6 @@ class CppHttpProtocol(asyncio.Protocol):
 
     def data_received(self, data: bytes) -> None:
         # TCP_QUICKACK re-armed inside C++ handle_http() via platform_rearm_quickack(sock_fd).
-        # This eliminates the Python setsockopt overhead (~5-8 µs) on every request
-        # while still preventing the Nagle+delayed-ACK 40ms deadlock.
 
         # WebSocket frame handling (after upgrade) — dispatch to mode-specific handler
         if self._ws is not None:
@@ -1106,33 +1105,29 @@ class CppHttpProtocol(asyncio.Protocol):
             self._ws_handler(data)
             return
 
+        # Append data into C++ HttpConnectionBuffer
+        http_buf = self._http_buf
+        if not _http_buf_append(http_buf, data):
+            # Buffer overflow — send 413 and close
+            transport = self._transport
+            if transport and not transport.is_closing():
+                transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                transport.close()
+            return
+
         # Back-pressure: buffer data but don't process until writes resume
         if self._wr_paused:
-            if not _http_buf_append(self._http_buf, data):
-                transport = self._transport
-                if transport and not transport.is_closing():
-                    transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                    transport.close()
-                _http_buf_clear(self._http_buf)
             return
 
         transport = self._transport
         if not transport or transport.is_closing():
             return
 
-        # ── Append + parse loop: 6 individual C++ calls ──────────────────
-        http_buf = self._http_buf
-        if not _http_buf_append(http_buf, data):
-            transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-            transport.close()
-            _http_buf_clear(http_buf)
-            return
-
         core = self._core
         offset = 0
         IR = _InlineResult
         sock_fd = self._sock_fd
-        now = self._loop.time()
+        now = _monotonic()
 
         while True:
             result = core.handle_http_batch(http_buf, transport, offset, sock_fd)
@@ -1358,7 +1353,9 @@ class CppHttpProtocol(asyncio.Protocol):
     def _drain_buf(self) -> None:
         if self._wr_paused or _http_buf_len(self._http_buf) == 0:
             return
-        self.data_received(b"")
+        # Process buffered data that arrived during backpressure.
+        # Data is already in the C++ buffer — just trigger processing with 0 new bytes.
+        self.buffer_updated(0)
 
     # ── WebSocket heartbeat (PING/PONG) ───────────────────────────────────
 
@@ -1608,7 +1605,7 @@ class CppHttpProtocol(asyncio.Protocol):
     def _ka_reset(self, now: float = 0.0) -> None:
         # Update deadline only — batch sweep handles expiry checking
         if now == 0.0:
-            now = self._loop.time()
+            now = _monotonic()
         self._ka_deadline = now + self._ka_timeout
 
     def _ka_cancel(self) -> None:
@@ -1951,8 +1948,9 @@ async def run_server(
     active_count = [0]  # mutable int via list — faster than len(set) in hot path
 
     # Pre-populate protocol pool BEFORE gc.freeze() so protocols are frozen
-    # Workers use smaller pool — 512 per worker wastes memory (COW page faults)
-    _PREWARM = 256 if _is_worker else 512
+    # Workers use smaller pool — high per-worker counts waste memory (COW page faults)
+    # With N workers sharing C connections, each worker handles ~C/N connections.
+    _PREWARM = 64 if _is_worker else 512
     for _ in range(_PREWARM if _MAX_CONNECTIONS == 0 else min(_PREWARM, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
@@ -2096,7 +2094,7 @@ async def run_server(
     async def _ka_sweep() -> None:
         while not stop_event.is_set():
             await asyncio.sleep(5.0)
-            now = loop.time()
+            now = _monotonic()
             batch: list = []
             for p in active_connections:
                 if p._ka_deadline > 0 and now > p._ka_deadline:

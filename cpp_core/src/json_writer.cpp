@@ -10,11 +10,17 @@
 #include <mutex>
 
 // SIMD headers for accelerated JSON string escaping
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+#if defined(__AVX2__)
+#include <immintrin.h>
+#define HAS_AVX2 1
+#define HAS_SSE2 1
+#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
 #include <emmintrin.h>
 #define HAS_SSE2 1
+#define HAS_AVX2 0
 #else
 #define HAS_SSE2 0
+#define HAS_AVX2 0
 #endif
 
 extern "C" {
@@ -119,12 +125,56 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
     const char* end = s + len;
     const char* safe = p;
 
+#if HAS_AVX2
+    // AVX2 fast path: scan 32 bytes at a time (2x throughput vs SSE2).
+    // Same algorithm as SSE2 but with 256-bit registers.
+    if (len >= 32) {
+        const __m256i v_space = _mm256_set1_epi8(0x20);
+        const __m256i v_quote = _mm256_set1_epi8('"');
+        const __m256i v_bslash = _mm256_set1_epi8('\\');
+        const __m256i v_high = _mm256_set1_epi8((char)0x80);
+
+        const char* simd_end = end - 31;  // safe to read 32 bytes
+        while (p < simd_end) {
+            __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
+
+            __m256i is_high = _mm256_and_si256(chunk, v_high);
+            __m256i high_mask = _mm256_cmpeq_epi8(is_high, v_high);
+            __m256i is_ctrl = _mm256_andnot_si256(high_mask,
+                _mm256_cmpgt_epi8(v_space, chunk));
+            __m256i is_quote_ = _mm256_cmpeq_epi8(chunk, v_quote);
+            __m256i is_bslash_ = _mm256_cmpeq_epi8(chunk, v_bslash);
+            __m256i need_escape = _mm256_or_si256(is_ctrl,
+                _mm256_or_si256(is_quote_, is_bslash_));
+
+            int mask = _mm256_movemask_epi8(need_escape);
+            if (mask == 0) {
+                p += 32;
+                continue;
+            }
+
+#if defined(_MSC_VER)
+            unsigned long idx;
+            _BitScanForward(&idx, (unsigned long)mask);
+            int first = (int)idx;
+#else
+            int first = __builtin_ctz(mask);
+#endif
+            p += first;
+            if (p > safe) buf_append(buf, safe, p - safe);
+            emit_escape(buf, (unsigned char)*p);
+            safe = ++p;
+        }
+    }
+    // SSE2 handles 16-byte tail after AVX2 (bytes between simd_end and end-15)
+#endif  // HAS_AVX2
+
 #if HAS_SSE2
     // SSE2 fast path: scan 16 bytes at a time for characters needing escape.
     // Characters that need escaping: < 0x20 (control), '"' (0x22), '\\' (0x5C)
     // Characters >= 0x80 are valid UTF-8 and must NOT be escaped.
     if (len >= 16) {
-        const __m128i v_space = _mm_set1_epi8(0x20);  // space
+        const __m128i v_space = _mm_set1_epi8(0x20);
         const __m128i v_quote = _mm_set1_epi8('"');
         const __m128i v_bslash = _mm_set1_epi8('\\');
         const __m128i v_high = _mm_set1_epi8((char)0x80);
@@ -133,34 +183,20 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
         while (p < simd_end) {
             __m128i chunk = _mm_loadu_si128((const __m128i*)p);
 
-            // Check for bytes < 0x20 (control chars) — treating as unsigned:
-            // We want (byte < 0x20). Use saturating subtract: if byte < 0x20,
-            // then byte - 0x20 underflows to 0 with subs, but we check the other way.
-            // Simpler: compare less-than as signed. Bytes 0x00-0x1F are 0-31 (positive).
-            // But bytes >= 0x80 are negative in signed. So "less than 0x20" catches 0x80+ too.
-            // Fix: mask out high-bit bytes first.
-            __m128i is_high = _mm_and_si128(chunk, v_high);  // isolate bit 7
-            __m128i high_mask = _mm_cmpeq_epi8(is_high, v_high);  // 0xFF where >= 0x80
-
-            // Control chars: byte < 0x20 AND byte < 0x80
-            // Use: subtract 0x20 unsigned, then check if borrow (result >= 0xE0)
-            // Simpler approach: pcmpgtb treats as signed, so bytes 0-31 are fine
+            __m128i is_high = _mm_and_si128(chunk, v_high);
+            __m128i high_mask = _mm_cmpeq_epi8(is_high, v_high);
             __m128i is_ctrl = _mm_andnot_si128(high_mask,
                 _mm_cmplt_epi8(chunk, v_space));
-
-            __m128i is_quote = _mm_cmpeq_epi8(chunk, v_quote);
-            __m128i is_bslash = _mm_cmpeq_epi8(chunk, v_bslash);
-            __m128i need_escape = _mm_or_si128(is_ctrl, _mm_or_si128(is_quote, is_bslash));
+            __m128i is_quote_ = _mm_cmpeq_epi8(chunk, v_quote);
+            __m128i is_bslash_ = _mm_cmpeq_epi8(chunk, v_bslash);
+            __m128i need_escape = _mm_or_si128(is_ctrl, _mm_or_si128(is_quote_, is_bslash_));
 
             int mask = _mm_movemask_epi8(need_escape);
             if (mask == 0) {
-                // No escapable chars in this 16-byte block — advance
                 p += 16;
                 continue;
             }
 
-            // Found escapable chars — flush safe range up to first match
-            // __builtin_ctz / _BitScanForward to find first set bit
 #if defined(_MSC_VER)
             unsigned long idx;
             _BitScanForward(&idx, (unsigned long)mask);

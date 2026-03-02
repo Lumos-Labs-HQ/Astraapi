@@ -32,6 +32,7 @@ _SHARED_SOCKET_ENV = "_FASTAPI_SHARED_SOCK"
 _DISPATCH_SOCK_ENV = "_FASTAPI_DISPATCH_SOCK"
 
 _HAS_FORK = hasattr(os, "fork")
+_HAS_REUSEPORT = hasattr(_socket, "SO_REUSEPORT")
 
 
 def is_worker() -> bool:
@@ -117,6 +118,43 @@ def _run_worker_fork(app: Any, host: str, port: int, unix_sock: Any) -> None:
 
     from fastapi._cpp_server import run_server
     asyncio.run(run_server(app, host, port, unix_sock=unix_sock))
+
+
+def _run_worker_reuseport(app: Any, host: str, port: int) -> None:
+    """Worker entry point for SO_REUSEPORT mode — each worker binds its own socket.
+
+    The kernel distributes incoming connections directly to worker sockets,
+    eliminating the master accept thread and IPC overhead entirely.
+    """
+    import asyncio
+
+    try:
+        import uvloop
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    except ImportError:
+        try:
+            import winloop
+            asyncio.set_event_loop_policy(winloop.EventLoopPolicy())
+        except ImportError:
+            pass
+
+    # Create a per-worker socket with SO_REUSEPORT
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        pass  # Fallback: will still work, just no kernel-level balancing
+    sock.bind((host, port))
+    sock.listen(65535)
+    sock.setblocking(False)
+    try:
+        sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+    except (OSError, AttributeError):
+        pass
+
+    from fastapi._cpp_server import run_server
+    asyncio.run(run_server(app, host, port, sock=sock))
 
 
 def _master_accept_loop(
@@ -320,31 +358,51 @@ def _run_fork_supervisor(
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    # ── Create Unix domain socketpairs (one per worker) ──
-    parent_socks: list[_socket.socket | None] = []  # master ends
-    child_socks: list[_socket.socket] = []           # worker ends
-    for _ in range(workers):
-        p, c = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
-        parent_socks.append(p)
-        child_socks.append(c)
+    # ── SO_REUSEPORT mode (Linux 3.9+): each worker binds its own socket ──
+    # The kernel distributes connections directly — no master accept thread,
+    # no IPC, no lock contention. Falls back to master-accept if unavailable.
+    use_reuseport = _HAS_REUSEPORT
+    if use_reuseport:
+        # Verify SO_REUSEPORT actually works (some containers block it)
+        try:
+            _test = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            _test.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEPORT, 1)
+            _test.close()
+        except (OSError, AttributeError):
+            use_reuseport = False
 
+    if use_reuseport:
+        # Close the parent's listen socket BEFORE forking — it was created
+        # without SO_REUSEPORT, which blocks worker bind() on the same port.
+        # Each worker will create its own socket with SO_REUSEPORT.
+        listen_sock.close()
+
+    parent_socks: list[_socket.socket | None] = []
+    child_socks: list[_socket.socket] = []
     worker_lock = threading.Lock()
+
+    if not use_reuseport:
+        # ── Create Unix domain socketpairs (one per worker) ──
+        for _ in range(workers):
+            p, c = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            parent_socks.append(p)
+            child_socks.append(c)
 
     # ── Fork workers ──
     for worker_id in range(workers):
         pid = os.fork()
         if pid == 0:
-            # Child: close listen socket (master handles accept) and
-            # close all socketpair ends except our own.
             signal.signal(signal.SIGINT, signal.SIG_DFL)
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            listen_sock.close()
-            for i, s in enumerate(child_socks):
-                if i != worker_id:
-                    s.close()
-            for s in parent_socks:
-                if s is not None:
-                    s.close()
+            if not use_reuseport:
+                listen_sock.close()
+                # Close all socketpair ends except our own
+                for i, s in enumerate(child_socks):
+                    if i != worker_id:
+                        s.close()
+                for s in parent_socks:
+                    if s is not None:
+                        s.close()
             os.environ[_WORKER_ENV] = "1"
             os.environ[_WORKER_ID_ENV] = str(worker_id)
             # Pin worker to a dedicated core — eliminates cross-core cache
@@ -356,26 +414,34 @@ def _run_fork_supervisor(
                 except OSError:
                     pass
             try:
-                _run_worker_fork(app, host, port, child_socks[worker_id])
+                if use_reuseport:
+                    _run_worker_reuseport(app, host, port)
+                else:
+                    _run_worker_fork(app, host, port, child_socks[worker_id])
             except KeyboardInterrupt:
                 pass
+            except Exception:
+                import traceback
+                traceback.print_exc()
             finally:
                 os._exit(0)
         else:
             children[pid] = worker_id
-            print(f"  Worker {worker_id} started (pid {pid})")
+            mode = "reuseport" if use_reuseport else "master-accept"
+            print(f"  Worker {worker_id} started (pid {pid}, {mode})")
 
-    # Master: close child ends (workers have their own copies via fork)
-    for s in child_socks:
-        s.close()
+    if not use_reuseport:
+        # Master: close child ends (workers have their own copies via fork)
+        for s in child_socks:
+            s.close()
 
-    # ── Start centralized accept thread ──
-    accept_thread = threading.Thread(
-        target=_master_accept_loop,
-        args=(listen_sock, parent_socks, worker_lock),
-        daemon=True,
-    )
-    accept_thread.start()
+        # ── Start centralized accept thread ──
+        accept_thread = threading.Thread(
+            target=_master_accept_loop,
+            args=(listen_sock, parent_socks, worker_lock),
+            daemon=True,
+        )
+        accept_thread.start()
 
     # ── Supervisor loop: monitor children, restart on crash ──
     while not _shutdown and children:
@@ -392,44 +458,71 @@ def _run_fork_supervisor(
             if _shutdown:
                 break
 
-            # Close old socketpair end for dead worker
-            with worker_lock:
-                old_sock = parent_socks[worker_id]
-                if old_sock is not None:
-                    old_sock.close()
-                    parent_socks[worker_id] = None
-
-            # Create new socketpair for replacement worker
-            new_p, new_c = _socket.socketpair(
-                _socket.AF_UNIX, _socket.SOCK_STREAM)
-
             print(f"  Worker {worker_id} exited (code {exit_code}), restarting...")
-            new_pid = os.fork()
-            if new_pid == 0:
-                signal.signal(signal.SIGINT, signal.SIG_DFL)
-                signal.signal(signal.SIGTERM, signal.SIG_DFL)
-                listen_sock.close()
-                new_p.close()
-                os.environ[_WORKER_ENV] = "1"
-                os.environ[_WORKER_ID_ENV] = str(worker_id)
-                if hasattr(os, "sched_setaffinity"):
-                    cpu_count = os.cpu_count() or 1
+
+            if use_reuseport:
+                # SO_REUSEPORT: just fork a new worker — it creates its own socket
+                new_pid = os.fork()
+                if new_pid == 0:
+                    signal.signal(signal.SIGINT, signal.SIG_DFL)
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                    os.environ[_WORKER_ENV] = "1"
+                    os.environ[_WORKER_ID_ENV] = str(worker_id)
+                    if hasattr(os, "sched_setaffinity"):
+                        cpu_count = os.cpu_count() or 1
+                        try:
+                            os.sched_setaffinity(0, {worker_id % cpu_count})
+                        except OSError:
+                            pass
                     try:
-                        os.sched_setaffinity(0, {worker_id % cpu_count})
-                    except OSError:
+                        _run_worker_reuseport(app, host, port)
+                    except KeyboardInterrupt:
                         pass
-                try:
-                    _run_worker_fork(app, host, port, new_c)
-                except KeyboardInterrupt:
-                    pass
-                finally:
-                    os._exit(0)
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
+                    finally:
+                        os._exit(0)
+                else:
+                    children[new_pid] = worker_id
+                    print(f"  Worker {worker_id} restarted (pid {new_pid}, reuseport)")
             else:
-                new_c.close()
+                # Master-accept: close old socketpair, create new one
                 with worker_lock:
-                    parent_socks[worker_id] = new_p
-                children[new_pid] = worker_id
-                print(f"  Worker {worker_id} restarted (pid {new_pid})")
+                    old_sock = parent_socks[worker_id]
+                    if old_sock is not None:
+                        old_sock.close()
+                        parent_socks[worker_id] = None
+
+                new_p, new_c = _socket.socketpair(
+                    _socket.AF_UNIX, _socket.SOCK_STREAM)
+
+                new_pid = os.fork()
+                if new_pid == 0:
+                    signal.signal(signal.SIGINT, signal.SIG_DFL)
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                    listen_sock.close()
+                    new_p.close()
+                    os.environ[_WORKER_ENV] = "1"
+                    os.environ[_WORKER_ID_ENV] = str(worker_id)
+                    if hasattr(os, "sched_setaffinity"):
+                        cpu_count = os.cpu_count() or 1
+                        try:
+                            os.sched_setaffinity(0, {worker_id % cpu_count})
+                        except OSError:
+                            pass
+                    try:
+                        _run_worker_fork(app, host, port, new_c)
+                    except KeyboardInterrupt:
+                        pass
+                    finally:
+                        os._exit(0)
+                else:
+                    new_c.close()
+                    with worker_lock:
+                        parent_socks[worker_id] = new_p
+                    children[new_pid] = worker_id
+                    print(f"  Worker {worker_id} restarted (pid {new_pid})")
         else:
             time.sleep(1.0)
 

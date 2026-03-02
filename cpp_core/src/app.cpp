@@ -1926,11 +1926,11 @@ static int write_to_transport(PyObject* transport, PyObject* data) {
 }
 
 // ── Direct socket write — bypasses Python transport for small HTTP responses ──
-// Only on Linux/macOS (asyncio uses epoll/kqueue with non-blocking sockets).
+// Uses platform_socket_write() (send() on all platforms) to write directly to
+// the socket fd, avoiding transport.write() + PyBytes allocation overhead.
 // Falls back to transport.write() for large responses or on partial/failed write.
 // Matches existing WebSocket direct-fd pattern (ws_ring_buffer.cpp).
 static int write_response_direct(int fd, PyObject* transport, PyObject* data) {
-#ifndef _WIN32
     if (fd >= 0 && PyBytes_Check(data)) {
         Py_ssize_t len = PyBytes_GET_SIZE(data);
         if (len > 0 && len <= 16384) {
@@ -1946,10 +1946,9 @@ static int write_response_direct(int fd, PyObject* transport, PyObject* data) {
                 if (remainder) return write_to_transport(transport, remainder.get());
                 return -1;
             }
-            // sent <= 0: EAGAIN or error — fall through to transport.write()
+            // sent <= 0: EAGAIN/WSAEWOULDBLOCK — fall through to transport.write()
         }
     }
-#endif
     return write_to_transport(transport, data);
 }
 
@@ -1972,7 +1971,6 @@ static int build_and_write_http_response(
                                      body_data, body_len, keep_alive, head_only);
 
         // Direct write from buffer — skip PyBytes entirely
-#ifndef _WIN32
         if (sock_fd >= 0) {
             ssize_t sent = platform_socket_write(sock_fd, buf.data(), buf.size());
             if (sent == (ssize_t)buf.size()) {
@@ -1986,9 +1984,8 @@ static int build_and_write_http_response(
                 if (rem) return write_to_transport(transport, rem.get());
                 return -1;
             }
-            // sent <= 0: EAGAIN or error — fall through to transport
+            // sent <= 0: EAGAIN/WSAEWOULDBLOCK — fall through to transport
         }
-#endif
         // Fallback: create PyBytes from buffer
         PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
         release_buffer(std::move(buf));
@@ -2220,6 +2217,40 @@ public:
             }
         }
     }
+
+    // ── BufferedProtocol support: zero-copy receive ─────────────────────
+    // ensure_writable() guarantees at least `n` bytes available for writing.
+    // Returns false on allocation failure or overflow.
+    bool ensure_writable(size_t n) {
+        size_t used = write_pos_ - read_pos_;
+        if (used + n > MAX_CAPACITY) return false;
+
+        // Compact if read_pos > 50% of capacity
+        if (read_pos_ > capacity_ / 2) {
+            memmove(buf_, buf_ + read_pos_, used);
+            write_pos_ = used;
+            read_pos_ = 0;
+        }
+
+        // Grow if needed
+        if (write_pos_ + n > capacity_) {
+            size_t new_cap = capacity_;
+            while (new_cap < write_pos_ + n) new_cap *= 2;
+            if (new_cap > MAX_CAPACITY) new_cap = MAX_CAPACITY;
+            uint8_t* nb = static_cast<uint8_t*>(realloc(buf_, new_cap));
+            if (!nb) return false;
+            buf_ = nb;
+            capacity_ = new_cap;
+        }
+        return true;
+    }
+
+    uint8_t* write_ptr() { return buf_ + write_pos_; }
+    size_t writable_size() const { return capacity_ - write_pos_; }
+
+    void commit_write(size_t n) {
+        write_pos_ += n;
+    }
 };
 
 static const char* HTTP_BUF_CAPSULE_NAME = "http_connection_buffer";
@@ -2308,6 +2339,49 @@ PyObject* py_http_buf_len(PyObject* /*self*/, PyObject* capsule) {
         return nullptr;
     }
     return PyLong_FromSsize_t((Py_ssize_t)buf->size());
+}
+
+// http_buf_get_write_buf: Return a writable memoryview into the buffer's unused space.
+// Used by BufferedProtocol.get_buffer() to let asyncio write directly into our buffer.
+// Args: capsule, sizehint (int)
+PyObject* py_http_buf_get_write_buf(PyObject* /*self*/, PyObject* args) {
+    PyObject* capsule;
+    Py_ssize_t sizehint;
+    if (!PyArg_ParseTuple(args, "On", &capsule, &sizehint)) return nullptr;
+
+    auto* buf = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    if (!buf) {
+        PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
+        return nullptr;
+    }
+
+    size_t hint = (sizehint > 0) ? (size_t)sizehint : 8192;
+    if (hint < 4096) hint = 4096;  // Minimum useful read size
+    if (!buf->ensure_writable(hint)) {
+        PyErr_SetString(PyExc_MemoryError, "http_connection_buffer overflow");
+        return nullptr;
+    }
+
+    return PyMemoryView_FromMemory(
+        (char*)buf->write_ptr(), (Py_ssize_t)buf->writable_size(), PyBUF_WRITE);
+}
+
+// http_buf_commit_write: Advance write position after asyncio wrote into the buffer.
+// Called from BufferedProtocol.buffer_updated(nbytes).
+PyObject* py_http_buf_commit_write(PyObject* /*self*/, PyObject* args) {
+    PyObject* capsule;
+    Py_ssize_t nbytes;
+    if (!PyArg_ParseTuple(args, "On", &capsule, &nbytes)) return nullptr;
+
+    auto* buf = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    if (!buf) {
+        PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
+        return nullptr;
+    }
+    buf->commit_write((size_t)nbytes);
+    Py_RETURN_NONE;
 }
 
 // ── Post-response hook helper (for logging middleware) ──────────────────────
