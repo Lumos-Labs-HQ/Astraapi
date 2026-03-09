@@ -79,6 +79,7 @@ static PyObject* s_http_exc_type = nullptr;         // starlette.exceptions.HTTP
 static PyObject* s_fastapi_http_exc_type = nullptr;  // fastapi.exceptions.HTTPException
 static PyObject* s_resume_func = nullptr;            // fastapi._core_app._resume_coro
 static PyObject* s_request_body_to_args = nullptr;   // fastapi.dependencies.utils.request_body_to_args
+static PyObject* s_form_data_class = nullptr;         // fastapi._datastructures_impl.FormData
 
 // Pre-interned strings for transport method calls (cleaned up at exit)
 static PyObject* g_str_write = nullptr;
@@ -134,6 +135,7 @@ void cleanup_cached_refs() {
     Py_CLEAR(s_fastapi_http_exc_type);
     Py_CLEAR(s_resume_func);
     Py_CLEAR(s_request_body_to_args);
+    Py_CLEAR(s_form_data_class);
     Py_CLEAR(g_str_write);
     Py_CLEAR(g_str_is_closing);
     Py_CLEAR(s_ensure_future);
@@ -181,6 +183,12 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     if (!s_request_body_to_args) {
         PyRef mod(PyImport_ImportModule("fastapi.dependencies.utils"));
         if (mod) s_request_body_to_args = PyObject_GetAttrString(mod.get(), "request_body_to_args");
+        else PyErr_Clear();
+    }
+    // Pre-import FormData class (for wrapping form dicts in Pydantic validation path)
+    if (!s_form_data_class) {
+        PyRef mod(PyImport_ImportModule("fastapi._datastructures_impl"));
+        if (mod) s_form_data_class = PyObject_GetAttrString(mod.get(), "FormData");
         else PyErr_Clear();
     }
 
@@ -484,9 +492,11 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
         self->openapi_json_resp = nullptr;
         self->docs_html_resp = nullptr;
         self->redoc_html_resp = nullptr;
+        self->oauth2_redirect_html_resp = nullptr;
         new (&self->openapi_url) std::string("/openapi.json");
         new (&self->docs_url) std::string("/docs");
         new (&self->redoc_url) std::string("/redoc");
+        new (&self->oauth2_redirect_url) std::string("/docs/oauth2-redirect");
         // Rate limiting + logging hook
         self->rate_limit_enabled = false;
         self->rate_limit_max_requests = 100;
@@ -513,6 +523,7 @@ static void CoreApp_dealloc(CoreAppObject* self) {
             Py_XDECREF(route.fast_spec->body_params);
             Py_XDECREF(route.fast_spec->dependant);
             Py_XDECREF(route.fast_spec->dep_solver);
+            Py_XDECREF(route.fast_spec->param_validator);
             Py_XDECREF(route.fast_spec->model_validate);
             // Release pre-interned py_field_name + default_value refs
             auto release_specs = [](std::vector<FieldSpec>& specs) {
@@ -540,9 +551,11 @@ static void CoreApp_dealloc(CoreAppObject* self) {
     Py_XDECREF(self->openapi_json_resp);
     Py_XDECREF(self->docs_html_resp);
     Py_XDECREF(self->redoc_html_resp);
+    Py_XDECREF(self->oauth2_redirect_html_resp);
     self->openapi_url.~basic_string();
     self->docs_url.~basic_string();
     self->redoc_url.~basic_string();
+    self->oauth2_redirect_url.~basic_string();
     Py_XDECREF(self->post_response_hook);
     for (int i = 0; i < RATE_LIMIT_SHARDS; i++) {
         self->rate_limit_shards[i].counters.~unordered_map();
@@ -615,16 +628,33 @@ static PyObject* build_static_response(
 static const char SWAGGER_UI_HTML[] = R"(<!DOCTYPE html>
 <html>
 <head>
-<title>FastAPI - Swagger UI</title>
+<title>%s</title>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+<link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" >
 </head>
 <body>
-<div id="swagger-ui"></div>
-<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<div id="swagger-ui">
+</div>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"> </script>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js"> </script>
 <script>
-SwaggerUIBundle({url: "/openapi.json", dom_id: "#swagger-ui", presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset], layout: "BaseLayout"})
+window.onload = function() {
+const ui = SwaggerUIBundle({
+url: "%s",
+dom_id: '#swagger-ui',
+presets: [
+SwaggerUIBundle.presets.apis,
+SwaggerUIStandalonePreset
+],
+layout: "StandaloneLayout",
+deepLinking: true,
+showExtensions: true,
+showCommonExtensions: true,
+oauth2RedirectUrl: window.location.origin + '%s',
+})
+window.ui = ui
+}
 </script>
 </body>
 </html>)";
@@ -633,16 +663,83 @@ SwaggerUIBundle({url: "/openapi.json", dom_id: "#swagger-ui", presets: [SwaggerU
 static const char REDOC_HTML[] = R"(<!DOCTYPE html>
 <html>
 <head>
-<title>FastAPI - ReDoc</title>
+<title>%s</title>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
 </head>
 <body>
-<redoc spec-url="/openapi.json"></redoc>
-<script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+<redoc spec-url='%s'></redoc>
+<script src="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js"> </script>
 </body>
 </html>)";
+
+// OAuth2 redirect HTML (from Swagger UI oauth2-redirect.html)
+static const char OAUTH2_REDIRECT_HTML[] = R"oauth2(<!doctype html>
+<html lang="en-US">
+<body onload="run()">
+</body>
+</html>
+<script>
+    'use strict';
+    function run () {
+        var oauth2 = window.opener.swaggerUIRedirectOauth2;
+        var sentState = oauth2.state;
+        var redirectUrl = oauth2.redirectUrl;
+        var isValid, qp, arr;
+
+        if (/code|token|error/.test(window.location.hash)) {
+            qp = window.location.hash.substring(1).replace('?', '&');
+        } else {
+            qp = location.search.substring(1);
+        }
+
+        arr = qp.split("&");
+        arr.forEach(function (v,i,_arr) { _arr[i] = '"' + v.replace('=', '":"') + '"';});
+        qp = qp ? JSON.parse('{' + arr.join() + '}',
+                function (key, value) {
+                    return key ? decodeURIComponent(value) : value;
+                }
+        ) : {};
+
+        isValid = qp.state === sentState;
+
+        if ((
+          oauth2.auth.schema.get("flow") === "accessCode" ||
+          oauth2.auth.schema.get("flow") === "authorizationCode" ||
+          oauth2.auth.schema.get("flow") === "authorization_code"
+        ) && !oauth2.auth.code) {
+            if (!isValid) {
+                oauth2.errCb({
+                    authId: oauth2.auth.name,
+                    source: "auth",
+                    level: "warning",
+                    message: "Authorization may be unsafe, passed state was changed in server. The passed state wasn't returned from auth server."
+                });
+            }
+
+            if (qp.code) {
+                delete oauth2.state;
+                oauth2.auth.code = qp.code;
+                oauth2.callback({auth: oauth2.auth, redirectUrl: redirectUrl});
+            } else {
+                oauth2.errCb({authId: oauth2.auth.name, source: "auth", level: "error", message: "Authorization code was not found."});
+            }
+        } else if (!isValid) {
+            oauth2.errCb({
+                authId: oauth2.auth.name,
+                source: "auth",
+                level: "error",
+                message: "Authorization may be unsafe, passed state was changed in server. The passed state wasn't returned from auth server or can't be parsed."
+            });
+        } else if (qp.access_token || qp.token || qp.id_token) {
+            window.opener.swaggerUIRedirectOauth2.callback({auth: oauth2.auth, token: qp, redirectUrl: redirectUrl});
+        } else {
+            oauth2.errCb({authId: oauth2.auth.name, source: "auth", level: "error", message: "No access_token received from server."});
+        }
+        window.close();
+    }
+</script>)oauth2";
 
 static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) {
     // arg = OpenAPI schema as JSON string (Python str)
@@ -660,17 +757,49 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
     self->openapi_json_resp = build_static_response(
         200, "application/json", json_data, (size_t)json_len);
 
-    // Build cached /docs response (Swagger UI)
-    Py_XDECREF(self->docs_html_resp);
-    self->docs_html_resp = build_static_response(
-        200, "text/html; charset=utf-8",
-        SWAGGER_UI_HTML, sizeof(SWAGGER_UI_HTML) - 1);
+    // Build Swagger UI HTML with substituted title, openapi_url, and oauth2_redirect_url
+    {
+        const std::string title = "FastAPI - Swagger UI";
+        const std::string& openapi_url = self->openapi_url;
+        const std::string& oauth2_url = self->oauth2_redirect_url;
+        // SWAGGER_UI_HTML has 3 %s placeholders: title, openapi_url, oauth2_redirect_url
+        std::string html;
+        html.reserve(4096);
+        int written = snprintf(nullptr, 0, SWAGGER_UI_HTML,
+            title.c_str(), openapi_url.c_str(), oauth2_url.c_str());
+        if (written > 0) {
+            html.resize((size_t)written + 1);
+            snprintf(html.data(), html.size(), SWAGGER_UI_HTML,
+                title.c_str(), openapi_url.c_str(), oauth2_url.c_str());
+            html.resize((size_t)written);
+        }
+        Py_XDECREF(self->docs_html_resp);
+        self->docs_html_resp = build_static_response(
+            200, "text/html; charset=utf-8", html.c_str(), html.size());
+    }
 
-    // Build cached /redoc response
-    Py_XDECREF(self->redoc_html_resp);
-    self->redoc_html_resp = build_static_response(
+    // Build ReDoc HTML with substituted title and openapi_url
+    {
+        const std::string title = "FastAPI - ReDoc";
+        const std::string& openapi_url = self->openapi_url;
+        // REDOC_HTML has 2 %s placeholders: title, openapi_url
+        std::string html;
+        int written = snprintf(nullptr, 0, REDOC_HTML, title.c_str(), openapi_url.c_str());
+        if (written > 0) {
+            html.resize((size_t)written + 1);
+            snprintf(html.data(), html.size(), REDOC_HTML, title.c_str(), openapi_url.c_str());
+            html.resize((size_t)written);
+        }
+        Py_XDECREF(self->redoc_html_resp);
+        self->redoc_html_resp = build_static_response(
+            200, "text/html; charset=utf-8", html.c_str(), html.size());
+    }
+
+    // Build cached /docs/oauth2-redirect response
+    Py_XDECREF(self->oauth2_redirect_html_resp);
+    self->oauth2_redirect_html_resp = build_static_response(
         200, "text/html; charset=utf-8",
-        REDOC_HTML, sizeof(REDOC_HTML) - 1);
+        OAUTH2_REDIRECT_HTML, sizeof(OAUTH2_REDIRECT_HTML) - 1);
 
     Py_RETURN_NONE;
 }
@@ -1116,7 +1245,7 @@ static inline PyObject* build_error_response(PyObject* detail, int status_code) 
 static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args, PyObject* kwargs) {
     static const char* kwlist[] = {
         "route_index", "body_param_name", "field_specs_list",
-        "body_params", "embed_body_fields", "dependant", "dep_solver", nullptr
+        "body_params", "embed_body_fields", "dependant", "dep_solver", "param_validator", nullptr
     };
 
     Py_ssize_t route_index;
@@ -1126,12 +1255,13 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
     int embed_body_fields = 0;
     PyObject* dependant_obj = Py_None;
     PyObject* dep_solver_obj = Py_None;
+    PyObject* param_validator_obj = Py_None;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-            "n|zOOpOO", (char**)kwlist,
+            "n|zOOpOOO", (char**)kwlist,
             &route_index, &body_param_name, &field_specs_list,
             &body_params_obj, &embed_body_fields,
-            &dependant_obj, &dep_solver_obj)) {
+            &dependant_obj, &dep_solver_obj, &param_validator_obj)) {
         return nullptr;
     }
 
@@ -1259,6 +1389,13 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
         spec.dependant = dependant_obj;
         Py_INCREF(dep_solver_obj);
         spec.dep_solver = dep_solver_obj;
+    }
+
+    // Param validator (Pydantic TypeAdapter-based constraint validation)
+    spec.param_validator = nullptr;
+    if (param_validator_obj != Py_None) {
+        Py_INCREF(param_validator_obj);
+        spec.param_validator = param_validator_obj;
     }
 
     route.fast_spec = std::move(spec);
@@ -2610,6 +2747,10 @@ static PyObject* dispatch_one_request(
                 --self->counters.active_requests;
                 write_response_direct(sock_fd, transport, self->docs_html_resp);
                 return make_consumed_true(self, req.total_consumed);
+            } else if (self->oauth2_redirect_html_resp && path_sv == self->oauth2_redirect_url) {
+                --self->counters.active_requests;
+                write_response_direct(sock_fd, transport, self->oauth2_redirect_html_resp);
+                return make_consumed_true(self, req.total_consumed);
             }
         } else if (second == 'r' && self->redoc_html_resp) {
             std::string_view path_sv(req.path.data, req.path.len);
@@ -2883,10 +3024,15 @@ static PyObject* dispatch_one_request(
     const auto& spec = *spec_ptr;
 
     // ── OPT: Skip kwargs for zero-param endpoints (e.g. GET /) ──────────
+    // NOTE: is_form_local must also force kwargs creation — form routes don't
+    // register body_params (has_body_params_local=false) but the form parser
+    // writes field values directly into kwargs via PyDict_SetItem. Without this,
+    // kwargs is nullptr for form-only routes → segfault in PyDict_SetItem.
     bool needs_kwargs = (match->param_count > 0) ||
         spec.has_query_params || spec.has_header_params ||
         spec.has_cookie_params || has_body_params_local ||
-        spec.has_dependencies || !req.query_string.empty();
+        spec.has_dependencies || !req.query_string.empty() ||
+        is_form_local;
 
     PyRef kwargs(needs_kwargs ? PyDict_New() : nullptr);
     if (needs_kwargs && !kwargs) return nullptr;
@@ -3022,12 +3168,45 @@ static PyObject* dispatch_one_request(
     fill_defaults_http(spec.header_specs);
     fill_defaults_http(spec.cookie_specs);
 
+    // ── Param validation (Pydantic TypeAdapter constraints + required check) ─
+    if (spec.param_validator && needs_kwargs) {
+        PyRef pv_result(PyObject_CallOneArg(spec.param_validator, kwargs.get()));
+        if (pv_result && PyTuple_Check(pv_result.get()) && PyTuple_GET_SIZE(pv_result.get()) >= 2) {
+            PyObject* pv_values = PyTuple_GET_ITEM(pv_result.get(), 0);  // borrowed
+            PyObject* pv_errors = PyTuple_GET_ITEM(pv_result.get(), 1);  // borrowed
+            if (pv_errors && PyList_Check(pv_errors) && PyList_GET_SIZE(pv_errors) > 0) {
+                // Return 422 with validation errors
+                PyRef err_dict(PyDict_New());
+                if (err_dict) {
+                    if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+                    PyDict_SetItem(err_dict.get(), s_detail_key_global, pv_errors);
+                    PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
+                    if (err_json) {
+                        char* ej_data; Py_ssize_t ej_len;
+                        PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
+                        build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
+                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                    }
+                }
+                Py_DECREF(endpoint_local);
+                Py_XDECREF(body_params_local);
+                --self->counters.active_requests;
+                ++self->counters.total_errors;
+                return make_consumed_true(self, req.total_consumed);
+            } else if (pv_values && PyDict_Check(pv_values) && PyDict_GET_SIZE(pv_values) > 0) {
+                // Update kwargs with coerced/validated values
+                PyDict_Update(kwargs.get(), pv_values);
+            }
+        } else {
+            PyErr_Clear();  // Don't break dispatch on validator error
+        }
+    }
+
     // ── Body parsing: JSON or Form data ────────────────────────────────────
     // Skip entirely for GET, HEAD, OPTIONS — these methods carry no request body.
     PyObject* json_body_obj = Py_None;
     if (!skip_body_parse && !req.body.empty()) {
         if (is_form_local && content_type_sv.len > 0) {
-            // ── Form data parsing (urlencoded or multipart) ──────────────
             // Check content-type to determine form type
             bool is_urlencoded = false, is_multipart = false;
             // Zero-allocation case-insensitive content-type check
@@ -3074,8 +3253,37 @@ static PyObject* dispatch_one_request(
                         PyRef pk(PyUnicode_FromStringAndSize(key_sv.data(), key_sv.size()));
                         PyRef pv(PyUnicode_FromStringAndSize(val_sv.data(), val_sv.size()));
                         if (pk && pv) {
-                            PyDict_SetItem(kwargs.get(), pk.get(), pv.get());
-                            PyDict_SetItem(form_dict.get(), pk.get(), pv.get());
+                            // Handle multi-value fields: if key already exists, collect into list
+                            PyObject* existing = PyDict_GetItem(form_dict.get(), pk.get());  // borrowed
+                            if (existing == nullptr) {
+                                // First occurrence — store as plain string
+                                PyDict_SetItem(form_dict.get(), pk.get(), pv.get());
+                                // Only inject raw values directly into kwargs for embedded
+                                // (individual) params (embed_body_local=true). For single-model
+                                // params (embed_body_local=false), kwargs gets the validated model
+                                // from request_body_to_args, NOT raw field strings. Injecting raw
+                                // values causes "unexpected keyword arguments" TypeError.
+                                if (embed_body_local) {
+                                    PyDict_SetItem(kwargs.get(), pk.get(), pv.get());
+                                }
+                            } else if (PyList_Check(existing)) {
+                                // Already a list — append new value
+                                PyList_Append(existing, pv.get());
+                                if (embed_body_local) {
+                                    PyDict_SetItem(kwargs.get(), pk.get(), existing);
+                                }
+                            } else {
+                                // Second occurrence — promote to [existing, new] list
+                                PyRef lst(PyList_New(0));
+                                if (lst) {
+                                    PyList_Append(lst.get(), existing);  // INCREF'd by Append
+                                    PyList_Append(lst.get(), pv.get()); // INCREF'd by Append
+                                    PyDict_SetItem(form_dict.get(), pk.get(), lst.get());
+                                    if (embed_body_local) {
+                                        PyDict_SetItem(kwargs.get(), pk.get(), lst.get());
+                                    }
+                                }
+                            }
                         }
                     }
                     if (p < end) p++;
@@ -3128,7 +3336,7 @@ static PyObject* dispatch_one_request(
                                 PyObject* fn_obj = PyDict_GetItemString(part, "filename");
                                 if (name_obj) {
                                     if (fn_obj && fn_obj != Py_None) {
-                                        // File upload — keep entire part dict
+                                        // File upload — always put in kwargs for the shim
                                         PyDict_SetItem(form_dict.get(), name_obj, part);
                                         PyDict_SetItem(kwargs.get(), name_obj, part);
                                     } else if (data_obj) {
@@ -3139,11 +3347,16 @@ static PyObject* dispatch_one_request(
                                             PyRef str_val(PyUnicode_FromStringAndSize(d, dlen));
                                             if (str_val) {
                                                 PyDict_SetItem(form_dict.get(), name_obj, str_val.get());
-                                                PyDict_SetItem(kwargs.get(), name_obj, str_val.get());
+                                                // Only inject into kwargs for embedded params
+                                                if (embed_body_local) {
+                                                    PyDict_SetItem(kwargs.get(), name_obj, str_val.get());
+                                                }
                                             }
                                         } else {
                                             PyDict_SetItem(form_dict.get(), name_obj, data_obj);
-                                            PyDict_SetItem(kwargs.get(), name_obj, data_obj);
+                                            if (embed_body_local) {
+                                                PyDict_SetItem(kwargs.get(), name_obj, data_obj);
+                                            }
                                         }
                                     }
                                 }
@@ -3188,6 +3401,23 @@ static PyObject* dispatch_one_request(
                 }
                 // embed case already merged directly above
             }
+        }
+    }
+
+    // For form routes with Pydantic validation: wrap the form dict in a FormData instance
+    // so request_body_to_args calls _extract_form_body which fills in model defaults.
+    // This ensures error "input" shows the defaults (matching standard FastAPI behavior).
+    if (is_form_local && has_body_params_local && s_form_data_class) {
+        PyObject* src = (json_body_obj != Py_None) ? json_body_obj : nullptr;
+        PyRef empty_dict;
+        if (!src) {
+            empty_dict = PyRef(PyDict_New());
+            src = empty_dict.get();
+        }
+        PyRef form_data_inst(PyObject_CallOneArg(s_form_data_class, src));
+        if (form_data_inst) {
+            if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+            json_body_obj = form_data_inst.release();
         }
     }
 
@@ -3711,7 +3941,8 @@ body_done:
         if (LIKELY(PyDict_Check(raw_result) || PyList_Check(raw_result) ||
             PyUnicode_Check(raw_result) || PyLong_Check(raw_result) ||
             PyFloat_Check(raw_result) || PyBool_Check(raw_result) ||
-            PyTuple_Check(raw_result) || raw_result == Py_None)) {
+            PyTuple_Check(raw_result) || PySet_Check(raw_result) ||
+            PyFrozenSet_Check(raw_result) || raw_result == Py_None)) {
 
             // Fused: serialize JSON + build HTTP + write — zero intermediate PyBytes
             int wrc = serialize_json_and_write_response(
@@ -3836,18 +4067,23 @@ body_done:
         }
 
         // ── Pydantic model: no response_model_field configured ──────────────────
-        // model_dump_json() returns JSON bytes directly — zero re-encode overhead.
-        // Fixes endpoints that return Pydantic models without response_model_field
-        // (previously fell through to PyObject_Str → Python repr).
+        // model_dump_json(by_alias=True) returns JSON bytes directly — zero re-encode overhead.
+        // Fixes endpoints that return Pydantic models without response_model_field.
+        // by_alias=True matches FastAPI's jsonable_encoder default behavior.
         {
             static PyObject* s_mdj = nullptr;
+            static PyObject* s_by_alias_kw = nullptr;
             if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
+            if (!s_by_alias_kw) s_by_alias_kw = PyUnicode_InternFromString("by_alias");
             if (PyObject_HasAttr(raw_result, s_mdj)) {
                 PyRef mdj_method(PyObject_GetAttr(raw_result, s_mdj));
                 Py_DECREF(raw_result);
                 raw_result = nullptr;
                 if (mdj_method) {
-                    PyRef json_bytes(PyObject_CallNoArgs(mdj_method.get()));
+                    // Call model_dump_json(by_alias=True) to match FastAPI's jsonable_encoder
+                    PyRef kw(PyDict_New());
+                    if (kw) PyDict_SetItem(kw.get(), s_by_alias_kw, Py_True);
+                    PyRef json_bytes(PyObject_Call(mdj_method.get(), g_empty_tuple, kw.get()));
                     if (json_bytes) {
                         const char* body_ptr = nullptr;
                         Py_ssize_t body_sz = 0;
@@ -4305,15 +4541,21 @@ static PyObject* CoreApp_build_response_from_any(
         // body not bytes — fall through to Pydantic/fallback
     }
 
-    // Pydantic model: use model_dump_json() → JSON bytes directly (zero re-encode overhead).
+    // Pydantic model: use model_dump_json(by_alias=True) → JSON bytes directly.
     // Faster than model_dump(mode='json') + yyjson re-serialization.
+    // by_alias=True matches FastAPI's jsonable_encoder default behavior.
     {
         static PyObject* s_mdj = nullptr;
+        static PyObject* s_by_alias_kw = nullptr;
         if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
+        if (!s_by_alias_kw) s_by_alias_kw = PyUnicode_InternFromString("by_alias");
         if (PyObject_HasAttr(raw, s_mdj)) {
             PyRef mdj_method(PyObject_GetAttr(raw, s_mdj));
             if (mdj_method) {
-                PyRef json_bytes(PyObject_CallNoArgs(mdj_method.get()));
+                PyRef kw(PyDict_New());
+                if (kw) PyDict_SetItem(kw.get(), s_by_alias_kw, Py_True);
+                PyRef json_bytes(kw ? PyObject_Call(mdj_method.get(), g_empty_tuple, kw.get())
+                                    : PyObject_CallNoArgs(mdj_method.get()));
                 if (json_bytes) {
                     const char* body_data = nullptr;
                     Py_ssize_t body_len = 0;

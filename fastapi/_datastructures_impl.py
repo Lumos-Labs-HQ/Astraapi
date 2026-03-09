@@ -11,7 +11,9 @@ import tempfile
 from typing import Any, Iterator, Optional, Sequence, Tuple, Union
 from urllib.parse import unquote, urlparse
 
-from fastapi._concurrency import run_in_threadpool
+# NOTE: UploadFile methods use direct sync calls (no run_in_threadpool).
+# C++ always provides in-memory BytesIO; threading is handled on the C++ side.
+from fastapi._concurrency import run_in_threadpool  # kept for other callers
 
 
 # ---------------------------------------------------------------------------
@@ -475,20 +477,22 @@ class UploadFile:
             self.file = file
 
     async def read(self, size: int = -1) -> bytes:
-        """Read up to *size* bytes from the file."""
-        return await run_in_threadpool(self.file.read, size)
+        """Read bytes from the file. C++ always provides in-memory BytesIO."""
+        return self.file.read(size)
 
     async def write(self, data: bytes) -> None:
-        """Write *data* to the file."""
-        await run_in_threadpool(self.file.write, data)
+        """Write bytes to the file."""
+        if self.size is not None:
+            self.size += len(data)
+        self.file.write(data)
 
     async def seek(self, offset: int) -> None:
-        """Seek to *offset* in the file."""
-        await run_in_threadpool(self.file.seek, offset)
+        """Seek to offset in the file."""
+        self.file.seek(offset)
 
     async def close(self) -> None:
         """Close the underlying file object."""
-        await run_in_threadpool(self.file.close)
+        self.file.close()
 
     def __repr__(self) -> str:
         return (

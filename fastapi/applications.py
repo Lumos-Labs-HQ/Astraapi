@@ -1147,12 +1147,17 @@ class FastAPI(AppBase):
     ) -> list[dict]:
         """Convert routing.py batch_specs tuples to C++ register_fast_spec dicts.
 
-        Tuple format: (location, alias, type_tag, field_name, is_seq, is_json, convert_underscores)
-        Dict format: {field_name, alias, header_lookup_key, location, type_tag, required, default_value}
+        Tuple format: (location, alias, type_tag, field_name, is_seq, is_json,
+                       convert_underscores, required, default_value)
+        Dict format: {field_name, alias, header_lookup_key, location, type_tag,
+                      required, default_value}
         """
         result = []
         for spec in batch_specs:
             loc_str, alias, tag_str, field_name = spec[0], spec[1], spec[2], spec[3]
+            # Extended tuple (9 elements) now carries required + default_value
+            is_required = spec[7] if len(spec) > 7 else False
+            default_value = spec[8] if len(spec) > 8 else None
             # For headers, the lookup key is lowercase with - replaced by _
             header_key = field_name.lower().replace("-", "_") if loc_str == "header" else ""
             result.append({
@@ -1161,8 +1166,8 @@ class FastAPI(AppBase):
                 "header_lookup_key": header_key,
                 "location": _BATCH_SPEC_LOC.get(loc_str, 0),
                 "type_tag": _BATCH_SPEC_TYPE.get(tag_str, 0),
-                "required": False,
-                "default_value": None,
+                "required": is_required,
+                "default_value": default_value,
             })
         return result
 
@@ -1194,20 +1199,34 @@ class FastAPI(AppBase):
             # No file params — original endpoint is fine as-is
             return original_endpoint
 
+        _is_async = inspect.iscoroutinefunction(original_endpoint)
+
         async def _form_shim(**kwargs: Any) -> Any:
+            created_files: list[Any] = []
             for name in file_param_names:
                 raw = kwargs.get(name)
                 # C++ passes a dict: {name, filename, data, content_type}
                 if isinstance(raw, dict) and 'data' in raw:
                     data: bytes = raw.get('data') or b''
-                    kwargs[name] = _UploadFile(
+                    uf = _UploadFile(
                         filename=raw.get('filename') or '',
                         file=io.BytesIO(data),
                         content_type=raw.get('content_type') or 'application/octet-stream',
                         headers=_Headers(raw=[]),
                         size=len(data),
                     )
-            return await original_endpoint(**kwargs)
+                    kwargs[name] = uf
+                    created_files.append(uf)
+            try:
+                if _is_async:
+                    return await original_endpoint(**kwargs)
+                else:
+                    return original_endpoint(**kwargs)
+            finally:
+                # Close UploadFile BytesIO objects after the request completes
+                # (mirrors standard FastAPI's FormData.close() cleanup)
+                for uf in created_files:
+                    uf.file.close()
 
         _form_shim.__name__ = getattr(original_endpoint, '__name__', '_form_shim')
         return _form_shim
@@ -1250,7 +1269,9 @@ class FastAPI(AppBase):
             _registered_endpoint = endpoint
             if _is_form:
                 _registered_endpoint = self._make_form_endpoint_shim(route)
-                _is_coro = True  # shim is always async
+                # The shim is async, but if no file params the original endpoint
+                # is returned unchanged — use its actual coroutine status.
+                _is_coro = inspect.iscoroutinefunction(_registered_endpoint)
 
             try:
                 self._core_app.add_route(
@@ -1282,6 +1303,7 @@ class FastAPI(AppBase):
                         else None
                     )
                     dep_solver = getattr(route, '_dep_solver', None)
+                    param_validator = getattr(route, '_param_validator', None)
                     self._core_app.register_fast_spec(
                         route_index,
                         body_param_name,
@@ -1290,13 +1312,16 @@ class FastAPI(AppBase):
                         getattr(route, '_embed_body_fields', False),
                         dep if dep.dependencies else None,
                         dep_solver,
+                        param_validator=param_validator,
                     )
                 elif _is_form:
-                    # Form route not on the standard fast path: still register fast_spec
-                    # so the C++ trie entry has a valid spec (prevents "Route not
-                    # configured" 500 errors).  Dependencies (e.g. auth) are resolved
-                    # via a freshly-built dep_solver; body/file params are handled by
-                    # the _form_shim wrapper above.
+                    # Form route: register fast_spec so C++ dispatch handles it.
+                    # - No file params (original endpoint returned, not shim): pass
+                    #   body_params so C++ calls request_body_to_args for validation.
+                    #   This gives proper 422 for missing required fields.
+                    # - File params present (shim created): skip body_params validation
+                    #   because raw file dicts from C++ multipart parser can't be
+                    #   validated as UploadFile by Pydantic — the shim handles that.
                     dep = route.dependant
                     dep_solver = None
                     if dep.dependencies:
@@ -1309,12 +1334,14 @@ class FastAPI(AppBase):
                         self._convert_batch_specs(raw_specs) if raw_specs
                         else None
                     )
+                    # If shim was created (file params), skip C++ body validation
+                    _has_file_params = _registered_endpoint is not endpoint
                     self._core_app.register_fast_spec(
                         route_index,
-                        None,       # body_param_name: handled by shim
+                        None,       # body_param_name: individual fields go into kwargs
                         field_specs,
-                        None,       # body_params: handled by C++ form parser + shim
-                        False,      # embed_body_fields
+                        None if _has_file_params else (dep.body_params or None),
+                        getattr(route, '_embed_body_fields', True),  # form fields are embedded
                         dep if dep.dependencies else None,
                         dep_solver,
                     )

@@ -8,7 +8,11 @@ T = TypeVar("T")
 
 
 async def run_in_threadpool(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Run a sync function in the default executor."""
+    """Run a sync function in the default executor.
+
+    Uses asyncio.get_running_loop().run_in_executor() directly — zero overhead
+    vs anyio/sniffio backend detection. The server is asyncio/uvloop-only.
+    """
     loop = asyncio.get_running_loop()
     if kwargs:
         func = functools.partial(func, **kwargs)

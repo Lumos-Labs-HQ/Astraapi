@@ -375,6 +375,25 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         return 0;
     }
 
+    // set, frozenset → JSON array (iterate)
+    if (PySet_Check(obj) || PyFrozenSet_Check(obj)) {
+        buf_push(buf, '[');
+        PyRef iter(PyObject_GetIter(obj));
+        if (!iter) return -1;
+        bool first = true;
+        PyObject* item;
+        while ((item = PyIter_Next(iter.get())) != nullptr) {
+            if (!first) buf_push(buf, ',');
+            first = false;
+            int rc = write_json(item, buf, depth + 1);
+            Py_DECREF(item);
+            if (rc < 0) return -1;
+        }
+        if (PyErr_Occurred()) return -1;
+        buf_push(buf, ']');
+        return 0;
+    }
+
     // ── Special types (datetime, Decimal, UUID, Enum) ──────────────────────
     // Types are initialized at module load via json_writer_init()
 

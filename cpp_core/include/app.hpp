@@ -104,6 +104,9 @@ struct FastRouteSpec {
     PyObject* dependant;          // Python Dependant object (strong ref, or NULL)
     PyObject* dep_solver;         // Python callable: _fast_solve_deps (strong ref, or NULL)
 
+    // Param validation (Pydantic TypeAdapters for query/header/cookie/path constraints)
+    PyObject* param_validator;    // Python callable: _validate_params (strong ref, or NULL)
+
     // Pydantic model fast-path: call model.model_validate() directly from C++
     // Set at registration when body has exactly 1 Pydantic model param
     PyObject* model_validate;     // bound method: Model.model_validate (strong ref, or NULL)
@@ -168,12 +171,10 @@ typedef struct {
     std::unordered_map<uint16_t, PyObject*> exception_handlers;
     std::atomic<uint64_t> route_counter{0};
 
-    // ── Hot counters: cache-line aligned to prevent false sharing ────────
-    // Under high concurrency, cores writing to these atomics would invalidate
-    // each other's cache lines if mixed with cold fields. Own cache line = no contention.
-    // Single-threaded asyncio event loop — plain integers, no atomic overhead.
-    // Saves 3-5 atomic RMW ops per request under 10K connection contention.
-    struct alignas(64) HotCounters {
+    // ── Hot counters (no alignas — Python tp_alloc doesn't guarantee alignment) ────────
+    // Was alignas(64) but that caused vmovdqa crashes since Python's allocator
+    // only guarantees pointer-sized alignment, not 64-byte cache-line alignment.
+    struct HotCounters {
         uint64_t total_requests = 0;
         int64_t  active_requests = 0;
         uint64_t total_errors = 0;
@@ -184,19 +185,21 @@ typedef struct {
     PyObject* openapi_json_resp;    // strong ref: pre-built HTTP response bytes for /openapi.json
     PyObject* docs_html_resp;       // strong ref: pre-built HTTP response bytes for /docs
     PyObject* redoc_html_resp;      // strong ref: pre-built HTTP response bytes for /redoc
+    PyObject* oauth2_redirect_html_resp;  // strong ref: pre-built HTTP response bytes for /docs/oauth2-redirect
     std::string openapi_url;        // "/openapi.json" (default)
     std::string docs_url;           // "/docs" (default)
     std::string redoc_url;          // "/redoc" (default)
+    std::string oauth2_redirect_url;  // "/docs/oauth2-redirect" (default)
 
     // Rate limiting (C++ native) — sharded for low contention
     bool rate_limit_enabled = false;
     int rate_limit_max_requests = 100;
     int rate_limit_window_seconds = 60;
     struct RateLimitEntry { int count; int64_t window_start_ns; };
-    // Cache-line aligned: prevents inter-shard contention from mutex invalidation
     // Transparent hash allows string_view lookups without copying the key string,
     // avoiding a per-request std::string hash+copy for the client IP.
-    struct alignas(64) RateLimitShard {
+    // (No alignas — Python tp_alloc doesn't guarantee 64-byte alignment.)
+    struct RateLimitShard {
         std::mutex mutex;
         std::unordered_map<std::string, RateLimitEntry,
                            TransparentStringHash, TransparentStringEqual> counters;

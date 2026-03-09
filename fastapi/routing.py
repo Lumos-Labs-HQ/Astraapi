@@ -742,44 +742,133 @@ class APIWebSocketRoute(routing.WebSocketRoute):
 
 def _build_field_specs(
     dependant: Dependant,
-) -> list[tuple[str, str, str, str, bool, bool, bool]]:
+) -> list[tuple[str, str, str, str, bool, bool, bool, bool, Any]]:
     """
     Build field specs for Core batch parameter extraction.
 
     Returns a list of tuples:
-        (location, alias, type_tag, field_name, is_sequence, is_json, convert_underscores)
+        (location, alias, type_tag, field_name, is_sequence, is_json,
+         convert_underscores, required, default_value)
 
     Called once at route registration time (startup), not per-request.
     """
     from fastapi._compat import is_sequence_field
     from fastapi.dependencies.utils import _get_scalar_type_tag, _is_json_field, get_validation_alias
 
-    specs: list[tuple[str, str, str, str, bool, bool, bool]] = []
+    specs: list[tuple[str, str, str, str, bool, bool, bool, bool, Any]] = []
 
     for field in dependant.query_params:
         alias = get_validation_alias(field)
         tag = _get_scalar_type_tag(field) or ""
         is_seq = is_sequence_field(field) and not _is_json_field(field)
         is_json = _is_json_field(field)
-        specs.append(("query", alias, tag, field.name, is_seq, is_json, False))
+        is_req = field.required
+        default = None if is_req else field.get_default()
+        specs.append(("query", alias, tag, field.name, is_seq, is_json, False, is_req, default))
 
     for field in dependant.header_params:
         alias = get_validation_alias(field)
         tag = _get_scalar_type_tag(field) or ""
         convert = getattr(field.field_info, "convert_underscores", True)
-        specs.append(("header", alias, tag, field.name, False, False, convert))
+        is_req = field.required
+        default = None if is_req else field.get_default()
+        specs.append(("header", alias, tag, field.name, False, False, convert, is_req, default))
 
     for field in dependant.cookie_params:
         alias = get_validation_alias(field)
         tag = _get_scalar_type_tag(field) or ""
-        specs.append(("cookie", alias, tag, field.name, False, False, False))
+        is_req = field.required
+        default = None if is_req else field.get_default()
+        specs.append(("cookie", alias, tag, field.name, False, False, False, is_req, default))
 
     for field in dependant.path_params:
         alias = get_validation_alias(field)
         tag = _get_scalar_type_tag(field) or ""
-        specs.append(("path", alias, tag, field.name, False, False, False))
+        # Path params are always required by definition
+        specs.append(("path", alias, tag, field.name, False, False, False, True, None))
 
     return specs
+
+
+def _make_param_validator(dependant: Dependant) -> Optional[Any]:
+    """Create a fast param validator callable for the C++ fast path.
+
+    Returns a callable (kwargs_dict) → (validated_values, errors_list) that:
+    1. Checks for missing required params (returns 422 "Field required" error)
+    2. Validates all params using Pydantic TypeAdapters (catches min_length, ge, etc.)
+    3. Returns coerced/validated values to be merged into kwargs
+
+    Returns None if there are no params to validate (no-op route).
+    Called once at route registration time; returned callable runs per-request.
+    """
+    from fastapi.dependencies.utils import get_validation_alias
+
+    # Collect all (location, alias, field_name, is_required, default, type_adapter)
+    param_info = []
+    for loc, fields in [
+        ("query", dependant.query_params),
+        ("header", dependant.header_params),
+        ("cookie", dependant.cookie_params),
+        ("path", dependant.path_params),
+    ]:
+        for field in fields:
+            alias = get_validation_alias(field)
+            is_req = field.required
+            default = None if is_req else field.get_default()
+            param_info.append((loc, alias, field.name, is_req, default, field._type_adapter))
+
+    if not param_info:
+        return None
+
+    # Pre-import ValidationError for zero-import-overhead in the hot path
+    from pydantic import ValidationError as _PydanticValidationError
+
+    def _validate(kwargs_dict: dict) -> tuple[dict, list]:
+        # Pop C++-injected keys that shouldn't be treated as request params
+        kwargs_dict.pop('__raw_headers__', None)
+        kwargs_dict.pop('__method__', None)
+        kwargs_dict.pop('__path__', None)
+        kwargs_dict.pop('__auth_scheme__', None)
+        kwargs_dict.pop('__auth_credentials__', None)
+
+        values: dict = {}
+        errors: list = []
+
+        for loc, alias, name, is_req, default, ta in param_info:
+            # Look up by alias first (how C++ stores it), then by field name
+            value = kwargs_dict.get(alias)
+            if value is None and alias != name:
+                value = kwargs_dict.get(name)
+
+            if value is None:
+                if is_req:
+                    errors.append({
+                        "type": "missing",
+                        "loc": (loc, alias),
+                        "msg": "Field required",
+                        "input": None,
+                    })
+                    continue
+                elif default is not None:
+                    # Use the field default — will be coerced via TypeAdapter below
+                    value = default
+                else:
+                    continue  # optional field with None default
+
+            # Validate + type-coerce using the pre-built TypeAdapter
+            try:
+                validated = ta.validate_python(value)
+                values[name] = validated
+            except _PydanticValidationError as e:
+                for err in e.errors(include_url=False):
+                    new_err = dict(err)
+                    inner_loc = new_err.pop("loc", ())
+                    new_err["loc"] = (loc, alias) + tuple(inner_loc)
+                    errors.append(new_err)
+
+        return (values, errors)
+
+    return _validate
 
 
 def _build_dependency_graph(
@@ -818,7 +907,7 @@ def _collect_deps(
 def _flatten_deps(
     dependant: Dependant,
     result: list[dict],
-    visited_ids: set[int],
+    visited_ids: set,
 ) -> None:
     """Recursively flatten the dependency tree into topological order (leaves first).
 
@@ -828,36 +917,49 @@ def _flatten_deps(
 
     Raises ValueError if a generator dependency is encountered (not supported
     in C++ fast path — needs AsyncExitStack).
+
+    Uses cache_key (call + scopes) for deduplication, matching FastAPI semantics:
+    Security(f, scopes=["a"]) and Security(f, scopes=["b"]) are different nodes.
+    Dependencies with use_cache=False are always added as fresh nodes (not deduped).
     """
     for i, sub_dep in enumerate(dependant.dependencies):
         if sub_dep.call is None:
             continue
 
-        dep_id = id(sub_dep.call)
-        if dep_id in visited_ids:
-            # Same callable already in dep_nodes, but this occurrence may have an
-            # explicit injectable name (e.g. `current_user: X = Depends(f)` when
-            # the router also declares `Depends(f)` at router level with name=None).
+        use_cache = sub_dep.use_cache
+        dep_cache_key = sub_dep.cache_key  # (call, scopes_tuple, computed_scope)
+
+        if dep_cache_key in visited_ids and use_cache:
+            # Same callable with same scopes already in dep_nodes (and caching allowed).
             # Record the name as an alias so resolvers can key the result by it.
             if sub_dep.name:
                 for node in result:
-                    if id(node['call']) == dep_id:
+                    if node.get('cache_key') == dep_cache_key and node.get('use_cache', True):
                         aliases: list = node.setdefault('aliases', [])
                         if sub_dep.name not in aliases:
                             aliases.append(sub_dep.name)
                         break
             continue
-        visited_ids.add(dep_id)
+
+        # For use_cache=True, mark as visited to prevent future duplicates.
+        # For use_cache=False, DON'T add to visited_ids so this callable can also
+        # appear from other use_cache=False occurrences.
+        if use_cache:
+            visited_ids.add(dep_cache_key)
 
         # Generator deps need AsyncExitStack — not supported in C++ fast path
         if getattr(sub_dep, 'is_gen_callable', False) or \
            getattr(sub_dep, 'is_async_gen_callable', False):
             raise ValueError("Generator dependencies not supported in C++ fast path")
 
-        # Recurse into children FIRST (ensures topological order: leaves before parents)
-        _flatten_deps(sub_dep, result, visited_ids)
+        # Recurse into children FIRST (ensures topological order: leaves before parents).
+        # For use_cache=False nodes, children were already handled on first occurrence;
+        # skip recursion to avoid double-processing.
+        if use_cache or dep_cache_key not in visited_ids:
+            _flatten_deps(sub_dep, result, visited_ids)
 
         # Auto-generate name if None (fixes router-level deps with name=None)
+        dep_id = id(sub_dep.call)
         name = sub_dep.name
         if not name:
             name = getattr(sub_dep.call, '__name__', None) or f'__dep_{i}_{dep_id}'
@@ -899,6 +1001,8 @@ def _flatten_deps(
         result.append({
             'name': name,
             'call': sub_dep.call,
+            'cache_key': dep_cache_key,
+            'use_cache': use_cache,
             'is_coro': sub_dep.is_coroutine_callable,
             'needs_request': bool(sub_dep.request_param_name),
             'request_param_name': sub_dep.request_param_name,
@@ -1389,11 +1493,19 @@ class APIRoute(routing.Route):
         # If a generator dependency is detected, fall back from fast path
         # (generator deps need AsyncExitStack which C++ fast path doesn't support).
         self._dep_solver = None
-        if self.dependant.dependencies and self._fast_path_eligible:
+        self._param_validator = None
+        if self._fast_path_eligible:
+            if self.dependant.dependencies:
+                try:
+                    self._dep_solver = _make_dep_solver(self.dependant)
+                except ValueError:
+                    self._fast_path_eligible = False
+            # Build param validator for routes with constrained/required params.
+            # This is created regardless of whether there are deps.
             try:
-                self._dep_solver = _make_dep_solver(self.dependant)
-            except ValueError:
-                self._fast_path_eligible = False
+                self._param_validator = _make_param_validator(self._flat_dependant)
+            except Exception:
+                self._param_validator = None
         self.app = request_response(self.get_route_handler())
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:

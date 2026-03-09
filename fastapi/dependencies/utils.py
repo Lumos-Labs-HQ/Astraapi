@@ -459,10 +459,9 @@ def analyze_param(
         depends = copy(depends)
         depends = dataclasses.replace(depends, dependency=type_annotation)
 
-    # Handle non-param type annotations like Request
-    # Only apply special handling when there's no explicit Depends - if there's a Depends,
-    # the dependency will be called and its return value used instead of the special injection
-    if depends is None and lenient_issubclass(
+    # Handle non-param type annotations like Request, WebSocket, etc.
+    # These should never be treated as fields, even with Depends
+    if lenient_issubclass(
         type_annotation,
         (
             Request,
@@ -473,9 +472,14 @@ def analyze_param(
             SecurityScopes,
         ),
     ):
-        assert field_info is None, (
-            f"Cannot specify FastAPI annotation for type {type_annotation!r}"
-        )
+        # If there's a Depends, it will be handled separately
+        # If there's no Depends, the special injection will be used
+        if depends is None:
+            assert field_info is None, (
+                f"Cannot specify FastAPI annotation for type {type_annotation!r}"
+            )
+        # Return early - don't create a field for these special types
+        return ParamDetails(type_annotation=type_annotation, depends=depends, field=None)
     # Handle default assignations, neither field_info nor depends was not found in Annotated nor default value
     elif field_info is None and depends is None:
         default_value = value if value is not inspect.Signature.empty else RequiredParam
@@ -637,7 +641,6 @@ async def solve_dependencies(
         sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
         call = sub_dependant.call
         use_sub_dependant = sub_dependant
-        print(f"  Processing: {call.__name__} use_cache={sub_dependant.use_cache} cache_key_in_cache={sub_dependant.cache_key in dependency_cache}", file=sys.stderr, flush=True)
         if (
             dependency_overrides_provider
             and dependency_overrides_provider.dependency_overrides

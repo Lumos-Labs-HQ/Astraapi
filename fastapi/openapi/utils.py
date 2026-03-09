@@ -143,6 +143,10 @@ def _get_openapi_operation_parameters(
                 field_mapping=field_mapping,
                 separate_input_output_schemas=separate_input_output_schemas,
             )
+            # Strip "default": null from param schema — optional params are already
+            # marked required=False; null defaults add noise without adding information.
+            if param_schema.get("default") is None and "default" in param_schema:
+                del param_schema["default"]
             name = get_validation_alias(param)
             convert_underscores = getattr(
                 param.field_info,
@@ -194,6 +198,9 @@ def get_openapi_operation_request_body(
         field_mapping=field_mapping,
         separate_input_output_schemas=separate_input_output_schemas,
     )
+    # Strip "default": null from body schema (same as param schema treatment)
+    if body_schema.get("default") is None and "default" in body_schema:
+        del body_schema["default"]
     field_info = cast(Body, body_field.field_info)
     request_media_type = field_info.media_type
     required = body_field.required
