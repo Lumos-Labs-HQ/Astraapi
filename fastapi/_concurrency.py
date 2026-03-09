@@ -1,6 +1,7 @@
 """Concurrency utilities — replaces starlette.concurrency."""
 import asyncio
 import functools
+import inspect
 from typing import Any, AsyncGenerator, Callable, TypeVar
 
 T = TypeVar("T")
@@ -37,9 +38,9 @@ def is_async_callable(obj: Any) -> bool:
     """Check if an object is an async callable."""
     while isinstance(obj, functools.partial):
         obj = obj.func
-    return asyncio.iscoroutinefunction(obj) or (
+    return inspect.iscoroutinefunction(obj) or (
         callable(obj)
-        and asyncio.iscoroutinefunction(getattr(obj, "__call__", None))
+        and inspect.iscoroutinefunction(getattr(obj, "__call__", None))
     )
 
 

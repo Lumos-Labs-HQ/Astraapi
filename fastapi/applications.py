@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import inspect
 from collections.abc import Awaitable, Coroutine, Sequence
 from enum import Enum
 from typing import (
@@ -237,7 +238,7 @@ class FastAPI(AppBase):
                 ```
                 """
             ),
-        ] = None,
+        ] = "/openapi.json",
         openapi_tags: Annotated[
             Optional[list[dict[str, Any]]],
             Doc(
@@ -437,7 +438,7 @@ class FastAPI(AppBase):
                 ```
                 """
             ),
-        ] = None,
+        ] = "/docs",
         redoc_url: Annotated[
             Optional[str],
             Doc(
@@ -461,7 +462,7 @@ class FastAPI(AppBase):
                 ```
                 """
             ),
-        ] = None,
+        ] = "/redoc",
         swagger_ui_oauth2_redirect_url: Annotated[
             Optional[str],
             Doc(
@@ -1230,7 +1231,7 @@ class FastAPI(AppBase):
             if not isinstance(route, APIRoute):
                 continue
             endpoint = route.endpoint
-            _is_coro = asyncio.iscoroutinefunction(endpoint)
+            _is_coro = inspect.iscoroutinefunction(endpoint)
             _methods = sorted(route.methods) if route.methods else ["GET"]
             # HTTP spec §9.3.1: any resource supporting GET MUST also support HEAD.
             # Auto-register HEAD so clients/proxies get correct HEAD responses

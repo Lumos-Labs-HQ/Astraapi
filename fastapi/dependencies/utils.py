@@ -637,6 +637,7 @@ async def solve_dependencies(
         sub_dependant.call = cast(Callable[..., Any], sub_dependant.call)
         call = sub_dependant.call
         use_sub_dependant = sub_dependant
+        print(f"  Processing: {call.__name__} use_cache={sub_dependant.use_cache} cache_key_in_cache={sub_dependant.cache_key in dependency_cache}", file=sys.stderr, flush=True)
         if (
             dependency_overrides_provider
             and dependency_overrides_provider.dependency_overrides
@@ -688,7 +689,7 @@ async def solve_dependencies(
             solved = await run_in_threadpool(call, **solved_result.values)
         if sub_dependant.name is not None:
             values[sub_dependant.name] = solved
-        if sub_dependant.cache_key not in dependency_cache:
+        if sub_dependant.use_cache and sub_dependant.cache_key not in dependency_cache:
             dependency_cache[sub_dependant.cache_key] = solved
     # v1.0: Batch extract all params (path+query+header+cookie) in one core call
     _batch_ok = False
@@ -718,23 +719,49 @@ async def solve_dependencies(
                 _specs = []
                 for field in dependant.query_params:
                     alias = get_validation_alias(field)
-                    tag = _get_scalar_type_tag(field) or ""
-                    is_seq = is_sequence_field(field) and not _is_json_field(field)
-                    is_json = _is_json_field(field)
-                    _specs.append(("query", alias, tag, field.name, is_seq, is_json, False))
+                    tag_str = _get_scalar_type_tag(field) or ""
+                    tag_int = {"str": 0, "int": 1, "float": 2, "bool": 3}.get(tag_str, 0)
+                    _specs.append({
+                        "field_name": field.name,
+                        "alias": alias,
+                        "location": 0,
+                        "type_tag": tag_int,
+                        "default_value": None,
+                    })
                 for field in dependant.header_params:
                     alias = get_validation_alias(field)
-                    tag = _get_scalar_type_tag(field) or ""
-                    convert = getattr(field.field_info, "convert_underscores", True)
-                    _specs.append(("header", alias, tag, field.name, False, False, convert))
+                    tag_str = _get_scalar_type_tag(field) or ""
+                    tag_int = {"str": 0, "int": 1, "float": 2, "bool": 3}.get(tag_str, 0)
+                    _specs.append({
+                        "field_name": field.name,
+                        "alias": alias,
+                        "header_lookup_key": alias,
+                        "location": 1,
+                        "type_tag": tag_int,
+                        "default_value": None,
+                    })
                 for field in dependant.cookie_params:
                     alias = get_validation_alias(field)
-                    tag = _get_scalar_type_tag(field) or ""
-                    _specs.append(("cookie", alias, tag, field.name, False, False, False))
+                    tag_str = _get_scalar_type_tag(field) or ""
+                    tag_int = {"str": 0, "int": 1, "float": 2, "bool": 3}.get(tag_str, 0)
+                    _specs.append({
+                        "field_name": field.name,
+                        "alias": alias,
+                        "location": 2,
+                        "type_tag": tag_int,
+                        "default_value": None,
+                    })
                 for field in dependant.path_params:
                     alias = get_validation_alias(field)
-                    tag = _get_scalar_type_tag(field) or ""
-                    _specs.append(("path", alias, tag, field.name, False, False, False))
+                    tag_str = _get_scalar_type_tag(field) or ""
+                    tag_int = {"str": 0, "int": 1, "float": 2, "bool": 3}.get(tag_str, 0)
+                    _specs.append({
+                        "field_name": field.name,
+                        "alias": alias,
+                        "location": 3,
+                        "type_tag": tag_int,
+                        "default_value": None,
+                    })
 
             _qp = request.scope.get("_core_query_params")
             if _qp is None and dependant.query_params:
