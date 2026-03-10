@@ -730,6 +730,7 @@ async def solve_dependencies(
                         "location": 0,
                         "type_tag": tag_int,
                         "default_value": None,
+                        "is_sequence": is_sequence_field(field),
                     })
                 for field in dependant.header_params:
                     alias = get_validation_alias(field)
@@ -1004,12 +1005,29 @@ def _core_query_params_to_args(
     This avoids re-parsing the query string in Python for each field.
     Scalar types (int, float, bool) are batch pre-coerced in core before
     Pydantic validation, reducing per-field Python overhead.
+    Handles model-based params (single field with BaseModel type) by delegating
+    to request_params_to_args which has the full model-expansion logic.
     """
     values: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
 
     if not fields:
         return values, errors
+
+    # If there's a single model-based query param, use request_params_to_args
+    # which handles the BaseModel expansion correctly.
+    if (
+        len(fields) == 1
+        and lenient_issubclass(fields[0].type_, BaseModel)
+    ):
+        from starlette.datastructures import QueryParams as _QP
+        flat: dict[str, Any] = {}
+        for key, vals in core_parsed.items():
+            if vals and len(vals) == 1:
+                flat[key] = vals[0]
+            elif vals:
+                flat[key] = vals
+        return request_params_to_args(fields, flat)
 
     # Build a flat dict for scalar pre-coercion and extract raw values
     raw_values: dict[str, Any] = {}

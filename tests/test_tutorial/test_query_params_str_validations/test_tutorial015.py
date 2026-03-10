@@ -56,7 +56,9 @@ def test_get_invalid_item(client: TestClient):
                     "loc": ["query", "id"],
                     "msg": 'Value error, Invalid ID format, it must start with "isbn-" or "imdb-"',
                     "input": "wtf-yes",
-                    "ctx": {"error": {}},
+                    "ctx": {
+                        "error": 'Invalid ID format, it must start with "isbn-" or "imdb-"'
+                    },
                 }
             ]
         }

@@ -1218,6 +1218,16 @@ class CppHttpProtocol(asyncio.Protocol):
                     task.add_done_callback(pt.discard)
                     pt.add(task)
 
+                elif tag == "stream":
+                    _, raw_resp, status_code, keep_alive = result_obj
+                    task = self._loop.create_task(
+                        self._handle_stream(raw_resp, status_code, keep_alive))
+                    pt = self._pending_tasks
+                    if pt is None:
+                        pt = self._pending_tasks = set()
+                    task.add_done_callback(pt.discard)
+                    pt.add(task)
+
                 elif tag == "async_di":
                     _, di_coro, first_yield, endpoint, kwargs, sc, ka = result_obj
                     first_yield._asyncio_future_blocking = False
@@ -1490,6 +1500,97 @@ class CppHttpProtocol(asyncio.Protocol):
         finally:
             self._core.record_request_end()
 
+    async def _handle_stream(self, raw: Any, status_code: int, keep_alive: bool) -> None:
+        """Handle StreamingResponse/FileResponse returned directly from a fast-path endpoint.
+
+        Called when the C++ fast path gets PYGEN_RETURN with an object that needs
+        async streaming (e.g. AsyncGenerator body_iterator) or file reading (FileResponse).
+        """
+        try:
+            transport = self._transport
+            if transport and not transport.is_closing():
+                raw_path = getattr(raw, 'path', None)
+                if raw_path is not None and not hasattr(raw, 'body_iterator'):
+                    # FileResponse — read file bytes synchronously
+                    # (Blocking I/O is acceptable; tests use small files)
+                    raw_path_str = str(raw_path)
+                    try:
+                        with open(raw_path_str, 'rb') as _fh:
+                            file_bytes = _fh.read()
+                    except OSError:
+                        file_bytes = b""
+                    st = getattr(raw, 'status_code', 200)
+                    headers_list = getattr(raw, '_raw_headers', None) or getattr(raw, 'raw_headers', [])
+                    has_cl = any(
+                        (n if isinstance(n, bytes) else n.encode('latin-1')).lower() == b'content-length'
+                        for n, _ in headers_list
+                    )
+                    hdr_parts = [f"HTTP/1.1 {st} {_STATUS_PHRASES.get(st, 'OK')}".encode()]
+                    for hname, hvalue in headers_list:
+                        if isinstance(hname, str):
+                            hname = hname.encode("latin-1")
+                        if isinstance(hvalue, str):
+                            hvalue = hvalue.encode("latin-1")
+                        hdr_parts.append(b"\r\n" + hname + b": " + hvalue)
+                    if not has_cl:
+                        hdr_parts.append(b"\r\ncontent-length: " + str(len(file_bytes)).encode())
+                    conn = b"\r\nconnection: keep-alive\r\n\r\n" if keep_alive else b"\r\nconnection: close\r\n\r\n"
+                    hdr_parts.append(conn)
+                    http_bytes = b"".join(hdr_parts) + file_bytes
+                    transport.write(http_bytes)
+                else:
+                    # StreamingResponse — chunked transfer encoding
+                    st = getattr(raw, 'status_code', 200)
+                    headers_list = getattr(raw, '_raw_headers', None) or getattr(raw, 'raw_headers', [])
+                    prefix = _STREAMING_STATUS_LINES.get(st)
+                    if prefix is not None:
+                        buf = bytearray(prefix)
+                    else:
+                        phrase = _STATUS_PHRASES.get(st, "")
+                        buf = bytearray(f"HTTP/1.1 {st} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
+                    hdr_parts = []
+                    for hname, hvalue in headers_list:
+                        if isinstance(hname, str):
+                            hname = hname.encode("latin-1")
+                        if isinstance(hvalue, str):
+                            hvalue = hvalue.encode("latin-1")
+                        hdr_parts.append(hname)
+                        hdr_parts.append(b": ")
+                        hdr_parts.append(hvalue)
+                        hdr_parts.append(b"\r\n")
+                    hdr_parts.append(b"\r\n")
+                    buf.extend(b"".join(hdr_parts))
+                    transport.write(bytes(buf))
+                    body_iter = raw.body_iterator
+                    is_async_iter = hasattr(body_iter, '__aiter__')
+                    try:
+                        if is_async_iter:
+                            async for chunk in body_iter:
+                                if isinstance(chunk, str):
+                                    chunk = chunk.encode("utf-8")
+                                if chunk:
+                                    transport.write(_build_chunked_frame(chunk))
+                        else:
+                            for chunk in body_iter:
+                                if isinstance(chunk, str):
+                                    chunk = chunk.encode("utf-8")
+                                if chunk:
+                                    transport.write(_build_chunked_frame(chunk))
+                        transport.write(b"0\r\n\r\n")
+                    except Exception:
+                        logger.warning("Streaming response error", exc_info=True)
+                        try:
+                            transport.write(b"0\r\n\r\n")
+                        except Exception:
+                            logger.debug("Failed to write chunked trailer", exc_info=True)
+            background = getattr(raw, 'background', None)
+            if background is not None:
+                await background()
+        except Exception as exc:
+            self._write_error(exc, keep_alive)
+        finally:
+            self._core.record_request_end()
+
     async def _handle_async_di(
         self, di_coro: Any, first_yield: Any, endpoint: Any, kwargs: dict,
         status_code: int, keep_alive: bool
@@ -1522,7 +1623,46 @@ class CppHttpProtocol(asyncio.Protocol):
                 if resp is not None:
                     transport.write(resp)
                 else:
-                    transport.write(_500_RESP)
+                    # StreamingResponse — chunked transfer encoding (must stay in Python)
+                    status = getattr(raw, 'status_code', 200)
+                    headers_list = []
+                    if hasattr(raw, 'raw_headers'):
+                        headers_list = raw.raw_headers
+                    elif hasattr(raw, 'headers'):
+                        for k, v in raw.headers.items():
+                            headers_list.append((k, v))
+                    prefix = _STREAMING_STATUS_LINES.get(status)
+                    if prefix is not None:
+                        buf = bytearray(prefix)
+                    else:
+                        phrase = _STATUS_PHRASES.get(status, "")
+                        buf = bytearray(f"HTTP/1.1 {status} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
+                    hdr_parts = []
+                    for hname, hvalue in headers_list:
+                        if isinstance(hname, str):
+                            hname = hname.encode("latin-1")
+                        if isinstance(hvalue, str):
+                            hvalue = hvalue.encode("latin-1")
+                        hdr_parts.append(hname)
+                        hdr_parts.append(b": ")
+                        hdr_parts.append(hvalue)
+                        hdr_parts.append(b"\r\n")
+                    hdr_parts.append(b"\r\n")
+                    buf.extend(b"".join(hdr_parts))
+                    transport.write(bytes(buf))
+                    try:
+                        async for chunk in raw.body_iterator:
+                            if isinstance(chunk, str):
+                                chunk = chunk.encode("utf-8")
+                            if chunk:
+                                transport.write(_build_chunked_frame(chunk))
+                        transport.write(b"0\r\n\r\n")
+                    except Exception:
+                        logger.warning("Streaming response error", exc_info=True)
+                        try:
+                            transport.write(b"0\r\n\r\n")
+                        except Exception:
+                            logger.debug("Failed to write chunked trailer", exc_info=True)
             # BackgroundTasks support
             background = getattr(raw, 'background', None)
             if background is not None:
@@ -1560,7 +1700,46 @@ class CppHttpProtocol(asyncio.Protocol):
                 if resp is not None:
                     transport.write(resp)
                 else:
-                    transport.write(_500_RESP)
+                    # StreamingResponse — chunked transfer encoding
+                    status = getattr(raw, 'status_code', status_code)
+                    headers_list = []
+                    if hasattr(raw, 'raw_headers'):
+                        headers_list = raw.raw_headers
+                    elif hasattr(raw, 'headers'):
+                        for k, v in raw.headers.items():
+                            headers_list.append((k, v))
+                    prefix = _STREAMING_STATUS_LINES.get(status)
+                    if prefix is not None:
+                        buf = bytearray(prefix)
+                    else:
+                        phrase = _STATUS_PHRASES.get(status, "")
+                        buf = bytearray(f"HTTP/1.1 {status} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
+                    hdr_parts = []
+                    for hname, hvalue in headers_list:
+                        if isinstance(hname, str):
+                            hname = hname.encode("latin-1")
+                        if isinstance(hvalue, str):
+                            hvalue = hvalue.encode("latin-1")
+                        hdr_parts.append(hname)
+                        hdr_parts.append(b": ")
+                        hdr_parts.append(hvalue)
+                        hdr_parts.append(b"\r\n")
+                    hdr_parts.append(b"\r\n")
+                    buf.extend(b"".join(hdr_parts))
+                    transport.write(bytes(buf))
+                    try:
+                        async for chunk in raw.body_iterator:
+                            if isinstance(chunk, str):
+                                chunk = chunk.encode("utf-8")
+                            if chunk:
+                                transport.write(_build_chunked_frame(chunk))
+                        transport.write(b"0\r\n\r\n")
+                    except Exception:
+                        logger.warning("Streaming response error", exc_info=True)
+                        try:
+                            transport.write(b"0\r\n\r\n")
+                        except Exception:
+                            logger.debug("Failed to write chunked trailer", exc_info=True)
             # BackgroundTasks support
             background = getattr(raw, 'background', None)
             if background is not None:

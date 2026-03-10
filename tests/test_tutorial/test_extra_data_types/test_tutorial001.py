@@ -115,6 +115,7 @@ def test_openapi_schema(client: TestClient):
                             },
                             "repeat_at": {
                                 "title": "Repeat At",
+                                "default": None,
                                 "anyOf": [
                                     {"type": "string", "format": "time"},
                                     {"type": "null"},

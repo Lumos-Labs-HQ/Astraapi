@@ -91,7 +91,9 @@ def test_openapi_schema():
                                             "200": {
                                                 "description": "Successful Response",
                                                 "content": {
-                                                    "application/json": {"schema": {}}
+                                                    "application/json": {
+                                                        "schema": {"type": "string"}
+                                                    }
                                                 },
                                             },
                                         },

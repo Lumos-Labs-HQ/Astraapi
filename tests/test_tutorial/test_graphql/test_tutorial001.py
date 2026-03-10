@@ -3,11 +3,16 @@ import warnings
 import pytest
 from starlette.testclient import TestClient
 
+from tests.utils import skip_module_if_py_gte_314
+
 warnings.filterwarnings(
     "ignore",
     message=r"The 'lia' package has been renamed to 'cross_web'\..*",
     category=DeprecationWarning,
 )
+
+# strawberry uses pydantic.v1 which is not compatible with Python 3.14+
+skip_module_if_py_gte_314()
 
 from docs_src.graphql_.tutorial001_py39 import app  # noqa: E402
 

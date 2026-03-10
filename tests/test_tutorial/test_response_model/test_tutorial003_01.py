@@ -99,6 +99,7 @@ def test_openapi_schema(client: TestClient):
                             },
                             "full_name": {
                                 "title": "Full Name",
+                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                             },
                         },
@@ -129,6 +130,7 @@ def test_openapi_schema(client: TestClient):
                             },
                             "full_name": {
                                 "title": "Full Name",
+                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                             },
                             "password": {"title": "Password", "type": "string"},

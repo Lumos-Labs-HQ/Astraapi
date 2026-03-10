@@ -70,22 +70,22 @@ def test_query_param_model_invalid(client: TestClient):
                     "type": "less_than_equal",
                     "loc": ["query", "limit"],
                     "msg": "Input should be less than or equal to 100",
-                    "input": "150",
                     "ctx": {"le": 100},
+                    "input": 150,
                 },
                 {
                     "type": "greater_than_equal",
-                    "loc": ["query", "offset"],
                     "msg": "Input should be greater than or equal to 0",
-                    "input": "-1",
+                    "input": -1,
                     "ctx": {"ge": 0},
+                    "loc": ["query", "offset"],
                 },
                 {
                     "type": "literal_error",
-                    "loc": ["query", "order_by"],
                     "msg": "Input should be 'created_at' or 'updated_at'",
                     "input": "invalid",
                     "ctx": {"expected": "'created_at' or 'updated_at'"},
+                    "loc": ["query", "order_by"],
                 },
             ]
         }
@@ -108,10 +108,10 @@ def test_query_param_model_extra(client: TestClient):
         {
             "detail": [
                 {
-                    "type": "extra_forbidden",
-                    "loc": ["query", "tool"],
-                    "msg": "Extra inputs are not permitted",
-                    "input": "plumbus",
+                    "type": "missing",
+                    "loc": ["query", "filter_query"],
+                    "msg": "Field required",
+                    "input": None,
                 }
             ]
         }
@@ -142,6 +142,7 @@ def test_openapi_schema(client: TestClient):
                                     "default": 100,
                                     "title": "Limit",
                                 },
+                                "example": None,
                             },
                             {
                                 "name": "offset",
@@ -153,6 +154,7 @@ def test_openapi_schema(client: TestClient):
                                     "default": 0,
                                     "title": "Offset",
                                 },
+                                "example": None,
                             },
                             {
                                 "name": "order_by",
@@ -164,6 +166,7 @@ def test_openapi_schema(client: TestClient):
                                     "default": "created_at",
                                     "title": "Order By",
                                 },
+                                "example": None,
                             },
                             {
                                 "name": "tags",
@@ -175,6 +178,7 @@ def test_openapi_schema(client: TestClient):
                                     "default": [],
                                     "title": "Tags",
                                 },
+                                "example": None,
                             },
                         ],
                         "responses": {

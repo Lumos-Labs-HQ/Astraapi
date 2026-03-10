@@ -751,28 +751,53 @@ def _build_field_specs(
          convert_underscores, required, default_value)
 
     Called once at route registration time (startup), not per-request.
+    For model-based params (query/header with BaseModel type), expands to inner fields.
     """
-    from fastapi._compat import is_sequence_field
+    from pydantic import BaseModel as _BaseModel
+    from fastapi._compat import is_sequence_field, get_cached_model_fields
     from fastapi.dependencies.utils import _get_scalar_type_tag, _is_json_field, get_validation_alias
 
     specs: list[tuple[str, str, str, str, bool, bool, bool, bool, Any]] = []
 
     for field in dependant.query_params:
-        alias = get_validation_alias(field)
-        tag = _get_scalar_type_tag(field) or ""
-        is_seq = is_sequence_field(field) and not _is_json_field(field)
-        is_json = _is_json_field(field)
-        is_req = field.required
-        default = None if is_req else field.get_default()
-        specs.append(("query", alias, tag, field.name, is_seq, is_json, False, is_req, default))
+        if lenient_issubclass(field.type_, _BaseModel):
+            # Model-based query param: expand inner fields so C++ extracts them
+            default_cu = getattr(field.field_info, "convert_underscores", False)
+            for inner_f in get_cached_model_fields(field.type_):
+                inner_alias = get_validation_alias(inner_f)
+                tag = _get_scalar_type_tag(inner_f) or ""
+                is_seq = is_sequence_field(inner_f) and not _is_json_field(inner_f)
+                is_json = _is_json_field(inner_f)
+                # Mark as not-required: the outer model validator handles "required"
+                inner_default = None if inner_f.required else inner_f.get_default()
+                specs.append(("query", inner_alias, tag, inner_f.name, is_seq, is_json, False, False, inner_default))
+        else:
+            alias = get_validation_alias(field)
+            tag = _get_scalar_type_tag(field) or ""
+            is_seq = is_sequence_field(field) and not _is_json_field(field)
+            is_json = _is_json_field(field)
+            is_req = field.required
+            default = None if is_req else field.get_default()
+            specs.append(("query", alias, tag, field.name, is_seq, is_json, False, is_req, default))
 
     for field in dependant.header_params:
-        alias = get_validation_alias(field)
-        tag = _get_scalar_type_tag(field) or ""
-        convert = getattr(field.field_info, "convert_underscores", True)
-        is_req = field.required
-        default = None if is_req else field.get_default()
-        specs.append(("header", alias, tag, field.name, False, False, convert, is_req, default))
+        if lenient_issubclass(field.type_, _BaseModel):
+            # Model-based header param: expand inner fields
+            default_cu = getattr(field.field_info, "convert_underscores", True)
+            for inner_f in get_cached_model_fields(field.type_):
+                inner_alias = get_validation_alias(inner_f)
+                tag = _get_scalar_type_tag(inner_f) or ""
+                is_seq = is_sequence_field(inner_f) and not _is_json_field(inner_f)
+                convert = getattr(inner_f.field_info, "convert_underscores", default_cu)
+                inner_default = None if inner_f.required else inner_f.get_default()
+                specs.append(("header", inner_alias, tag, inner_f.name, is_seq, False, convert, False, inner_default))
+        else:
+            alias = get_validation_alias(field)
+            tag = _get_scalar_type_tag(field) or ""
+            convert = getattr(field.field_info, "convert_underscores", True)
+            is_req = field.required
+            default = None if is_req else field.get_default()
+            specs.append(("header", alias, tag, field.name, False, False, convert, is_req, default))
 
     for field in dependant.cookie_params:
         alias = get_validation_alias(field)
@@ -801,10 +826,16 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
     Returns None if there are no params to validate (no-op route).
     Called once at route registration time; returned callable runs per-request.
     """
+    from pydantic import BaseModel as _BaseModel
+    from fastapi._compat import get_cached_model_fields
     from fastapi.dependencies.utils import get_validation_alias
 
-    # Collect all (location, alias, field_name, is_required, default, type_adapter)
+    # Separate regular scalar params from model-based params
+    # Regular: (loc, alias, field_name, is_required, default, type_adapter)
     param_info = []
+    # Model-based: (loc, outer_field_name, outer_ta, [(inner_name, inner_alias)])
+    model_param_info = []
+
     for loc, fields in [
         ("query", dependant.query_params),
         ("header", dependant.header_params),
@@ -812,12 +843,22 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
         ("path", dependant.path_params),
     ]:
         for field in fields:
-            alias = get_validation_alias(field)
-            is_req = field.required
-            default = None if is_req else field.get_default()
-            param_info.append((loc, alias, field.name, is_req, default, field._type_adapter))
+            if lenient_issubclass(field.type_, _BaseModel):
+                # Model-based param — the C++ extracts inner fields individually.
+                # We collect them here to assemble + validate the outer model.
+                default_cu = getattr(field.field_info, "convert_underscores", False)
+                inner_specs = []
+                for inner_f in get_cached_model_fields(field.type_):
+                    inner_alias = get_validation_alias(inner_f)
+                    inner_specs.append((inner_f.name, inner_alias))
+                model_param_info.append((loc, field.name, field._type_adapter, inner_specs))
+            else:
+                alias = get_validation_alias(field)
+                is_req = field.required
+                default = None if is_req else field.get_default()
+                param_info.append((loc, alias, field.name, is_req, default, field._type_adapter))
 
-    if not param_info:
+    if not param_info and not model_param_info:
         return None
 
     # Pre-import ValidationError for zero-import-overhead in the hot path
@@ -848,12 +889,13 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                         "msg": "Field required",
                         "input": None,
                     })
-                    continue
-                elif default is not None:
-                    # Use the field default — will be coerced via TypeAdapter below
-                    value = default
                 else:
-                    continue  # optional field with None default
+                    # Optional field absent from request — inject the default value
+                    # (which may be None). This prevents the Python function's
+                    # default parameter (often a FieldInfo object) from leaking to
+                    # the endpoint as an unexpected value.
+                    values[name] = default
+                continue
 
             # Validate + type-coerce using the pre-built TypeAdapter
             try:
@@ -864,6 +906,27 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                     new_err = dict(err)
                     inner_loc = new_err.pop("loc", ())
                     new_err["loc"] = (loc, alias) + tuple(inner_loc)
+                    errors.append(new_err)
+
+        for loc, outer_name, outer_ta, inner_specs in model_param_info:
+            # Collect inner field values from kwargs (C++ extracted them individually)
+            inner_dict: dict = {}
+            for inner_name, inner_alias in inner_specs:
+                val = kwargs_dict.get(inner_name)
+                if val is None and inner_alias != inner_name:
+                    val = kwargs_dict.get(inner_alias)
+                if val is not None:
+                    inner_dict[inner_name] = val
+
+            # Validate the assembled dict as the model type
+            try:
+                validated = outer_ta.validate_python(inner_dict)
+                values[outer_name] = validated
+            except _PydanticValidationError as e:
+                for err in e.errors(include_url=False):
+                    new_err = dict(err)
+                    inner_loc = new_err.pop("loc", ())
+                    new_err["loc"] = (loc,) + tuple(inner_loc)
                     errors.append(new_err)
 
         return (values, errors)
@@ -1078,7 +1141,11 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
                 if sec_type in ('HTTPBearer', 'HTTPBase'):
                     if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
                         if node['auto_error']:
-                            raise _DepHTTPExc(status_code=403, detail="Not authenticated")
+                            _sec_obj = node['call']
+                            _www_auth = getattr(_sec_obj, 'model', None)
+                            _scheme = getattr(_www_auth, 'scheme', 'Bearer') or 'Bearer'
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _scheme.title()})
                         creds_val = None
                     else:
                         # Use pre-baked class ref — zero import overhead
@@ -1091,12 +1158,33 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
                 elif sec_type == 'HTTPBasic':
                     if not auth_scheme or auth_scheme.lower() != 'basic' or not auth_credentials:
                         if node['auto_error']:
-                            raise _DepHTTPExc(status_code=401, detail="Not authenticated")
+                            _sec_obj = node['call']
+                            _realm = getattr(_sec_obj, 'realm', None)
+                            _www_auth_hdr = f'Basic realm="{_realm}"' if _realm else 'Basic'
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _www_auth_hdr})
                         creds_val = None
                     else:
-                        decoded = _base64.b64decode(auth_credentials).decode('utf-8')
-                        username, _, password = decoded.partition(':')
-                        creds_val = node['security_cred_cls'](username=username, password=password)
+                        _sec_obj = node['call']
+                        _realm = getattr(_sec_obj, 'realm', None)
+                        _www_auth_hdr = f'Basic realm="{_realm}"' if _realm else 'Basic'
+                        try:
+                            decoded = _base64.b64decode(auth_credentials).decode('utf-8')
+                        except Exception:
+                            if node['auto_error']:
+                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                                  headers={"WWW-Authenticate": _www_auth_hdr})
+                            creds_val = None
+                            resolved[node['name']] = creds_val
+                            continue
+                        username, sep, password = decoded.partition(':')
+                        if not sep:
+                            if node['auto_error']:
+                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                                  headers={"WWW-Authenticate": _www_auth_hdr})
+                            creds_val = None
+                        else:
+                            creds_val = node['security_cred_cls'](username=username, password=password)
                     resolved[node['name']] = creds_val
                     for alias in node.get('aliases', ()):
                         resolved[alias] = creds_val
@@ -1166,7 +1254,11 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                 if sec_type in ('HTTPBearer', 'HTTPBase'):
                     if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
                         if node['auto_error']:
-                            raise _DepHTTPExc(status_code=403, detail="Not authenticated")
+                            _sec_obj = node['call']
+                            _www_auth = getattr(_sec_obj, 'model', None)
+                            _scheme = getattr(_www_auth, 'scheme', 'Bearer') or 'Bearer'
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _scheme.title()})
                         creds_val = None
                     else:
                         # Use pre-baked class ref — zero import overhead
@@ -1179,12 +1271,33 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                 elif sec_type == 'HTTPBasic':
                     if not auth_scheme or auth_scheme.lower() != 'basic' or not auth_credentials:
                         if node['auto_error']:
-                            raise _DepHTTPExc(status_code=401, detail="Not authenticated")
+                            _sec_obj = node['call']
+                            _realm = getattr(_sec_obj, 'realm', None)
+                            _www_auth_hdr = f'Basic realm="{_realm}"' if _realm else 'Basic'
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _www_auth_hdr})
                         creds_val = None
                     else:
-                        decoded = _base64.b64decode(auth_credentials).decode('utf-8')
-                        username, _, password = decoded.partition(':')
-                        creds_val = node['security_cred_cls'](username=username, password=password)
+                        _sec_obj = node['call']
+                        _realm = getattr(_sec_obj, 'realm', None)
+                        _www_auth_hdr = f'Basic realm="{_realm}"' if _realm else 'Basic'
+                        try:
+                            decoded = _base64.b64decode(auth_credentials).decode('utf-8')
+                        except Exception:
+                            if node['auto_error']:
+                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                                  headers={"WWW-Authenticate": _www_auth_hdr})
+                            creds_val = None
+                            resolved[node['name']] = creds_val
+                            continue
+                        username, sep, password = decoded.partition(':')
+                        if not sep:
+                            if node['auto_error']:
+                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                                  headers={"WWW-Authenticate": _www_auth_hdr})
+                            creds_val = None
+                        else:
+                            creds_val = node['security_cred_cls'](username=username, password=password)
                     resolved[node['name']] = creds_val
                     for alias in node.get('aliases', ()):
                         resolved[alias] = creds_val
@@ -1254,24 +1367,23 @@ def _make_dep_solver(dependant: Dependant):
     _flatten_deps(dependant, dep_nodes, set())
 
     if not dep_nodes:
-        # No dependencies — return trivial solver (zero overhead)
         def _solve_empty(kwargs_dict):
-            # Still need to clean up injected keys
             kwargs_dict.pop('__raw_headers__', None)
             kwargs_dict.pop('__method__', None)
             kwargs_dict.pop('__path__', None)
             return ({}, [])
         return _solve_empty
 
-    # Only top-level deps with explicit parameter names (from endpoint signature)
-    # should have their resolved values injected into kwargs.
-    # Router-level deps (name=None, auto-generated) are side-effect-only (e.g., auth
-    # checks) — their values must NOT be merged into kwargs or the endpoint will
-    # receive unexpected keyword arguments and raise TypeError.
+    
     injectable_names: set[str] = set()
     for sub_dep in dependant.dependencies:
         if sub_dep.name and sub_dep.call is not None:
             injectable_names.add(sub_dep.name)
+
+    
+    dep_consumed_params: set[str] = set()
+    for node in dep_nodes:
+        dep_consumed_params.update(node['param_names'])
 
     # Check if any dep in the tree is async
     any_async = any(node['is_coro'] for node in dep_nodes)
@@ -1284,6 +1396,9 @@ def _make_dep_solver(dependant: Dependant):
                             if k in injectable_names}
             else:
                 injected = {}
+            # Remove params consumed by sub-deps so they aren't passed to the endpoint
+            for pname in dep_consumed_params:
+                kwargs_dict.pop(pname, None)
             return (injected, errors)
         return _solve_async
     else:
@@ -1294,6 +1409,9 @@ def _make_dep_solver(dependant: Dependant):
                             if k in injectable_names}
             else:
                 injected = {}
+            # Remove params consumed by sub-deps so they aren't passed to the endpoint
+            for pname in dep_consumed_params:
+                kwargs_dict.pop(pname, None)
             return (injected, errors)
         return _solve_sync
 
@@ -1487,7 +1605,7 @@ class APIRoute(routing.Route):
             and not (self.body_field and isinstance(
                 self.body_field.field_info, params.Form
             ))
-            and actual_rc is JSONResponse
+            and isinstance(actual_rc, type) and issubclass(actual_rc, JSONResponse)
         )
         # Build dependency solver if route has dependencies.
         # If a generator dependency is detected, fall back from fast path

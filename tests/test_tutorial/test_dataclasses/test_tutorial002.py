@@ -75,10 +75,12 @@ def test_openapi_schema(client: TestClient):
                             },
                             "description": {
                                 "title": "Description",
+                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                             },
                             "tax": {
                                 "title": "Tax",
+                                "default": None,
                                 "anyOf": [{"type": "number"}, {"type": "null"}],
                             },
                         },

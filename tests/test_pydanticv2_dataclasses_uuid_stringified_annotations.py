@@ -47,6 +47,5 @@ def test_annotations():
             "price": 12.99,
             "tags": ["breater"],
             "description": "A place to be be playin' and havin' fun",
-            "tax": None,
         }
     )

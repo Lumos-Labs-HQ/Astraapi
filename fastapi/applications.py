@@ -1172,6 +1172,106 @@ class FastAPI(AppBase):
         return result
 
     @staticmethod
+    def _make_response_class_shim(route: Any) -> Callable[..., Any]:
+        """Create an async endpoint shim that wraps the result in the route's response_class.
+
+        For non-fast-path routes (e.g. response_class=HTMLResponse), C++ calls the
+        endpoint directly and then tries to serialize the result as JSON. This shim
+        intercepts the return value and wraps it in the correct response class so
+        C++ receives an actual Response object and uses the raw_headers path.
+
+        Handles special cases:
+        - RedirectResponse: passes URL as positional arg not content=
+        - StreamingResponse: collects iterator into bytes
+        - FileResponse: reads file into bytes
+        - Other Response subclasses: checks isinstance before re-wrapping
+        """
+        from fastapi.routing import DefaultPlaceholder
+        from fastapi._response import (
+            Response as _Response,
+            StreamingResponse as _StreamingResponse,
+            FileResponse as _FileResponse,
+            RedirectResponse as _RedirectResponse,
+        )
+
+        original_endpoint = route.endpoint
+        _is_async = inspect.iscoroutinefunction(original_endpoint)
+
+        rc = route.response_class
+        if isinstance(rc, DefaultPlaceholder):
+            rc = rc.value
+        actual_rc = rc  # the response class to wrap with
+        status_code = route.status_code or 200
+
+        _is_redirect = isinstance(actual_rc, type) and issubclass(actual_rc, _RedirectResponse)
+
+        async def _response_shim(**kwargs: Any) -> Any:
+            if _is_async:
+                result = await original_endpoint(**kwargs)
+            else:
+                result = original_endpoint(**kwargs)
+
+            # If already a Response object, handle based on type
+            if isinstance(result, _FileResponse):
+                # Read file and return as plain Response
+                try:
+                    with open(result.path, 'rb') as fh:
+                        body_bytes = fh.read()
+                    return _Response(
+                        content=body_bytes,
+                        status_code=result.status_code,
+                        media_type=result.media_type,
+                    )
+                except OSError as exc:
+                    from fastapi import HTTPException
+                    raise HTTPException(status_code=404, detail="File not found") from exc
+
+            if isinstance(result, _StreamingResponse):
+                # Collect iterator into bytes and return as plain Response
+                chunks = []
+                body_iter = result.body_iterator
+                if hasattr(body_iter, '__aiter__'):
+                    async for chunk in body_iter:
+                        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+                else:
+                    for chunk in body_iter:
+                        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+                return _Response(
+                    content=b"".join(chunks),
+                    status_code=result.status_code,
+                    media_type=result.media_type,
+                )
+
+            if isinstance(result, _Response):
+                return result
+
+            # Not a Response — wrap using the route's response_class
+            if _is_redirect:
+                # Pass only the URL; let RedirectResponse use its own default status_code
+                # (307), unless route explicitly overrides it
+                if status_code and status_code != 200:
+                    return actual_rc(result, status_code=status_code)
+                return actual_rc(result)
+            elif actual_rc is _FileResponse:
+                # response_class=FileResponse, endpoint returns file path string
+                try:
+                    with open(str(result), 'rb') as fh:
+                        body_bytes = fh.read()
+                    return _Response(
+                        content=body_bytes,
+                        status_code=status_code,
+                        media_type=None,
+                    )
+                except OSError as exc:
+                    from fastapi import HTTPException
+                    raise HTTPException(status_code=404, detail="File not found") from exc
+            else:
+                return actual_rc(content=result, status_code=status_code)
+
+        _response_shim.__name__ = getattr(original_endpoint, '__name__', '_response_shim')
+        return _response_shim
+
+    @staticmethod
     def _make_form_endpoint_shim(route: Any) -> Callable[..., Any]:
         """Create an async endpoint shim for form-based (UploadFile/File) routes.
 
@@ -1272,6 +1372,11 @@ class FastAPI(AppBase):
                 # The shim is async, but if no file params the original endpoint
                 # is returned unchanged — use its actual coroutine status.
                 _is_coro = inspect.iscoroutinefunction(_registered_endpoint)
+            elif not getattr(route, '_fast_path_eligible', False):
+                # Non-fast-path, non-form routes (e.g. response_class=HTMLResponse).
+                # Wrap endpoint so result is a Response object for C++ raw_headers path.
+                _registered_endpoint = self._make_response_class_shim(route)
+                _is_coro = True  # shim is always async
 
             try:
                 self._core_app.add_route(
@@ -1342,6 +1447,33 @@ class FastAPI(AppBase):
                         field_specs,
                         None if _has_file_params else (dep.body_params or None),
                         getattr(route, '_embed_body_fields', True),  # form fields are embedded
+                        dep if dep.dependencies else None,
+                        dep_solver,
+                    )
+                else:
+                    # Non-fast-path, non-form routes (e.g. HTMLResponse, FileResponse,
+                    # StreamingResponse, routes with request_param_name, etc.).
+                    # Must still call register_fast_spec so C++ dispatches the
+                    # endpoint. The endpoint returns a Response object which C++
+                    # handles via the raw_headers path.
+                    dep = route.dependant
+                    dep_solver = None
+                    if dep.dependencies:
+                        try:
+                            dep_solver = _make_dep_solver(dep)
+                        except Exception:
+                            pass
+                    raw_specs = getattr(route, '_batch_specs', [])
+                    field_specs = (
+                        self._convert_batch_specs(raw_specs) if raw_specs
+                        else None
+                    )
+                    self._core_app.register_fast_spec(
+                        route_index,
+                        None,       # no JSON body param
+                        field_specs,
+                        None,       # no body_params validation
+                        False,
                         dep if dep.dependencies else None,
                         dep_solver,
                     )

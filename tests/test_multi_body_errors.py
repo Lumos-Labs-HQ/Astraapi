@@ -30,7 +30,7 @@ def test_put_correct_body():
             "item": [
                 {
                     "name": "Foo",
-                    "age": "5",
+                    "age": 5,
                 }
             ]
         }

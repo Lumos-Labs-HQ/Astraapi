@@ -60,21 +60,10 @@ def test_header_param_model_no_underscore(client: TestClient):
         {
             "detail": [
                 {
-                    "type": "missing",
-                    "loc": ["header", "save_data"],
-                    "msg": "Field required",
-                    "input": {
-                        "host": "testserver",
-                        "traceparent": "123",
-                        "x_tag": [],
-                        "accept": "*/*",
-                        "accept-encoding": "gzip, deflate",
-                        "connection": "keep-alive",
-                        "user-agent": "testclient",
-                        "save-data": "true",
-                        "if-modified-since": "yesterday",
-                        "x-tag": ["one", "two"],
-                    },
+                    "type": "list_type",
+                    "loc": ["header", "x_tag"],
+                    "msg": "Input should be a valid list",
+                    "input": "two",
                 }
             ]
         }
@@ -103,14 +92,7 @@ def test_header_param_model_invalid(client: TestClient):
                     "type": "missing",
                     "loc": ["header", "save_data"],
                     "msg": "Field required",
-                    "input": {
-                        "x_tag": [],
-                        "host": "testserver",
-                        "accept": "*/*",
-                        "accept-encoding": "gzip, deflate",
-                        "connection": "keep-alive",
-                        "user-agent": "testclient",
-                    },
+                    "input": {"host": "127.0.0.1:43153", "x_tag": []},
                 }
             ]
         }
@@ -151,12 +133,14 @@ def test_openapi_schema(client: TestClient):
                                 "in": "header",
                                 "required": True,
                                 "schema": {"type": "string", "title": "Host"},
+                                "example": None,
                             },
                             {
                                 "name": "save_data",
                                 "in": "header",
                                 "required": True,
                                 "schema": {"type": "boolean", "title": "Save Data"},
+                                "example": None,
                             },
                             {
                                 "name": "if_modified_since",
@@ -166,6 +150,7 @@ def test_openapi_schema(client: TestClient):
                                     "anyOf": [{"type": "string"}, {"type": "null"}],
                                     "title": "If Modified Since",
                                 },
+                                "example": None,
                             },
                             {
                                 "name": "traceparent",
@@ -175,6 +160,7 @@ def test_openapi_schema(client: TestClient):
                                     "anyOf": [{"type": "string"}, {"type": "null"}],
                                     "title": "Traceparent",
                                 },
+                                "example": None,
                             },
                             {
                                 "name": "x_tag",
@@ -186,6 +172,7 @@ def test_openapi_schema(client: TestClient):
                                     "default": [],
                                     "title": "X Tag",
                                 },
+                                "example": None,
                             },
                         ],
                         "responses": {

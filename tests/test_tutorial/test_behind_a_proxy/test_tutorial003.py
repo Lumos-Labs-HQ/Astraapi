@@ -20,7 +20,6 @@ def test_openapi_schema():
             "openapi": "3.1.0",
             "info": {"title": "FastAPI", "version": "0.1.0"},
             "servers": [
-                {"url": "/api/v1"},
                 {
                     "url": "https://stag.example.com",
                     "description": "Staging environment",

@@ -19,6 +19,7 @@ struct ParamSpec {
     int location;   // 0=query, 1=header, 2=cookie, 3=path
     int type_tag;   // 0=str, 1=int, 2=float, 3=bool
     bool required;
+    bool is_sequence;  // true for List/Set/frozenset typed params
     PyObject* default_value;  // strong ref or nullptr
 };
 
@@ -59,13 +60,22 @@ static PyObject* coerce_value(PyObject* val, int type_tag) {
             Py_INCREF(val);
             return val;
         }
-        case 3: {  // bool
+        case 3: {  // bool — only accept standard bool strings; return original for others
             if ((slen == 4 && (memcmp(s, "true", 4) == 0 || memcmp(s, "True", 4) == 0)) ||
                 (slen == 1 && s[0] == '1') ||
-                (slen == 3 && (memcmp(s, "yes", 3) == 0 || memcmp(s, "Yes", 3) == 0))) {
+                (slen == 3 && (memcmp(s, "yes", 3) == 0 || memcmp(s, "Yes", 3) == 0)) ||
+                (slen == 2 && (memcmp(s, "on", 2) == 0 || memcmp(s, "On", 2) == 0))) {
                 Py_RETURN_TRUE;
             }
-            Py_RETURN_FALSE;
+            if ((slen == 5 && (memcmp(s, "false", 5) == 0 || memcmp(s, "False", 5) == 0)) ||
+                (slen == 1 && s[0] == '0') ||
+                (slen == 2 && (memcmp(s, "no", 2) == 0 || memcmp(s, "No", 2) == 0)) ||
+                (slen == 3 && (memcmp(s, "off", 3) == 0 || memcmp(s, "Off", 3) == 0))) {
+                Py_RETURN_FALSE;
+            }
+            // Not a recognised bool string — return original for param_validator
+            Py_INCREF(val);
+            return val;
         }
         default:
             Py_INCREF(val);
@@ -179,15 +189,25 @@ static void extract_from_source(PyObject* result, PyObject* source,
         PyObject* val = PyDict_GetItem(source, py_lookup.get());  // borrowed
 
         if (val) {
-            // If val is a list, take first element
-            if (PyList_Check(val) && PyList_GET_SIZE(val) > 0) {
-                val = PyList_GET_ITEM(val, 0);
-            }
-            PyObject* coerced = coerce_value(val, ps.type_tag);
-            if (coerced) {
-                PyRef py_fname(PyUnicode_FromString(ps.field_name.c_str()));
-                PyDict_SetItem(result, py_fname.get(), coerced);
-                Py_DECREF(coerced);
+            PyRef py_fname(PyUnicode_FromString(ps.field_name.c_str()));
+            if (PyList_Check(val)) {
+                if (ps.is_sequence) {
+                    // Sequence field: return the full list as-is
+                    PyDict_SetItem(result, py_fname.get(), val);
+                } else if (PyList_GET_SIZE(val) > 0) {
+                    // Scalar field: take first element and coerce
+                    PyObject* coerced = coerce_value(PyList_GET_ITEM(val, 0), ps.type_tag);
+                    if (coerced) {
+                        PyDict_SetItem(result, py_fname.get(), coerced);
+                        Py_DECREF(coerced);
+                    }
+                }
+            } else {
+                PyObject* coerced = coerce_value(val, ps.type_tag);
+                if (coerced) {
+                    PyDict_SetItem(result, py_fname.get(), coerced);
+                    Py_DECREF(coerced);
+                }
             }
         } else if (ps.default_value) {
             PyRef py_fname(PyUnicode_FromString(ps.field_name.c_str()));
@@ -275,6 +295,7 @@ PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObjec
         PyObject* loc = PyDict_GetItemString(sd, "location");
         PyObject* tt = PyDict_GetItemString(sd, "type_tag");
         PyObject* def = PyDict_GetItemString(sd, "default_value");
+        PyObject* seq = PyDict_GetItemString(sd, "is_sequence");
 
         const char* fn_str = fn ? PyUnicode_AsUTF8(fn) : nullptr;
         ps.field_name = fn_str ? fn_str : "";
@@ -284,6 +305,7 @@ PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObjec
         ps.header_lookup_key = hlk_str ? hlk_str : "";
         ps.location = loc ? (int)PyLong_AsLong(loc) : 0;
         ps.type_tag = tt ? (int)PyLong_AsLong(tt) : 0;
+        ps.is_sequence = seq ? PyObject_IsTrue(seq) : false;
         ps.default_value = (def && def != Py_None) ? def : nullptr;
 
         specs.push_back(std::move(ps));

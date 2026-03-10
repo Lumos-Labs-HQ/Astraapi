@@ -141,6 +141,7 @@ def test_openapi_schema(client: TestClient):
                             "name": {"title": "Name", "type": "string"},
                             "description": {
                                 "title": "Description",
+                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                             },
                             "foo": {"$ref": "#/components/schemas/ModelB"},

@@ -331,7 +331,7 @@ class HTTPBearer(HTTPBase):
                     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
             if not self.auto_error:
                 return None
-            raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="Not authenticated")
+            raise self.make_not_authenticated_error()
         authorization = request.headers.get("Authorization")
         scheme, credentials = get_authorization_scheme_param(authorization)
         if not (authorization and scheme and credentials):

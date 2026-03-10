@@ -135,6 +135,7 @@ def test_openapi_schema(client: TestClient):
                         "properties": {
                             "file": {
                                 "title": "File",
+                                "default": None,
                                 "anyOf": [
                                     {"type": "string", "format": "binary"},
                                     {"type": "null"},
@@ -148,6 +149,7 @@ def test_openapi_schema(client: TestClient):
                         "properties": {
                             "file": {
                                 "title": "File",
+                                "default": None,
                                 "anyOf": [
                                     {"type": "string", "format": "binary"},
                                     {"type": "null"},
