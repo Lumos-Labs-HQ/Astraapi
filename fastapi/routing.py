@@ -1010,11 +1010,6 @@ def _flatten_deps(
         if use_cache:
             visited_ids.add(dep_cache_key)
 
-        # Generator deps need AsyncExitStack — not supported in C++ fast path
-        if getattr(sub_dep, 'is_gen_callable', False) or \
-           getattr(sub_dep, 'is_async_gen_callable', False):
-            raise ValueError("Generator dependencies not supported in C++ fast path")
-
         # Recurse into children FIRST (ensures topological order: leaves before parents).
         # For use_cache=False nodes, children were already handled on first occurrence;
         # skip recursion to avoid double-processing.
@@ -1067,6 +1062,8 @@ def _flatten_deps(
             'cache_key': dep_cache_key,
             'use_cache': use_cache,
             'is_coro': sub_dep.is_coroutine_callable,
+            'is_gen': getattr(sub_dep, 'is_gen_callable', False),
+            'is_async_gen': getattr(sub_dep, 'is_async_gen_callable', False),
             'needs_request': bool(sub_dep.request_param_name),
             'request_param_name': sub_dep.request_param_name,
             'needs_http_connection': bool(sub_dep.http_connection_param_name),
@@ -1346,6 +1343,135 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
     return (resolved, errors)
 
 
+async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
+    """Resolve dependencies including generator (yield) deps using AsyncExitStack.
+
+    Returns (resolved_dict, errors_list, exit_stack).
+    The exit_stack must be closed by the caller after the endpoint returns.
+    """
+    exit_stack = AsyncExitStack()
+    resolved = {}
+    errors = []
+
+    # Pop C++-injected request info from kwargs
+    raw_headers = kwargs_dict.pop('__raw_headers__', None)
+    raw_method = kwargs_dict.pop('__method__', 'GET')
+    raw_path = kwargs_dict.pop('__path__', '/')
+    auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
+    auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
+    request_obj = None
+
+    for node in dep_nodes:
+        try:
+            if node['is_security']:
+                sec_type = node['security_type']
+                if sec_type in ('HTTPBearer', 'HTTPBase'):
+                    if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
+                        if node['auto_error']:
+                            _sec_obj = node['call']
+                            _www_auth = getattr(_sec_obj, 'model', None)
+                            _scheme = getattr(_www_auth, 'scheme', 'Bearer') or 'Bearer'
+                            await exit_stack.aclose()
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _scheme.title()})
+                        creds_val = None
+                    else:
+                        creds_val = node['security_cred_cls'](
+                            scheme=auth_scheme, credentials=auth_credentials)
+                    resolved[node['name']] = creds_val
+                    for alias in node.get('aliases', ()):
+                        resolved[alias] = creds_val
+                    continue
+                elif sec_type == 'HTTPBasic':
+                    if not auth_scheme or auth_scheme.lower() != 'basic' or not auth_credentials:
+                        if node['auto_error']:
+                            _sec_obj = node['call']
+                            _realm = getattr(_sec_obj, 'realm', None)
+                            _www_auth_hdr = f'Basic realm="{_realm}"' if _realm else 'Basic'
+                            await exit_stack.aclose()
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _www_auth_hdr})
+                        creds_val = None
+                    else:
+                        _sec_obj = node['call']
+                        _realm = getattr(_sec_obj, 'realm', None)
+                        _www_auth_hdr = f'Basic realm="{_realm}"' if _realm else 'Basic'
+                        try:
+                            decoded = _base64.b64decode(auth_credentials).decode('utf-8')
+                        except Exception:
+                            if node['auto_error']:
+                                await exit_stack.aclose()
+                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                                  headers={"WWW-Authenticate": _www_auth_hdr})
+                            creds_val = None
+                            resolved[node['name']] = creds_val
+                            continue
+                        username, sep, password = decoded.partition(':')
+                        if not sep:
+                            if node['auto_error']:
+                                await exit_stack.aclose()
+                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                                  headers={"WWW-Authenticate": _www_auth_hdr})
+                            creds_val = None
+                        else:
+                            creds_val = node['security_cred_cls'](username=username, password=password)
+                    resolved[node['name']] = creds_val
+                    for alias in node.get('aliases', ()):
+                        resolved[alias] = creds_val
+                    continue
+
+            dep_kwargs = {}
+
+            for child_name in node['child_names']:
+                if child_name in resolved:
+                    dep_kwargs[child_name] = resolved[child_name]
+
+            for pname in node['param_names']:
+                if pname in kwargs_dict:
+                    dep_kwargs[pname] = kwargs_dict[pname]
+
+            if node['needs_request'] or node['needs_http_connection']:
+                if request_obj is None:
+                    request_obj = _make_lightweight_request(
+                        raw_headers, raw_method, raw_path)
+                param_name = node['request_param_name'] or \
+                    node['http_connection_param_name']
+                if param_name:
+                    dep_kwargs[param_name] = request_obj
+
+            if node.get('is_async_gen'):
+                # Async generator dep: wrap as async context manager and enter
+                call = node['call']
+                cm = asynccontextmanager(call)(**dep_kwargs)
+                result = await exit_stack.enter_async_context(cm)
+            elif node.get('is_gen'):
+                # Sync generator dep: wrap as context manager and enter
+                from contextlib import contextmanager as _contextmanager
+                call = node['call']
+                cm = _contextmanager(call)(**dep_kwargs)
+                result = exit_stack.enter_context(cm)
+            elif node['is_coro']:
+                result = await node['call'](**dep_kwargs)
+            else:
+                result = node['call'](**dep_kwargs)
+
+            resolved[node['name']] = result
+            for alias in node.get('aliases', ()):
+                resolved[alias] = result
+
+        except _exc_types:
+            await exit_stack.aclose()
+            raise
+        except Exception as exc:
+            errors.append({
+                "loc": ("dependency", node['name']),
+                "msg": str(exc),
+                "type": "dependency_error",
+            })
+
+    return (resolved, errors, exit_stack)
+
+
 def _make_dep_solver(dependant: Dependant):
     """Create a fast dependency solver callable for C++ fast path.
 
@@ -1371,19 +1497,44 @@ def _make_dep_solver(dependant: Dependant):
             kwargs_dict.pop('__raw_headers__', None)
             kwargs_dict.pop('__method__', None)
             kwargs_dict.pop('__path__', None)
+            kwargs_dict.pop('__auth_scheme__', None)
+            kwargs_dict.pop('__auth_credentials__', None)
             return ({}, [])
         return _solve_empty
 
-    
     injectable_names: set[str] = set()
     for sub_dep in dependant.dependencies:
         if sub_dep.name and sub_dep.call is not None:
             injectable_names.add(sub_dep.name)
 
-    
     dep_consumed_params: set[str] = set()
     for node in dep_nodes:
         dep_consumed_params.update(node['param_names'])
+
+    # Check for generator (yield) dependencies — require AsyncExitStack cleanup
+    has_gen = any(node.get('is_gen') or node.get('is_async_gen') for node in dep_nodes)
+
+    if has_gen:
+        # Generator deps need AsyncExitStack; return exit_stack embedded in injected
+        async def _solve_gen_async(kwargs_dict):
+            import asyncio
+            # Force async_di dispatch: ensure C++ sees PYGEN_NEXT.
+            # Without this, if all gen deps have no internal `await`, the dep_solver
+            # would complete synchronously and C++ would pass __exit_stack__ to the
+            # endpoint as an unexpected kwarg → TypeError.
+            await asyncio.sleep(0)
+            resolved, errors, exit_stack = await _resolve_deps_gen(dep_nodes, kwargs_dict)
+            if injectable_names:
+                injected = {k: v for k, v in resolved.items()
+                            if k in injectable_names}
+            else:
+                injected = {}
+            for pname in dep_consumed_params:
+                kwargs_dict.pop(pname, None)
+            # Embed exit_stack so _handle_async_di can clean up after endpoint
+            injected['__exit_stack__'] = exit_stack
+            return (injected, errors)
+        return _solve_gen_async
 
     # Check if any dep in the tree is async
     any_async = any(node['is_coro'] for node in dep_nodes)

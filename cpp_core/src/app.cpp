@@ -3632,8 +3632,12 @@ static PyObject* dispatch_one_request(
                     // Reset _asyncio_future_blocking — C++ intercepted the yield
                     // before asyncio's Task.__step could clear it.
                     // s_fut_blocking pre-cached at startup
-                    if (dep_raw) {
+                    // Reset _asyncio_future_blocking if dep_raw is a proper Future object.
+                    // Some awaitables (like asyncio.sleep(0) in Python 3.12+) yield None —
+                    // skip attribute setting for None to avoid AttributeError.
+                    if (dep_raw && dep_raw != Py_None) {
                         PyObject_SetAttr(dep_raw, s_fut_blocking, Py_False);
+                        PyErr_Clear();  // Ignore AttributeError if object doesn't support it
                     }
 
                     // NOTE: Do NOT decrement active_requests here — Python will call

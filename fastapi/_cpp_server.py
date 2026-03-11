@@ -939,29 +939,36 @@ async def _drive_coro(coro: Any, first_yield: Any) -> Any:
     We inline the single-yield case to avoid the loop + extra try/except.
     """
     # Single-yield fast-path (most common case)
-    result = await first_yield
+    # first_yield may be None (from asyncio.sleep(0) in Python 3.12+ which uses __sleep0)
+    if first_yield is None:
+        result = None
+    else:
+        result = await first_yield
     try:
         next_yield = coro.send(result)
     except StopIteration as e:
         return e.value
     # Multi-yield: fall through to loop
     while True:
-        try:
-            next_yield._asyncio_future_blocking = False
-        except AttributeError:
-            pass
-        try:
-            result = await next_yield
-        except BaseException as exc:
-            try:
-                next_yield = coro.throw(type(exc), exc, exc.__traceback__)
-            except StopIteration as e:
-                return e.value
+        if next_yield is None:
+            result = None
         else:
             try:
-                next_yield = coro.send(result)
-            except StopIteration as e:
-                return e.value
+                next_yield._asyncio_future_blocking = False
+            except AttributeError:
+                pass
+            try:
+                result = await next_yield
+            except BaseException as exc:
+                try:
+                    next_yield = coro.throw(type(exc), exc, exc.__traceback__)
+                except StopIteration as e:
+                    return e.value
+                continue
+        try:
+            next_yield = coro.send(result)
+        except StopIteration as e:
+            return e.value
 
 
 class CppHttpProtocol(asyncio.Protocol):
@@ -1209,7 +1216,11 @@ class CppHttpProtocol(asyncio.Protocol):
 
                 elif tag == "async":
                     _, coro, first_yield, status_code, keep_alive = result_obj
-                    first_yield._asyncio_future_blocking = False
+                    if first_yield is not None:
+                        try:
+                            first_yield._asyncio_future_blocking = False
+                        except AttributeError:
+                            pass
                     task = self._loop.create_task(
                         self._handle_async(coro, first_yield, status_code, keep_alive))
                     pt = self._pending_tasks
@@ -1230,7 +1241,12 @@ class CppHttpProtocol(asyncio.Protocol):
 
                 elif tag == "async_di":
                     _, di_coro, first_yield, endpoint, kwargs, sc, ka = result_obj
-                    first_yield._asyncio_future_blocking = False
+                    # first_yield may be None (asyncio.sleep(0) in Python 3.12+ yields None)
+                    if first_yield is not None:
+                        try:
+                            first_yield._asyncio_future_blocking = False
+                        except AttributeError:
+                            pass
                     task = self._loop.create_task(
                         self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka))
                     pt = self._pending_tasks
@@ -1613,56 +1629,76 @@ class CppHttpProtocol(asyncio.Protocol):
                             self._transport.write(resp)
                     return
                 if isinstance(values, dict):
+                    # Extract generator dep exit_stack before updating kwargs
+                    exit_stack = values.pop('__exit_stack__', None)
                     kwargs.update(values)
+            else:
+                exit_stack = None
 
-            # Call endpoint
-            raw = await endpoint(**kwargs)
-            transport = self._transport
-            if transport and not transport.is_closing():
-                resp = self._core.build_response_from_any(raw, status_code, keep_alive)
-                if resp is not None:
-                    transport.write(resp)
+            # Call endpoint — handle sync vs async, and wrap with exit_stack for gen dep cleanup
+            _is_async_endpoint = inspect.iscoroutinefunction(endpoint)
+
+            async def _call_and_write() -> Any:
+                """Call endpoint and write response (used both in and out of exit_stack)."""
+                if _is_async_endpoint:
+                    _raw = await endpoint(**kwargs)
                 else:
-                    # StreamingResponse — chunked transfer encoding (must stay in Python)
-                    status = getattr(raw, 'status_code', 200)
-                    headers_list = []
-                    if hasattr(raw, 'raw_headers'):
-                        headers_list = raw.raw_headers
-                    elif hasattr(raw, 'headers'):
-                        for k, v in raw.headers.items():
-                            headers_list.append((k, v))
-                    prefix = _STREAMING_STATUS_LINES.get(status)
-                    if prefix is not None:
-                        buf = bytearray(prefix)
+                    _raw = endpoint(**kwargs)
+                transport = self._transport
+                if transport and not transport.is_closing():
+                    resp = self._core.build_response_from_any(_raw, status_code, keep_alive)
+                    if resp is not None:
+                        transport.write(resp)
                     else:
-                        phrase = _STATUS_PHRASES.get(status, "")
-                        buf = bytearray(f"HTTP/1.1 {status} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
-                    hdr_parts = []
-                    for hname, hvalue in headers_list:
-                        if isinstance(hname, str):
-                            hname = hname.encode("latin-1")
-                        if isinstance(hvalue, str):
-                            hvalue = hvalue.encode("latin-1")
-                        hdr_parts.append(hname)
-                        hdr_parts.append(b": ")
-                        hdr_parts.append(hvalue)
-                        hdr_parts.append(b"\r\n")
-                    hdr_parts.append(b"\r\n")
-                    buf.extend(b"".join(hdr_parts))
-                    transport.write(bytes(buf))
-                    try:
-                        async for chunk in raw.body_iterator:
-                            if isinstance(chunk, str):
-                                chunk = chunk.encode("utf-8")
-                            if chunk:
-                                transport.write(_build_chunked_frame(chunk))
-                        transport.write(b"0\r\n\r\n")
-                    except Exception:
-                        logger.warning("Streaming response error", exc_info=True)
+                        # StreamingResponse — chunked transfer encoding
+                        _status = getattr(_raw, 'status_code', 200)
+                        _headers_list = []
+                        if hasattr(_raw, 'raw_headers'):
+                            _headers_list = _raw.raw_headers
+                        elif hasattr(_raw, 'headers'):
+                            for k, v in _raw.headers.items():
+                                _headers_list.append((k, v))
+                        _prefix = _STREAMING_STATUS_LINES.get(_status)
+                        if _prefix is not None:
+                            _buf = bytearray(_prefix)
+                        else:
+                            _phrase = _STATUS_PHRASES.get(_status, "")
+                            _buf = bytearray(f"HTTP/1.1 {_status} {_phrase}\r\ntransfer-encoding: chunked\r\n".encode())
+                        _hdr_parts = []
+                        for _hname, _hvalue in _headers_list:
+                            if isinstance(_hname, str):
+                                _hname = _hname.encode("latin-1")
+                            if isinstance(_hvalue, str):
+                                _hvalue = _hvalue.encode("latin-1")
+                            _hdr_parts.append(_hname)
+                            _hdr_parts.append(b": ")
+                            _hdr_parts.append(_hvalue)
+                            _hdr_parts.append(b"\r\n")
+                        _hdr_parts.append(b"\r\n")
+                        _buf.extend(b"".join(_hdr_parts))
+                        transport.write(bytes(_buf))
                         try:
+                            async for chunk in _raw.body_iterator:
+                                if isinstance(chunk, str):
+                                    chunk = chunk.encode("utf-8")
+                                if chunk:
+                                    transport.write(_build_chunked_frame(chunk))
                             transport.write(b"0\r\n\r\n")
                         except Exception:
-                            logger.debug("Failed to write chunked trailer", exc_info=True)
+                            logger.warning("Streaming response error", exc_info=True)
+                            try:
+                                transport.write(b"0\r\n\r\n")
+                            except Exception:
+                                logger.debug("Failed to write chunked trailer", exc_info=True)
+                return _raw
+
+            if exit_stack is not None:
+                # Write response INSIDE exit_stack context so cleanup happens after
+                # response bytes are serialized (important for mutable return values).
+                async with exit_stack:
+                    raw = await _call_and_write()
+            else:
+                raw = await _call_and_write()
             # BackgroundTasks support
             background = getattr(raw, 'background', None)
             if background is not None:
