@@ -111,6 +111,8 @@ struct FastRouteSpec {
     // Set at registration when body has exactly 1 Pydantic model param
     PyObject* model_validate;     // bound method: Model.model_validate (strong ref, or NULL)
     bool body_is_plain_dict;      // True if body param is plain dict (no Pydantic model)
+    // Pre-interned body param name key — avoids PyUnicode_FromString per POST request
+    PyObject* py_body_param_name; // interned PyUnicode for body_param_name (strong ref, or NULL)
 };
 
 // ── Method bitmask for O(1) method checking ─────────────────────────────────

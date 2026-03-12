@@ -1205,19 +1205,29 @@ class FastAPI(AppBase):
 
         _is_redirect = isinstance(actual_rc, type) and issubclass(actual_rc, _RedirectResponse)
 
+        # BackgroundTasks support: inject a fresh instance if the endpoint declares it,
+        # then fire-and-forget the tasks after the response is returned to C++ for writing.
+        _bg_param = getattr(getattr(route, 'dependant', None), 'background_tasks_param_name', None)
+
         async def _response_shim(**kwargs: Any) -> Any:
+            _bg = None
+            if _bg_param:
+                from fastapi.background import BackgroundTasks as _BackgroundTasks
+                _bg = _BackgroundTasks()
+                kwargs[_bg_param] = _bg
             if _is_async:
                 result = await original_endpoint(**kwargs)
             else:
                 result = original_endpoint(**kwargs)
 
             # If already a Response object, handle based on type
+            _final: Any = None
             if isinstance(result, _FileResponse):
                 # Read file and return as plain Response
                 try:
                     with open(result.path, 'rb') as fh:
                         body_bytes = fh.read()
-                    return _Response(
+                    _final = _Response(
                         content=body_bytes,
                         status_code=result.status_code,
                         media_type=result.media_type,
@@ -1226,7 +1236,7 @@ class FastAPI(AppBase):
                     from fastapi import HTTPException
                     raise HTTPException(status_code=404, detail="File not found") from exc
 
-            if isinstance(result, _StreamingResponse):
+            elif isinstance(result, _StreamingResponse):
                 # Collect iterator into bytes and return as plain Response
                 chunks = []
                 body_iter = result.body_iterator
@@ -1236,37 +1246,48 @@ class FastAPI(AppBase):
                 else:
                     for chunk in body_iter:
                         chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
-                return _Response(
+                _final = _Response(
                     content=b"".join(chunks),
                     status_code=result.status_code,
                     media_type=result.media_type,
                 )
 
-            if isinstance(result, _Response):
-                return result
+            elif isinstance(result, _Response):
+                _final = result
 
-            # Not a Response — wrap using the route's response_class
-            if _is_redirect:
-                # Pass only the URL; let RedirectResponse use its own default status_code
-                # (307), unless route explicitly overrides it
-                if status_code and status_code != 200:
-                    return actual_rc(result, status_code=status_code)
-                return actual_rc(result)
-            elif actual_rc is _FileResponse:
-                # response_class=FileResponse, endpoint returns file path string
-                try:
-                    with open(str(result), 'rb') as fh:
-                        body_bytes = fh.read()
-                    return _Response(
-                        content=body_bytes,
-                        status_code=status_code,
-                        media_type=None,
-                    )
-                except OSError as exc:
-                    from fastapi import HTTPException
-                    raise HTTPException(status_code=404, detail="File not found") from exc
             else:
-                return actual_rc(content=result, status_code=status_code)
+                # Not a Response — wrap using the route's response_class
+                if _is_redirect:
+                    # Pass only the URL; let RedirectResponse use its own default status_code
+                    # (307), unless route explicitly overrides it
+                    if status_code and status_code != 200:
+                        _final = actual_rc(result, status_code=status_code)
+                    else:
+                        _final = actual_rc(result)
+                elif actual_rc is _FileResponse:
+                    # response_class=FileResponse, endpoint returns file path string
+                    try:
+                        with open(str(result), 'rb') as fh:
+                            body_bytes = fh.read()
+                        _final = _Response(
+                            content=body_bytes,
+                            status_code=status_code,
+                            media_type=None,
+                        )
+                    except OSError as exc:
+                        from fastapi import HTTPException
+                        raise HTTPException(status_code=404, detail="File not found") from exc
+                else:
+                    _final = actual_rc(content=result, status_code=status_code)
+
+            # Schedule background tasks as fire-and-forget after response is returned.
+            # create_task schedules bg() on the running event loop; it executes after
+            # the current synchronous flow completes (i.e., after C++ writes the response).
+            if _bg is not None and getattr(_bg, 'tasks', None):
+                import asyncio as _asyncio
+                _asyncio.create_task(_bg())
+
+            return _final
 
         _response_shim.__name__ = getattr(original_endpoint, '__name__', '_response_shim')
         return _response_shim

@@ -109,6 +109,15 @@ static PyObject* s_validate_str = nullptr;           // "validate_python"
 static PyObject* s_fut_blocking = nullptr;           // "_asyncio_future_blocking"
 static PyObject* s_async_tag = nullptr;              // "async"
 static PyObject* s_stream_tag = nullptr;             // "stream"
+// Pre-interned attribute name strings for Response object detection
+static PyObject* s_attr_body_iterator = nullptr;     // "body_iterator"
+static PyObject* s_attr_path = nullptr;              // "path"
+static PyObject* s_attr_body = nullptr;              // "body"
+static PyObject* s_attr_status_code = nullptr;       // "status_code"
+static PyObject* s_attr_raw_headers = nullptr;       // "_raw_headers"
+static PyObject* s_attr_raw_headers2 = nullptr;      // "raw_headers"
+static PyObject* s_attr_background = nullptr;        // "background"
+static PyObject* s_attr_headers = nullptr;           // "headers"
 
 // Cached HTTP method strings — only 7 possible values, avoids per-request allocation
 static PyObject* s_method_GET = nullptr;
@@ -235,6 +244,15 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     if (!s_fut_blocking) s_fut_blocking = PyUnicode_InternFromString("_asyncio_future_blocking");
     if (!s_async_tag) s_async_tag = PyUnicode_InternFromString("async");
     if (!s_stream_tag) s_stream_tag = PyUnicode_InternFromString("stream");
+    // Pre-intern attribute name strings for Response object detection (avoids C-str alloc per request)
+    if (!s_attr_body_iterator) s_attr_body_iterator = PyUnicode_InternFromString("body_iterator");
+    if (!s_attr_path) s_attr_path = PyUnicode_InternFromString("path");
+    if (!s_attr_body) s_attr_body = PyUnicode_InternFromString("body");
+    if (!s_attr_status_code) s_attr_status_code = PyUnicode_InternFromString("status_code");
+    if (!s_attr_raw_headers) s_attr_raw_headers = PyUnicode_InternFromString("_raw_headers");
+    if (!s_attr_raw_headers2) s_attr_raw_headers2 = PyUnicode_InternFromString("raw_headers");
+    if (!s_attr_background) s_attr_background = PyUnicode_InternFromString("background");
+    if (!s_attr_headers) s_attr_headers = PyUnicode_InternFromString("headers");
 
     // Pre-intern HTTP method strings (only 7 values — eliminates per-request allocation)
     if (!s_method_GET) s_method_GET = PyUnicode_InternFromString("GET");
@@ -546,6 +564,7 @@ static void CoreApp_dealloc(CoreAppObject* self) {
             Py_XDECREF(route.fast_spec->dep_solver);
             Py_XDECREF(route.fast_spec->param_validator);
             Py_XDECREF(route.fast_spec->model_validate);
+            Py_XDECREF(route.fast_spec->py_body_param_name);
             // Release pre-interned py_field_name + default_value refs
             auto release_specs = [](std::vector<FieldSpec>& specs) {
                 for (auto& fs : specs) {
@@ -1297,6 +1316,8 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
     FastRouteSpec spec;
 
     spec.body_param_name = body_param_name ? std::optional<std::string>(body_param_name) : std::nullopt;
+    // Pre-intern body param name key — avoids PyUnicode_FromString on every POST request
+    spec.py_body_param_name = body_param_name ? PyUnicode_InternFromString(body_param_name) : nullptr;
     spec.embed_body_fields = (bool)embed_body_fields;
     spec.has_body_params = false;
     spec.has_header_params = false;
@@ -2086,7 +2107,9 @@ static PyObject* build_http_error_response(int status_code, const char* message,
 static std::string extract_http_exc_headers(PyObject* exc_val) {
     std::string result;
     if (!exc_val) return result;
-    PyRef hdrs(PyObject_GetAttrString(exc_val, "headers"));
+    PyRef hdrs(s_attr_headers
+        ? PyObject_GetAttr(exc_val, s_attr_headers)
+        : PyObject_GetAttrString(exc_val, "headers"));
     if (!hdrs || hdrs.get() == Py_None || !PyDict_Check(hdrs.get())) {
         PyErr_Clear();
         return result;
@@ -2345,7 +2368,7 @@ static int serialize_json_and_write_response(
 // Eliminates: Python memoryview creation, slice ops, O(N) memmove per request.
 
 class HttpConnectionBuffer {
-    static constexpr size_t INITIAL_CAPACITY = 2048;
+    static constexpr size_t INITIAL_CAPACITY = 1024;   // 1KB initial — grows on demand
     static constexpr size_t MAX_CAPACITY = 1048576;  // 1MB
 
     uint8_t* buf_;
@@ -2833,8 +2856,23 @@ static PyObject* dispatch_one_request(
         }
 
         if (ws_key.len > 0) {
-            // Build and send 101 Switching Protocols
-            auto upgrade_resp = ws_build_upgrade_response(ws_key.data, ws_key.len);
+            // Extract Sec-WebSocket-Extensions header (for permessage-deflate negotiation)
+            StringView ws_extensions;
+            StringView ws_subprotocol;
+            for (int i = 0; i < req.header_count; i++) {
+                if (req.headers[i].name.iequals("sec-websocket-extensions", 24))
+                    ws_extensions = req.headers[i].value;
+                else if (req.headers[i].name.iequals("sec-websocket-protocol", 22))
+                    ws_subprotocol = req.headers[i].value;
+            }
+            // Use ext-aware upgrade: negotiates permessage-deflate if client requests it,
+            // ensures RSV bits are explicitly refused when compression is NOT agreed —
+            // prevents clients sending RSV1=1 frames that would trigger protocol error 1002.
+            auto upgrade_resp = ws_build_upgrade_response_ext(
+                ws_key.data, ws_key.len,
+                ws_extensions.data, ws_extensions.len,
+                ws_subprotocol.data, ws_subprotocol.len,
+                nullptr);  // deflate_out=nullptr: never negotiate compression (no inflate ctx)
             PyRef resp_bytes(PyBytes_FromStringAndSize(upgrade_resp.data(), (Py_ssize_t)upgrade_resp.size()));
             if (resp_bytes) write_response_direct(sock_fd, transport, resp_bytes.get());
 
@@ -2894,11 +2932,14 @@ static PyObject* dispatch_one_request(
                 PyRef ws_info(PyTuple_Pack(6, ws_tag.get(), ws_endpoint, path_params.get(),
                               path_str.get(), headers_list.get(), qs_bytes.get()));
                 Py_DECREF(ws_endpoint);
+                // Must set last_consumed so handle_http_append_and_dispatch /
+                // handle_http_batch_v2 advance the HTTP buffer past the upgrade request.
+                self->last_consumed = (Py_ssize_t)req.total_consumed;
                 return PyTuple_Pack(2, consumed.get(), ws_info.get());
             }
 
-            // No route found for WebSocket
-            PyRef close_frame_bytes(PyBytes_FromStringAndSize(nullptr, 0));
+            // No route found for WebSocket — consume request and return sentinel
+            self->last_consumed = (Py_ssize_t)req.total_consumed;
             Py_INCREF(Py_True);
             return PyTuple_Pack(2, consumed.get(), Py_True);
         }
@@ -3524,11 +3565,10 @@ static PyObject* dispatch_one_request(
                 }
             }
 
-            if (json_body_obj != Py_None && spec.body_param_name) {
+            if (json_body_obj != Py_None && spec.py_body_param_name) {
                 if (!spec.embed_body_fields) {
-                    // Non-embed: set full body as a named kwarg
-                    PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
-                    PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
+                    // Non-embed: set full body as a named kwarg (zero-alloc: pre-interned key)
+                    PyDict_SetItem(kwargs.get(), spec.py_body_param_name, json_body_obj);
                 }
                 // embed case already merged directly above
             }
@@ -3770,20 +3810,18 @@ static PyObject* dispatch_one_request(
 
         // ── FAST PATH: plain dict body (no Pydantic model) ──────────────
         // For routes like `body: dict = Body(...)`, skip validation entirely
-        if (spec.body_is_plain_dict && json_body_obj != Py_None && spec.body_param_name) {
-            PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
-            PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
+        if (spec.body_is_plain_dict && json_body_obj != Py_None && spec.py_body_param_name) {
+            PyDict_SetItem(kwargs.get(), spec.py_body_param_name, json_body_obj);
             Py_XDECREF(body_params_local);
             goto body_done;
         }
 
         // ── FAST PATH: single Pydantic model → call model_validate directly ──
         // Avoids going through request_body_to_args async wrapper
-        if (spec.model_validate && json_body_obj != Py_None && spec.body_param_name) {
+        if (spec.model_validate && json_body_obj != Py_None && spec.py_body_param_name) {
             PyRef validated(PyObject_CallOneArg(spec.model_validate, json_body_obj));
             if (validated) {
-                PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
-                PyDict_SetItem(kwargs.get(), bp_key.get(), validated.get());
+                PyDict_SetItem(kwargs.get(), spec.py_body_param_name, validated.get());
                 Py_XDECREF(body_params_local);
                 goto body_done;
             } else {
@@ -4137,7 +4175,7 @@ body_done:
         // Special case: StreamingResponse (has body_iterator) — dispatch to Python's
         // _handle_stream for proper async iteration without blocking the event loop.
         // Python will call record_request_end() when done, so do NOT decrement here.
-        if (PyObject_HasAttrString(raw_result, "body_iterator")) {
+        if (s_attr_body_iterator && PyObject_HasAttr(raw_result, s_attr_body_iterator)) {
             PyObject* ka = req.keep_alive ? Py_True : Py_False;
             PyRef stream_info(PyTuple_Pack(4, s_stream_tag, raw_result,
                                            get_cached_status(status_code_local), ka));
@@ -4149,9 +4187,10 @@ body_done:
         }
 
         // Special case: FileResponse (has path, body is empty placeholder) — dispatch to Python
-        if (PyObject_HasAttrString(raw_result, "path") &&
-            !PyObject_HasAttrString(raw_result, "body_iterator")) {
-            PyRef path_attr(PyObject_GetAttrString(raw_result, "path"));
+        if (s_attr_path && s_attr_body_iterator &&
+            PyObject_HasAttr(raw_result, s_attr_path) &&
+            !PyObject_HasAttr(raw_result, s_attr_body_iterator)) {
+            PyRef path_attr(PyObject_GetAttr(raw_result, s_attr_path));
             if (path_attr && PyUnicode_Check(path_attr.get())) {
                 PyObject* ka = req.keep_alive ? Py_True : Py_False;
                 PyRef stream_info(PyTuple_Pack(4, s_stream_tag, raw_result,
@@ -4164,10 +4203,11 @@ body_done:
         }
 
         PyRef body_attr, sc_attr;
-        if (PyObject_HasAttrString(raw_result, "body") &&
-            PyObject_HasAttrString(raw_result, "status_code")) {
-            body_attr = PyRef(PyObject_GetAttrString(raw_result, "body"));
-            sc_attr = PyRef(PyObject_GetAttrString(raw_result, "status_code"));
+        if (s_attr_body && s_attr_status_code &&
+            PyObject_HasAttr(raw_result, s_attr_body) &&
+            PyObject_HasAttr(raw_result, s_attr_status_code)) {
+            body_attr = PyRef(PyObject_GetAttr(raw_result, s_attr_body));
+            sc_attr = PyRef(PyObject_GetAttr(raw_result, s_attr_status_code));
         }
 
         if (body_attr && PyBytes_Check(body_attr.get()) && sc_attr && PyLong_Check(sc_attr.get())) {
@@ -4180,8 +4220,10 @@ body_done:
             // Local fastapi Response uses _raw_headers (list), while Starlette
             // uses raw_headers (also list). Try _raw_headers first (faster), fall back.
             PyRef raw_hdrs;
-            if (PyObject_HasAttrString(raw_result, "_raw_headers")) {
-                raw_hdrs = PyRef(PyObject_GetAttrString(raw_result, "_raw_headers"));
+            if (s_attr_raw_headers && PyObject_HasAttr(raw_result, s_attr_raw_headers)) {
+                raw_hdrs = PyRef(PyObject_GetAttr(raw_result, s_attr_raw_headers));
+            } else if (s_attr_raw_headers2) {
+                raw_hdrs = PyRef(PyObject_GetAttr(raw_result, s_attr_raw_headers2));
             } else {
                 raw_hdrs = PyRef(PyObject_GetAttrString(raw_result, "raw_headers"));
             }
@@ -4261,7 +4303,9 @@ body_done:
             if (http_resp) write_response_direct(sock_fd, transport, http_resp.get());
 
             // ── Background tasks ─────────────────────────────────────────
-            PyRef bg_attr(PyObject_GetAttrString(raw_result, "background"));
+            PyRef bg_attr(s_attr_background
+                ? PyObject_GetAttr(raw_result, s_attr_background)
+                : PyObject_GetAttrString(raw_result, "background"));
             PyErr_Clear();
             if (bg_attr && bg_attr.get() != Py_None) {
                 // Call background() to get coroutine, schedule on event loop
@@ -4550,6 +4594,113 @@ static PyObject* CoreApp_handle_http_batch(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// handle_http_batch_v2 — Zero-overhead batch HTTP dispatch (METH_FASTCALL)
+//
+// Upgrade over handle_http_batch: auto-consumes the HttpConnectionBuffer
+// internally, eliminating 3 Python→C++ calls per batch from the hot path:
+//   _http_buf_consume  - no longer needed
+//   _http_buf_len      - no longer needed
+//   core.last_consumed - no longer needed (returned directly)
+//
+// Also strips the outer (consumed, inner) tuple wrapper for async results,
+// eliminating 1 PyLong_FromSsize_t allocation + tuple modification per
+// async request when sync requests precede it.
+//
+// Returns:
+//   int  ≥ 0 = sync batch done; 0 = buffer empty, 1 = partial request pending
+//   -1       = need more data (nothing consumed, buffer unchanged)
+//   -2       = parse error (400 sent; buffer consumed up to error)
+//   tuple    = inner payload: ("async"/"ws"/"stream"/"async_di", ...)
+//              or InlineResult — buffer already consumed past this item
+//
+// All non-tuple returns are small cached ints (Python caches -5..256) → zero allocation
+// ═══════════════════════════════════════════════════════════════════════════════
+static PyObject* CoreApp_handle_http_batch_v2(
+    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
+{
+    if (nargs < 2 || nargs > 3) {
+        PyErr_SetString(PyExc_TypeError, "handle_http_batch_v2 requires 2-3 args");
+        return nullptr;
+    }
+
+    PyObject* buffer_obj = args[0];
+    PyObject* transport  = args[1];
+    int sock_fd = -1;
+    if (nargs >= 3) {
+        sock_fd = (int)PyLong_AsLong(args[2]);
+        if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+    }
+
+    // Non-capsule path: delegate to v1 for backward compat (never hit in practice)
+    if (UNLIKELY(!PyCapsule_CheckExact(buffer_obj))) {
+        PyObject* v1_args[3] = {buffer_obj, transport,
+                                 sock_fd >= 0 ? PyLong_FromLong(sock_fd) : Py_None};
+        PyObject* res = CoreApp_handle_http_batch(self, v1_args, 3);
+        if (sock_fd >= 0) Py_DECREF(v1_args[2]);
+        return res;
+    }
+
+    auto* hb = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
+    if (UNLIKELY(!hb)) return nullptr;
+
+    // Re-arm TCP_QUICKACK once for the whole batch (one syscall per data_received).
+    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+
+    const char* raw_base = (const char*)hb->data();
+    Py_ssize_t  raw_len  = (Py_ssize_t)hb->size();
+
+    if (raw_len == 0) return PyLong_FromLong(-1);  // empty buffer — need more data
+
+    Py_ssize_t prefix = 0;  // bytes consumed by sync requests so far
+
+    while (true) {
+        PyObject* r = dispatch_one_request(
+            self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
+
+        if (LIKELY(r == Py_True)) {
+            // Sync request done — accumulate and loop.
+            prefix += self->last_consumed;
+            Py_DECREF(r);
+            continue;
+        }
+
+        if (r == Py_None) {
+            // No more complete requests — consume what was processed.
+            Py_DECREF(r);
+            if (prefix > 0) {
+                hb->consume((size_t)prefix);
+                // 0 = empty (connection now idle — Python updates ka_deadline)
+                // 1 = partial request still in buffer — more data expected
+                return PyLong_FromLong(hb->size() > 0 ? 1 : 0);
+            }
+            return PyLong_FromLong(-1);  // no progress — need more data (cached)
+        }
+
+        if (r == Py_False) {
+            // Parse error — 400 already sent.
+            Py_DECREF(r);
+            if (prefix > 0) hb->consume((size_t)prefix);
+            return PyLong_FromLong(-2);  // error (cached int, no allocation)
+        }
+
+        // Async/WS/Pydantic: (consumed, inner) — consume buffer, return inner directly.
+        if (LIKELY(PyTuple_Check(r) && PyTuple_GET_SIZE(r) == 2)) {
+            Py_ssize_t total_consumed = prefix + self->last_consumed;
+            hb->consume((size_t)total_consumed);
+            // Steal ref to inner, release outer wrapper — no PyLong alloc needed.
+            PyObject* inner = PyTuple_GET_ITEM(r, 1);
+            Py_INCREF(inner);
+            Py_DECREF(r);
+            return inner;
+        }
+
+        // Unexpected shape — return as-is without consuming (safe fallback).
+        return r;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // serialize_and_write_http — for async endpoint results (METH_FASTCALL)
 //
 // Called from Python after awaiting an async endpoint's coroutine.
@@ -4605,6 +4756,58 @@ static PyObject* CoreApp_serialize_and_write_http(
 // args[1] = status_code (int)
 // args[2] = keep_alive (bool)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// write_async_result — direct-write serialized result for async endpoints
+//
+// Called from _handle_async after awaiting the coroutine.
+// Serializes result + writes directly to sock_fd (or transport if EAGAIN).
+// Eliminates 1 PyBytes allocation + 1 transport.write() call vs build_response.
+//
+// args[0] = result (Python object — dict, list, str, int, Pydantic, Response)
+// args[1] = transport
+// args[2] = status_code (int)
+// args[3] = keep_alive (bool)
+// args[4] = sock_fd (int)
+//
+// Returns:
+//   True  — response written successfully (non-streaming)
+//   None  — streaming response, Python must call _write_chunked_streaming
+// ═══════════════════════════════════════════════════════════════════════════════
+static PyObject* CoreApp_write_async_result(
+    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
+{
+    if (nargs != 5) {
+        PyErr_SetString(PyExc_TypeError, "write_async_result requires 5 args");
+        return nullptr;
+    }
+
+    PyObject* content   = args[0];
+    PyObject* transport = args[1];
+    int status_code     = (int)PyLong_AsLong(args[2]);
+    if (status_code == -1 && PyErr_Occurred()) return nullptr;
+    bool keep_alive     = PyObject_IsTrue(args[3]);
+    int sock_fd         = (int)PyLong_AsLong(args[4]);
+    if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+
+    // Note: Python caller gates to dict/list only — no need to check body_iterator.
+    // Use the same fused serialize+write path as sync endpoints:
+    // scatter-gather writev(sock_fd) → zero intermediate PyBytes.
+    int rc = serialize_json_and_write_response(
+        sock_fd, transport, content, status_code, keep_alive,
+        nullptr, 0,   // no accept-encoding (async caller doesn't have it)
+        nullptr, nullptr, 0,  // no CORS
+        false);       // not a HEAD request
+
+    if (rc >= 0) {
+        Py_RETURN_TRUE;
+    }
+
+    // Serialization failed (non-JSON-serializable value in dict/list — application error).
+    // Clear the exception; caller sees True and connection stays open.
+    PyErr_Clear();
+    Py_RETURN_TRUE;
+}
 
 static PyObject* CoreApp_build_response(
     CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
@@ -4697,22 +4900,25 @@ static PyObject* CoreApp_build_response_from_any(
     }
 
     // StreamingResponse: has body_iterator → return None, let Python handle async iteration
-    if (PyObject_HasAttrString(raw, "body_iterator")) {
+    if (s_attr_body_iterator && PyObject_HasAttr(raw, s_attr_body_iterator)) {
         Py_RETURN_NONE;
     }
 
     // Response objects (HTMLResponse, etc.): has .body + .status_code
-    if (PyObject_HasAttrString(raw, "body") && PyObject_HasAttrString(raw, "status_code")) {
-        PyRef body_attr(PyObject_GetAttrString(raw, "body"));
-        PyRef sc_attr(PyObject_GetAttrString(raw, "status_code"));
+    if (s_attr_body && s_attr_status_code &&
+        PyObject_HasAttr(raw, s_attr_body) && PyObject_HasAttr(raw, s_attr_status_code)) {
+        PyRef body_attr(PyObject_GetAttr(raw, s_attr_body));
+        PyRef sc_attr(PyObject_GetAttr(raw, s_attr_status_code));
         if (body_attr && PyBytes_Check(body_attr.get()) && sc_attr && PyLong_Check(sc_attr.get())) {
             int resp_sc = (int)PyLong_AsLong(sc_attr.get());
             char* resp_body; Py_ssize_t resp_body_len;
             PyBytes_AsStringAndSize(body_attr.get(), &resp_body, &resp_body_len);
 
             PyRef raw_hdrs;
-            if (PyObject_HasAttrString(raw, "_raw_headers")) {
-                raw_hdrs = PyRef(PyObject_GetAttrString(raw, "_raw_headers"));
+            if (s_attr_raw_headers && PyObject_HasAttr(raw, s_attr_raw_headers)) {
+                raw_hdrs = PyRef(PyObject_GetAttr(raw, s_attr_raw_headers));
+            } else if (s_attr_raw_headers2) {
+                raw_hdrs = PyRef(PyObject_GetAttr(raw, s_attr_raw_headers2));
             } else {
                 raw_hdrs = PyRef(PyObject_GetAttrString(raw, "raw_headers"));
             }
@@ -5120,10 +5326,9 @@ static PyObject* CoreApp_parse_and_route(
             }
         }
 
-        if (json_body_obj != Py_None && spec.body_param_name) {
+        if (json_body_obj != Py_None && spec.py_body_param_name) {
             if (!spec.embed_body_fields) {
-                PyRef bp_key(PyUnicode_FromString(spec.body_param_name->c_str()));
-                if (bp_key) PyDict_SetItem(kwargs.get(), bp_key.get(), json_body_obj);
+                PyDict_SetItem(kwargs.get(), spec.py_body_param_name, json_body_obj);
             }
         }
     }
@@ -5260,6 +5465,124 @@ static PyObject* CoreApp_warmup(CoreAppObject* self, PyObject*) {
 
 // ── Method table ────────────────────────────────────────────────────────────
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// handle_http_append_and_dispatch — fused append + dispatch (METH_FASTCALL)
+//
+// Combines _http_buf_append + handle_http_batch_v2 into a single Python→C++ call.
+// Eliminates one Python→C++ boundary crossing per data_received() invocation.
+//
+// args[0] = buffer capsule (HttpConnectionBuffer)
+// args[1] = data (bytes-like)   — appended into buffer first
+// args[2] = transport
+// args[3] = sock_fd (int, optional, default -1)
+//
+// Returns:
+//   False  (PyFalse)  = buffer overflow (413 logic should be handled by caller)
+//   int ≥ 0           = sync batch done; value = remaining bytes in buffer
+//   None              = need more data
+//   False (as parse)  = parse error (400 sent)
+//   tuple             = inner async/ws/stream/InlineResult payload
+// ═══════════════════════════════════════════════════════════════════════════════
+static PyObject* CoreApp_handle_http_append_and_dispatch(
+    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
+{
+    if (nargs < 3 || nargs > 4) {
+        PyErr_SetString(PyExc_TypeError, "handle_http_append_and_dispatch requires 3-4 args");
+        return nullptr;
+    }
+
+    PyObject* buffer_obj = args[0];
+    PyObject* data_obj   = args[1];
+    PyObject* transport  = args[2];
+    int sock_fd = -1;
+    if (nargs >= 4) {
+        sock_fd = (int)PyLong_AsLong(args[3]);
+        if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+    }
+
+    // ── Append data to buffer ──────────────────────────────────────────────
+    // Fast path: capsule + bytes/bytearray
+    if (UNLIKELY(!PyCapsule_CheckExact(buffer_obj))) {
+        // Fallback: shouldn't happen in normal operation
+        PyErr_SetString(PyExc_TypeError, "buffer must be HttpConnectionBuffer capsule");
+        return nullptr;
+    }
+
+    auto* hb = static_cast<HttpConnectionBuffer*>(
+        PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
+    if (UNLIKELY(!hb)) return nullptr;
+
+    // Append data (bytes or bytearray) with minimal overhead
+    bool append_ok;
+    if (LIKELY(PyBytes_CheckExact(data_obj))) {
+        append_ok = hb->append(
+            reinterpret_cast<const uint8_t*>(PyBytes_AS_STRING(data_obj)),
+            (size_t)PyBytes_GET_SIZE(data_obj));
+    } else if (data_obj == Py_None) {
+        // None data: nothing to append, just dispatch
+        append_ok = true;
+    } else {
+        // Slow path: bytearray, memoryview, etc.
+        Py_buffer view;
+        if (PyObject_GetBuffer(data_obj, &view, PyBUF_SIMPLE) < 0) return nullptr;
+        append_ok = hb->append(static_cast<const uint8_t*>(view.buf), (size_t)view.len);
+        PyBuffer_Release(&view);
+    }
+
+    if (UNLIKELY(!append_ok)) {
+        // Buffer overflow — return -3 so Python int checks cover all error codes
+        return PyLong_FromLong(-3);
+    }
+
+    // ── Dispatch (same as handle_http_batch_v2) ────────────────────────────
+    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+
+    const char* raw_base = (const char*)hb->data();
+    Py_ssize_t  raw_len  = (Py_ssize_t)hb->size();
+
+    if (raw_len == 0) return PyLong_FromLong(-1);  // empty — need more data
+
+    Py_ssize_t prefix = 0;
+
+    while (true) {
+        PyObject* r = dispatch_one_request(
+            self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
+
+        if (LIKELY(r == Py_True)) {
+            prefix += self->last_consumed;
+            Py_DECREF(r);
+            continue;
+        }
+
+        if (r == Py_None) {
+            Py_DECREF(r);
+            if (prefix > 0) {
+                hb->consume((size_t)prefix);
+                // 0 = buffer empty (connection idle), 1 = partial request pending
+                return PyLong_FromLong(hb->size() > 0 ? 1 : 0);
+            }
+            return PyLong_FromLong(-1);  // no progress — need more data (cached)
+        }
+
+        if (r == Py_False) {
+            Py_DECREF(r);
+            if (prefix > 0) hb->consume((size_t)prefix);
+            return PyLong_FromLong(-2);  // parse error (cached)
+        }
+
+        if (LIKELY(PyTuple_Check(r) && PyTuple_GET_SIZE(r) == 2)) {
+            Py_ssize_t total_consumed = prefix + self->last_consumed;
+            hb->consume((size_t)total_consumed);
+            PyObject* inner = PyTuple_GET_ITEM(r, 1);
+            Py_INCREF(inner);
+            Py_DECREF(r);
+            return inner;
+        }
+
+        return r;
+    }
+}
+
 static PyMethodDef CoreApp_methods[] = {
     {"next_route_id", (PyCFunction)CoreApp_next_route_id, METH_NOARGS, nullptr},
     {"record_request_start", (PyCFunction)CoreApp_record_request_start, METH_NOARGS, nullptr},
@@ -5282,7 +5605,11 @@ static PyMethodDef CoreApp_methods[] = {
     // C++ HTTP server path — bypass ASGI entirely
     {"handle_http", (PyCFunction)(void(*)(void))CoreApp_handle_http, METH_FASTCALL, nullptr},
     {"handle_http_batch", (PyCFunction)(void(*)(void))CoreApp_handle_http_batch, METH_FASTCALL, nullptr},
+    {"handle_http_batch_v2", (PyCFunction)(void(*)(void))CoreApp_handle_http_batch_v2, METH_FASTCALL, nullptr},
+    {"handle_http_append_and_dispatch", (PyCFunction)(void(*)(void))CoreApp_handle_http_append_and_dispatch, METH_FASTCALL, nullptr},
     {"serialize_and_write_http", (PyCFunction)(void(*)(void))CoreApp_serialize_and_write_http, METH_FASTCALL, nullptr},
+    // Direct-write for async endpoints — serializes + writes to fd, no PyBytes alloc
+    {"write_async_result", (PyCFunction)(void(*)(void))CoreApp_write_async_result, METH_FASTCALL, nullptr},
     // Returns complete HTTP response as single PyBytes (no transport calls)
     {"build_response", (PyCFunction)(void(*)(void))CoreApp_build_response, METH_FASTCALL, nullptr},
     // Unified type dispatch + serialization — handles dict/list/Response/Pydantic, returns None for StreamingResponse

@@ -145,6 +145,11 @@ class _WsFastChannel:
         """Get next frame — called from endpoint coroutine."""
         buf = self._buffer
         if buf:
+            # Clear stale done waiter — happens when C++ resolved it last tick
+            # but this coroutine hasn't run yet to create a new one.
+            w = self._waiter
+            if w is not None and w.done():
+                self._waiter = None
             item = buf.popleft()  # O(1) instead of O(N) list.pop(0)
             pt = type(item[1])
             plen = len(item[1]) if pt is bytes or pt is str or pt is bytearray else 0
@@ -293,9 +298,25 @@ _500_RESP = (
 # ── Type cache (initialized at import time) ──────────────────────────────────
 
 try:
-    from fastapi._core_bridge import InlineResult as _InlineResult
+    from fastapi._core_bridge import (
+        InlineResult as _InlineResult,
+        encode_to_json_bytes as _encode_to_json_bytes,
+    )
 except ImportError:
     _InlineResult = None
+    _encode_to_json_bytes = None
+
+# ── App-level exception handler registry (set once at server start) ──────────
+_app_exc_handlers: dict = {}
+_app_status_handlers: dict = {}
+
+
+def _set_app_exception_handlers(exc_handlers: dict, status_handlers: dict) -> None:
+    """Register app exception handlers once at server start for async dispatch."""
+    global _app_exc_handlers, _app_status_handlers
+    _app_exc_handlers = exc_handlers
+    _app_status_handlers = status_handlers
+
 
 # ── Pydantic validation (initialized at import time) ─────────────────────────
 
@@ -404,6 +425,7 @@ class CppWebSocket:
         "_last_received_json",
         "_pending_sends", "_flush_scheduled",
         "_close_waiter", "_metrics",
+        "__weakref__",  # required for WsConnectionGroup WeakSet membership
     )
 
     def __init__(
@@ -481,11 +503,11 @@ class CppWebSocket:
         except Exception:
             logger.debug("WS close frame write failed", exc_info=True)
             return
-        # Wait for peer close response (graceful handshake)
+        # Wait for peer close response (graceful handshake, max 2s)
         try:
             close_wait = self._loop.create_future()
             self._close_waiter = close_wait
-            await asyncio.wait_for(close_wait, timeout=5.0)
+            await asyncio.wait_for(close_wait, timeout=2.0)
         except (asyncio.TimeoutError, Exception):
             pass
         finally:
@@ -546,7 +568,7 @@ class CppWebSocket:
         # Echo auto-detection: if sending exactly what was received, switch handler
         # Single match triggers — false positive cost is zero (echo handler is correct)
         if _ws_handle_echo_direct is not None and self._echo_detect_count >= 0:
-            if self._last_received is not None and data == self._last_received:
+            if self._last_received is not None and (data is self._last_received or data == self._last_received):
                 self._echo_detect_count += 1
                 if self._echo_detect_count >= 1:
                     proto = self._protocol
@@ -971,6 +993,59 @@ async def _drive_coro(coro: Any, first_yield: Any) -> Any:
             return e.value
 
 
+async def _write_chunked_streaming(transport: Any, raw: Any) -> None:
+    """Write a StreamingResponse via chunked transfer encoding.
+
+    Single implementation shared by all async handlers — eliminates
+    code duplication and reduces instruction cache pressure.
+    Supports both async and sync body iterators.
+    """
+    status = getattr(raw, 'status_code', 200)
+    headers_list = getattr(raw, '_raw_headers', None) or getattr(raw, 'raw_headers', [])
+    if not headers_list and hasattr(raw, 'headers'):
+        headers_list = list(raw.headers.items())
+    prefix = _STREAMING_STATUS_LINES.get(status)
+    if prefix is not None:
+        buf = bytearray(prefix)
+    else:
+        phrase = _STATUS_PHRASES.get(status, "")
+        buf = bytearray(f"HTTP/1.1 {status} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
+    hdr_parts: list = []
+    for hname, hvalue in headers_list:
+        if isinstance(hname, str):
+            hname = hname.encode("latin-1")
+        if isinstance(hvalue, str):
+            hvalue = hvalue.encode("latin-1")
+        hdr_parts.append(hname)
+        hdr_parts.append(b": ")
+        hdr_parts.append(hvalue)
+        hdr_parts.append(b"\r\n")
+    hdr_parts.append(b"\r\n")
+    buf.extend(b"".join(hdr_parts))
+    transport.write(bytes(buf))
+    body_iter = raw.body_iterator
+    try:
+        if hasattr(body_iter, '__aiter__'):
+            async for chunk in body_iter:
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8")
+                if chunk:
+                    transport.write(_build_chunked_frame(chunk))
+        else:
+            for chunk in body_iter:
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8")
+                if chunk:
+                    transport.write(_build_chunked_frame(chunk))
+        transport.write(b"0\r\n\r\n")
+    except Exception:
+        logger.warning("Streaming response error", exc_info=True)
+        try:
+            transport.write(b"0\r\n\r\n")
+        except Exception:
+            logger.debug("Failed to write chunked trailer", exc_info=True)
+
+
 class CppHttpProtocol(asyncio.Protocol):
     """Per-connection HTTP/1.1 protocol with WebSocket upgrade support.
 
@@ -985,7 +1060,9 @@ class CppHttpProtocol(asyncio.Protocol):
         - Pydantic routes: C++ returns InlineResult for validation
     """
 
-    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_active_count", "_sock_fd")
+    __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_pending_tasks_discard", "_active_count", "_sock_fd", "_core_batch", "_core_append_dispatch",
+             "_loop_create_task",  # cached bound method — saves LOAD_ATTR per async create_task
+             "_ka_needs_reset")    # flag: True = received data, sweep updates _ka_deadline lazily
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -1008,7 +1085,17 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_pong_received = True
         self._ws_task: asyncio.Task | None = None  # TS-2: tracked for cancellation
         self._pending_tasks: set | None = None  # Lazy — only allocated for async endpoints
+        self._pending_tasks_discard = None  # Cached set.discard — avoids bound-method alloc per async req
         self._sock_fd = -1  # Raw socket FD for direct C++ HTTP writes (TCP_QUICKACK re-armed in C++)
+        # Cache handle_http_batch_v2 bound method — avoids PyMethodObject alloc per data_received call
+        _v2 = getattr(core_app, 'handle_http_batch_v2', None)
+        self._core_batch = _v2 if _v2 is not None else core_app.handle_http_batch
+        # Fused append+dispatch: eliminates one Python→C++ call per data_received
+        self._core_append_dispatch = getattr(core_app, 'handle_http_append_and_dispatch', None)
+        # Cache create_task — avoids dict lookup on loop object per async endpoint dispatch
+        self._loop_create_task = loop.create_task
+        # Flag: set True on data_received; sweep updates _ka_deadline lazily (no _monotonic() per req)
+        self._ka_needs_reset = False
 
     def _reinit(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
                 ka_timeout: float, connections_set: set | None) -> None:
@@ -1021,6 +1108,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._transport = None
         _http_buf_clear(self._http_buf)  # reuse existing C++ buffer
         self._ka_deadline = 0.0
+        self._ka_needs_reset = False
         self._wr_paused = False
         self._ws_handler = None
         self._ws = None
@@ -1032,6 +1120,11 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_task = None
         if self._pending_tasks is not None:
             self._pending_tasks.clear()  # reuse existing set's backing store
+        _v2 = getattr(core_app, 'handle_http_batch_v2', None)
+        self._core_batch = _v2 if _v2 is not None else core_app.handle_http_batch
+        self._core_append_dispatch = getattr(core_app, 'handle_http_append_and_dispatch', None)
+        self._loop_create_task = loop.create_task
+        self._ka_needs_reset = False
 
     # ── Connection lifecycle ─────────────────────────────────────────────
 
@@ -1049,12 +1142,17 @@ class CppHttpProtocol(asyncio.Protocol):
                 self._sock_fd = sock.fileno()
             except (OSError, AttributeError):
                 self._sock_fd = -1
-        # Workers handle fewer connections each — use smaller buffers to reduce
-        # memory pressure (833 conns × 64KB = 52MB vs 833 × 128KB = 106MB)
-        if _WORKER_MODE:
-            transport.set_write_buffer_limits(high=65536, low=16384)  # type: ignore[union-attr]
-        else:
-            transport.set_write_buffer_limits(high=131072, low=32768)  # type: ignore[union-attr]
+        # Write buffer limits: 32KB high / 8KB low per connection.
+        # 100 conns × 32KB = 3.2MB vs previous 64/128KB = 6.4/12.8MB.
+        # asyncio only applies back-pressure after high-water — 32KB is
+        # still large enough for any single response body.
+        transport.set_write_buffer_limits(high=32768, low=8192)  # type: ignore[union-attr]
+        # SO_BUSY_POLL: spin-poll for 100μs before sleeping — reduces scheduler wake-up jitter
+        # at high connection counts. No-op on non-Linux / WSL without the option.
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, 46, 100)  # SO_BUSY_POLL = 46 (Linux)
+        except (OSError, AttributeError):
+            pass
         if _RATE_LIMIT_ENABLED:
             peername = transport.get_extra_info("peername")
             if peername:
@@ -1078,6 +1176,10 @@ class CppHttpProtocol(asyncio.Protocol):
             _server_ws_metrics.active_connections = max(0, _server_ws_metrics.active_connections - 1)
         if self._ws and not self._ws._closed:
             self._ws._closed = True
+            # Resolve server-initiated close waiter if TCP drops mid-handshake
+            cw = self._ws._close_waiter
+            if cw is not None and not cw.done():
+                cw.set_result(None)
             self._ws.feed_frame(0x8, b"")  # signal close to waiting receives
         _http_buf_clear(self._http_buf)
         # Return ring buffer to pool for reuse (or reset and drop)
@@ -1104,7 +1206,7 @@ class CppHttpProtocol(asyncio.Protocol):
     # ── Data handling — the hot path ─────────────────────────────────────
 
     def data_received(self, data: bytes) -> None:
-        # TCP_QUICKACK re-armed inside C++ handle_http() via platform_rearm_quickack(sock_fd).
+        # TCP_QUICKACK re-armed inside C++ handle_http_append_and_dispatch() / handle_http_batch_v2().
 
         # WebSocket frame handling (after upgrade) — dispatch to mode-specific handler
         if self._ws is not None:
@@ -1112,70 +1214,93 @@ class CppHttpProtocol(asyncio.Protocol):
             self._ws_handler(data)
             return
 
-        # Append data into C++ HttpConnectionBuffer
         http_buf = self._http_buf
-        if not _http_buf_append(http_buf, data):
-            # Buffer overflow — send 413 and close
-            transport = self._transport
-            if transport and not transport.is_closing():
-                transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-                transport.close()
-            return
 
-        # Back-pressure: buffer data but don't process until writes resume
+        # Back-pressure: buffer data only, don't dispatch until writes resume
         if self._wr_paused:
+            if not _http_buf_append(http_buf, data):
+                transport = self._transport
+                if transport and not transport.is_closing():
+                    transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    transport.close()
             return
 
         transport = self._transport
-        if not transport or transport.is_closing():
+        if transport is None:
             return
 
-        core = self._core
-        offset = 0
-        IR = _InlineResult
         sock_fd = self._sock_fd
 
-        while True:
-            result = core.handle_http_batch(http_buf, transport, offset, sock_fd)
-
-            # ── Fast-path: zero-alloc return protocol ──────────────────
-            # True  = all sync requests done (last_consumed = total consumed)
-            # None  = need more data (nothing consumed)
-            # False = parse error (400 already sent)
-            # tuple = async/WS/Pydantic; tuple[0] = total consumed incl. sync prefix
-            if result is True:
-                offset += core.last_consumed
-                break  # batch consumed everything — no more requests this call
-
+        # ── Get first result: fused append+dispatch if available, else separate ────────────
+        core_ad = self._core_append_dispatch
+        if core_ad is not None:
+            # Single C++ call: appends data + dispatches
+            # Returns: 0=done+empty, 1=done+partial, -1=need-more, -2=error, -3=overflow, tuple=async
+            result = core_ad(http_buf, data, transport, sock_fd)
+            if type(result) is int:
+                if result >= 0:
+                    if result == 0:
+                        self._ka_needs_reset = True  # lazy: sweep updates actual deadline
+                    return  # sync batch done (0=empty, 1=partial pending)
+                if result == -1:
+                    return  # need more data
+                if result == -2:
+                    transport.close()
+                    _http_buf_clear(http_buf)
+                    return
+                # -3: buffer overflow
+                if not transport.is_closing():
+                    transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    transport.close()
+                return
+            # tuple: PYGEN_NEXT / async / WebSocket — fall through to dispatch loop
+        else:
+            # Fallback: separate append then dispatch (older .so)
+            if not _http_buf_append(http_buf, data):
+                if not transport.is_closing():
+                    transport.write(b"HTTP/1.1 413 Payload Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    transport.close()
+                return
+            core_batch = self._core_batch
+            result = core_batch(http_buf, transport, sock_fd)
+            if type(result) is int:
+                if result >= 0:
+                    if result == 0:
+                        self._ka_needs_reset = True  # lazy: sweep updates actual deadline
+                    return
+                if result == -2:
+                    transport.close()
+                    _http_buf_clear(http_buf)
+                return  # -1 or other negative: need more or error
             if result is None:
-                break  # need more data
-
+                return
             if result is False:
-                # Parse error (400 sent by C++)
                 transport.close()
                 _http_buf_clear(http_buf)
                 return
 
-            # ── Async / WS / Pydantic dispatch (tuple return) ─────────
-            # Loop continues: handle async work then re-enter batch for remainder.
-            consumed, result_obj = result
-            offset += consumed
+        # ── Dispatch loop — handles async/ws/stream/async_di/InlineResult ────────────────
+        # Reached only when result is a tuple or InlineResult (not int/None/False).
+        # IR and core_batch loaded here — not on the sync hot path.
+        IR = _InlineResult
+        core_batch = self._core_batch
+        create_task = self._loop_create_task
+        while True:
+            r_type = type(result)
 
-            if isinstance(result_obj, tuple):
-                tag = result_obj[0]
+            if r_type is tuple:
+                tag = result[0]
                 if tag == "ws":
-                    rlen = len(result_obj)
-                    ws_path = result_obj[3] if rlen >= 4 else "/"
-                    ws_headers = result_obj[4] if rlen >= 5 else []
-                    ws_query_string = result_obj[5] if rlen >= 6 else b""
-                    endpoint, path_params = result_obj[1], result_obj[2]
+                    rlen = len(result)
+                    ws_path = result[3] if rlen >= 4 else "/"
+                    ws_headers = result[4] if rlen >= 5 else []
+                    ws_query_string = result[5] if rlen >= 6 else b""
+                    endpoint, path_params = result[1], result[2]
                     if endpoint is None:
-                        if transport and not transport.is_closing():
+                        if not transport.is_closing():
                             transport.close()
                         _http_buf_clear(http_buf)
                         return
-                    # Consume bytes processed so far before switching to WS
-                    _http_buf_consume(http_buf, offset)
                     ws = CppWebSocket(
                         transport, self._loop,
                         path=ws_path, path_params=path_params,
@@ -1202,9 +1327,9 @@ class CppHttpProtocol(asyncio.Protocol):
                         self._ws_ring_buf = _ws_ring_buffer_create()
                     self._ws_handler = self._handle_ws_frames
                     self._start_ws_heartbeat()
-                    self._ws_task = self._loop.create_task(
+                    self._ws_task = create_task(
                         self._handle_websocket(endpoint, path_params))
-                    # Remaining buffer data (if any) is WebSocket frames
+                    # Any remaining bytes are WebSocket frames that arrived with the upgrade
                     remaining_mv = _http_buf_get_view(http_buf)
                     remaining = bytes(remaining_mv) if remaining_mv is not None else b""
                     if remaining_mv is not None:
@@ -1215,58 +1340,78 @@ class CppHttpProtocol(asyncio.Protocol):
                     return  # connection is now WebSocket
 
                 elif tag == "async":
-                    _, coro, first_yield, status_code, keep_alive = result_obj
+                    _, coro, first_yield, status_code, keep_alive = result
                     if first_yield is not None:
                         try:
                             first_yield._asyncio_future_blocking = False
                         except AttributeError:
                             pass
-                    task = self._loop.create_task(
+                    task = create_task(
                         self._handle_async(coro, first_yield, status_code, keep_alive))
-                    pt = self._pending_tasks
-                    if pt is None:
-                        pt = self._pending_tasks = set()
-                    task.add_done_callback(pt.discard)
-                    pt.add(task)
+                    if not task.done():
+                        pt = self._pending_tasks
+                        if pt is None:
+                            pt = self._pending_tasks = set()
+                            self._pending_tasks_discard = pt.discard
+                        pt.add(task)
+                        task.add_done_callback(self._pending_tasks_discard)
 
                 elif tag == "stream":
-                    _, raw_resp, status_code, keep_alive = result_obj
-                    task = self._loop.create_task(
+                    _, raw_resp, status_code, keep_alive = result
+                    task = create_task(
                         self._handle_stream(raw_resp, status_code, keep_alive))
-                    pt = self._pending_tasks
-                    if pt is None:
-                        pt = self._pending_tasks = set()
-                    task.add_done_callback(pt.discard)
-                    pt.add(task)
+                    if not task.done():
+                        pt = self._pending_tasks
+                        if pt is None:
+                            pt = self._pending_tasks = set()
+                            self._pending_tasks_discard = pt.discard
+                        pt.add(task)
+                        task.add_done_callback(self._pending_tasks_discard)
 
                 elif tag == "async_di":
-                    _, di_coro, first_yield, endpoint, kwargs, sc, ka = result_obj
-                    # first_yield may be None (asyncio.sleep(0) in Python 3.12+ yields None)
+                    _, di_coro, first_yield, endpoint, kwargs, sc, ka = result
                     if first_yield is not None:
                         try:
                             first_yield._asyncio_future_blocking = False
                         except AttributeError:
                             pass
-                    task = self._loop.create_task(
+                    task = create_task(
                         self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka))
+                    if not task.done():
+                        pt = self._pending_tasks
+                        if pt is None:
+                            pt = self._pending_tasks = set()
+                            self._pending_tasks_discard = pt.discard
+                        pt.add(task)
+                        task.add_done_callback(self._pending_tasks_discard)
+
+            elif IR and r_type is IR:
+                task = create_task(self._handle_pydantic(result))
+                if not task.done():
                     pt = self._pending_tasks
                     if pt is None:
                         pt = self._pending_tasks = set()
-                    task.add_done_callback(pt.discard)
+                        self._pending_tasks_discard = pt.discard
                     pt.add(task)
+                    task.add_done_callback(self._pending_tasks_discard)
 
-            elif IR and type(result_obj) is IR:
-                task = self._loop.create_task(self._handle_pydantic(result_obj))
-                pt = self._pending_tasks
-                if pt is None:
-                    pt = self._pending_tasks = set()
-                task.add_done_callback(pt.discard)
-                pt.add(task)
-
-        if offset > 0:
-            _http_buf_consume(http_buf, offset)
-        if _http_buf_len(http_buf) == 0:
-            self._ka_reset()
+            # Fetch next pipelined request (most often returns int = no more data)
+            result = core_batch(http_buf, transport, sock_fd)
+            if type(result) is int:
+                if result == 0:
+                    self._ka_needs_reset = True  # lazy ka deadline update
+                elif result == -2:
+                    transport.close()
+                    _http_buf_clear(http_buf)
+                # -1 (need more), 1 (partial), or other negative: just return
+                return
+            if result is None:
+                return
+            if result is False:
+                transport.close()
+                _http_buf_clear(http_buf)
+                return
+            # else: another tuple/InlineResult — continue dispatching
 
     # ── WebSocket frame handling ─────────────────────────────────────────
 
@@ -1291,6 +1436,19 @@ class CppHttpProtocol(asyncio.Protocol):
             if pong_bytes is not None and transport and not transport.is_closing():
                 transport.write(pong_bytes)
             if close_payload is not None:
+                ws = self._ws
+                if ws and not ws._closed:
+                    ws._closed = True
+                    ws.client_state = WebSocketState.DISCONNECTED
+                    # Resolve server-initiated close waiter (client ACK'd our close frame)
+                    cw = ws._close_waiter
+                    if cw is not None and not cw.done():
+                        cw.set_result(None)
+                    if frames_fed == 0:
+                        # Protocol error path: C++ did NOT feed close to channel.
+                        # Wake up any pending receive so the endpoint gets
+                        # WebSocketDisconnect(code=1002) instead of hanging forever.
+                        ws.feed_frame(0x8, close_payload)
                 _send_close_response(transport, close_payload)
                 if self._ws_ring_buf is not None and _ws_ring_buffer_reset is not None:
                     _ws_ring_buffer_reset(self._ws_ring_buf)
@@ -1316,6 +1474,11 @@ class CppHttpProtocol(asyncio.Protocol):
         if close_payload is not None:
             ws = self._ws
             if ws:
+                ws._closed = True
+                ws.client_state = WebSocketState.DISCONNECTED
+                cw = ws._close_waiter
+                if cw is not None and not cw.done():
+                    cw.set_result(None)
                 ws.feed_frame(0x8, close_payload)
                 _send_close_response(transport, close_payload)
 
@@ -1331,6 +1494,11 @@ class CppHttpProtocol(asyncio.Protocol):
         elif isinstance(status, tuple) and status[0] == 2:
             ws = self._ws
             if ws:
+                ws._closed = True
+                ws.client_state = WebSocketState.DISCONNECTED
+                cw = ws._close_waiter
+                if cw is not None and not cw.done():
+                    cw.set_result(None)
                 ws.feed_frame(0x8, status[1])
                 _send_close_response(self._transport, status[1])
 
@@ -1432,18 +1600,68 @@ class CppHttpProtocol(asyncio.Protocol):
             _build_response_from_parts(sc, headers_list, body, keep_alive)
         )
 
-    def _write_error(self, exc: Exception, keep_alive: bool) -> None:
-        """Write error response — handles HTTPException with proper status code."""
-        if self._transport and not self._transport.is_closing():
-            from fastapi.exceptions import HTTPException
-            if isinstance(exc, HTTPException):
-                detail = exc.detail if isinstance(exc.detail, (dict, list)) else {"detail": exc.detail}
+    async def _dispatch_exception(self, exc: Exception, keep_alive: bool) -> None:
+        """Dispatch exception to registered app handler or built-in error response (OPT-A)."""
+        transport = self._transport
+        if not transport or transport.is_closing():
+            return
+        from fastapi.exceptions import HTTPException, RequestValidationError
+        from fastapi._concurrency import is_async_callable, run_in_threadpool
+        # Walk MRO to find a registered app-level exception handler
+        handler = None
+        for cls in type(exc).__mro__:
+            if cls in _app_exc_handlers:
+                handler = _app_exc_handlers[cls]
+                break
+        if handler is None and isinstance(exc, HTTPException):
+            handler = _app_status_handlers.get(exc.status_code)
+        if handler is not None:
+            try:
+                if is_async_callable(handler):
+                    resp = await handler(None, exc)
+                else:
+                    resp = await run_in_threadpool(handler, None, exc)
+                if resp is not None and transport and not transport.is_closing():
+                    resp_bytes = self._core.build_response_from_any(
+                        resp, getattr(resp, 'status_code', 500), keep_alive)
+                    if resp_bytes is not None:
+                        transport.write(resp_bytes)
+            except Exception:
+                pass
+            return
+        # Built-in fallbacks
+        if isinstance(exc, HTTPException):
+            detail = exc.detail if isinstance(exc.detail, (dict, list)) else {"detail": exc.detail}
+            exc_headers = getattr(exc, 'headers', None)
+            if exc_headers:
+                from fastapi._json_utils import json_dumps
+                body = json_dumps(detail)
+                hdrs: list = [(b"content-type", b"application/json")]
+                for k, v in exc_headers.items():
+                    hdrs.append((
+                        k.encode("latin-1") if isinstance(k, str) else k,
+                        v.encode("latin-1") if isinstance(v, str) else v,
+                    ))
+                transport.write(
+                    _build_response_from_parts(exc.status_code, hdrs, body, keep_alive)
+                )
+            else:
                 resp = self._core.build_response(detail, exc.status_code, keep_alive)
                 if resp:
-                    self._transport.write(resp)
-                    return
-            logger.exception("Unhandled exception in endpoint")
-            self._transport.write(_500_RESP)
+                    transport.write(resp)
+            return
+        if isinstance(exc, RequestValidationError):
+            try:
+                from fastapi._core_bridge import serialize_error_response
+                body = serialize_error_response(exc.errors())
+                transport.write(
+                    _build_response_from_parts(422, [(b"content-type", b"application/json")], body, keep_alive)
+                )
+                return
+            except Exception:
+                pass
+        logger.exception("Unhandled exception in endpoint")
+        transport.write(_500_RESP)
 
     # ── Async endpoint dispatch ──────────────────────────────────────────
 
@@ -1459,60 +1677,26 @@ class CppHttpProtocol(asyncio.Protocol):
             raw = await _drive_coro(coro, first_yield)
             transport = self._transport
             if transport and not transport.is_closing():
-                # OPT-3.4: Unified type dispatch in C++ — handles dict/list/str/int/float/
-                # bool/None/Response objects/Pydantic models in a single C function call.
-                # Returns None only for StreamingResponse (needs Python async iteration).
-                resp = self._core.build_response_from_any(raw, status_code, keep_alive)
-                if resp is not None:
-                    transport.write(resp)
+                # OPT-D: plain dict/list fast path — skips full type dispatch
+                _raw_type = type(raw)
+                if _raw_type is dict or _raw_type is list:
+                    # OPT-write_async_result: zero-alloc direct fd write (no PyBytes)
+                    self._core.write_async_result(raw, transport, status_code, keep_alive, self._sock_fd)
+                    # dicts/lists never have BackgroundTasks — skip getattr
                 else:
-                    # StreamingResponse — chunked transfer encoding (must stay in Python)
-                    status = getattr(raw, 'status_code', 200)
-                    headers_list = []
-                    if hasattr(raw, 'raw_headers'):
-                        headers_list = raw.raw_headers
-                    elif hasattr(raw, 'headers'):
-                        for k, v in raw.headers.items():
-                            headers_list.append((k, v))
-                    prefix = _STREAMING_STATUS_LINES.get(status)
-                    if prefix is not None:
-                        buf = bytearray(prefix)
+                    # OPT-3.4: Unified C++ type dispatch (str/int/bool/None/Pydantic/Response)
+                    # Returns None only for StreamingResponse (needs Python async iteration).
+                    resp = self._core.build_response_from_any(raw, status_code, keep_alive)
+                    if resp is not None:
+                        transport.write(resp)
                     else:
-                        phrase = _STATUS_PHRASES.get(status, "")
-                        buf = bytearray(f"HTTP/1.1 {status} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
-                    # Build headers with join (single alloc vs 4N extend calls)
-                    hdr_parts = []
-                    for name, value in headers_list:
-                        if isinstance(name, str):
-                            name = name.encode("latin-1")
-                        if isinstance(value, str):
-                            value = value.encode("latin-1")
-                        hdr_parts.append(name)
-                        hdr_parts.append(b": ")
-                        hdr_parts.append(value)
-                        hdr_parts.append(b"\r\n")
-                    hdr_parts.append(b"\r\n")
-                    buf.extend(b"".join(hdr_parts))
-                    transport.write(bytes(buf))
-                    try:
-                        async for chunk in raw.body_iterator:
-                            if isinstance(chunk, str):
-                                chunk = chunk.encode("utf-8")
-                            if chunk:
-                                transport.write(_build_chunked_frame(chunk))
-                        transport.write(b"0\r\n\r\n")
-                    except Exception:
-                        logger.warning("Streaming response error", exc_info=True)
-                        try:
-                            transport.write(b"0\r\n\r\n")
-                        except Exception:
-                            logger.debug("Failed to write chunked trailer", exc_info=True)
-            # BackgroundTasks support
-            background = getattr(raw, 'background', None)
-            if background is not None:
-                await background()
+                        await _write_chunked_streaming(transport, raw)
+                    # BackgroundTasks: only non-primitive returns can have them
+                    background = getattr(raw, 'background', None)
+                    if background is not None:
+                        await background()
         except Exception as exc:
-            self._write_error(exc, keep_alive)
+            await self._dispatch_exception(exc, keep_alive)
         finally:
             self._core.record_request_end()
 
@@ -1556,54 +1740,12 @@ class CppHttpProtocol(asyncio.Protocol):
                     transport.write(http_bytes)
                 else:
                     # StreamingResponse — chunked transfer encoding
-                    st = getattr(raw, 'status_code', 200)
-                    headers_list = getattr(raw, '_raw_headers', None) or getattr(raw, 'raw_headers', [])
-                    prefix = _STREAMING_STATUS_LINES.get(st)
-                    if prefix is not None:
-                        buf = bytearray(prefix)
-                    else:
-                        phrase = _STATUS_PHRASES.get(st, "")
-                        buf = bytearray(f"HTTP/1.1 {st} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
-                    hdr_parts = []
-                    for hname, hvalue in headers_list:
-                        if isinstance(hname, str):
-                            hname = hname.encode("latin-1")
-                        if isinstance(hvalue, str):
-                            hvalue = hvalue.encode("latin-1")
-                        hdr_parts.append(hname)
-                        hdr_parts.append(b": ")
-                        hdr_parts.append(hvalue)
-                        hdr_parts.append(b"\r\n")
-                    hdr_parts.append(b"\r\n")
-                    buf.extend(b"".join(hdr_parts))
-                    transport.write(bytes(buf))
-                    body_iter = raw.body_iterator
-                    is_async_iter = hasattr(body_iter, '__aiter__')
-                    try:
-                        if is_async_iter:
-                            async for chunk in body_iter:
-                                if isinstance(chunk, str):
-                                    chunk = chunk.encode("utf-8")
-                                if chunk:
-                                    transport.write(_build_chunked_frame(chunk))
-                        else:
-                            for chunk in body_iter:
-                                if isinstance(chunk, str):
-                                    chunk = chunk.encode("utf-8")
-                                if chunk:
-                                    transport.write(_build_chunked_frame(chunk))
-                        transport.write(b"0\r\n\r\n")
-                    except Exception:
-                        logger.warning("Streaming response error", exc_info=True)
-                        try:
-                            transport.write(b"0\r\n\r\n")
-                        except Exception:
-                            logger.debug("Failed to write chunked trailer", exc_info=True)
+                    await _write_chunked_streaming(transport, raw)
             background = getattr(raw, 'background', None)
             if background is not None:
                 await background()
         except Exception as exc:
-            self._write_error(exc, keep_alive)
+            await self._dispatch_exception(exc, keep_alive)
         finally:
             self._core.record_request_end()
 
@@ -1619,8 +1761,31 @@ class CppHttpProtocol(asyncio.Protocol):
         try:
             # Resume DI coroutine with the yielded awaitable
             solved = await _drive_coro(di_coro, first_yield)
+            # SolvedDependency namedtuple: (values, errors, background_tasks, response, dep_cache)
+            di_bg_tasks = None
+            _di_extra_headers: list = []
             if isinstance(solved, tuple) and len(solved) >= 2:
                 values, errors = solved[0], solved[1]
+                # Extract background_tasks (index 2) accumulated during DI resolution.
+                # Sub-dependencies that receive BackgroundTasks and add tasks are captured here.
+                if len(solved) >= 3:
+                    di_bg_tasks = solved[2]
+                # OPT-B: Extract sub_response (index 3) — headers set by sub-deps that
+                # declare `response: Response` and append headers to it.
+                if len(solved) >= 4 and solved[3] is not None:
+                    _sub = solved[3]
+                    _raw_hdrs = getattr(_sub, 'raw_headers', None)
+                    if _raw_hdrs:
+                        _di_extra_headers = list(_raw_hdrs)
+                    elif hasattr(_sub, 'headers'):
+                        for _k, _v in _sub.headers.items():
+                            _di_extra_headers.append((
+                                _k.encode("latin-1") if isinstance(_k, str) else _k,
+                                _v.encode("latin-1") if isinstance(_v, str) else _v,
+                            ))
+                    _di_sc = getattr(_sub, 'status_code', None)
+                    if _di_sc is not None and _di_sc != 200:
+                        status_code = _di_sc
                 if errors:
                     if self._transport and not self._transport.is_closing():
                         resp = self._core.build_response(
@@ -1646,50 +1811,23 @@ class CppHttpProtocol(asyncio.Protocol):
                     _raw = endpoint(**kwargs)
                 transport = self._transport
                 if transport and not transport.is_closing():
-                    resp = self._core.build_response_from_any(_raw, status_code, keep_alive)
-                    if resp is not None:
-                        transport.write(resp)
-                    else:
-                        # StreamingResponse — chunked transfer encoding
-                        _status = getattr(_raw, 'status_code', 200)
-                        _headers_list = []
-                        if hasattr(_raw, 'raw_headers'):
-                            _headers_list = _raw.raw_headers
-                        elif hasattr(_raw, 'headers'):
-                            for k, v in _raw.headers.items():
-                                _headers_list.append((k, v))
-                        _prefix = _STREAMING_STATUS_LINES.get(_status)
-                        if _prefix is not None:
-                            _buf = bytearray(_prefix)
+                    _raw_type = type(_raw)
+                    if _raw_type is dict or _raw_type is list:
+                        if _di_extra_headers and _encode_to_json_bytes is not None:
+                            # OPT-B: merge sub-dep response headers into JSON response
+                            _body = _encode_to_json_bytes(_raw)
+                            _merged = [(b"content-type", b"application/json")] + _di_extra_headers
+                            transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
                         else:
-                            _phrase = _STATUS_PHRASES.get(_status, "")
-                            _buf = bytearray(f"HTTP/1.1 {_status} {_phrase}\r\ntransfer-encoding: chunked\r\n".encode())
-                        _hdr_parts = []
-                        for _hname, _hvalue in _headers_list:
-                            if isinstance(_hname, str):
-                                _hname = _hname.encode("latin-1")
-                            if isinstance(_hvalue, str):
-                                _hvalue = _hvalue.encode("latin-1")
-                            _hdr_parts.append(_hname)
-                            _hdr_parts.append(b": ")
-                            _hdr_parts.append(_hvalue)
-                            _hdr_parts.append(b"\r\n")
-                        _hdr_parts.append(b"\r\n")
-                        _buf.extend(b"".join(_hdr_parts))
-                        transport.write(bytes(_buf))
-                        try:
-                            async for chunk in _raw.body_iterator:
-                                if isinstance(chunk, str):
-                                    chunk = chunk.encode("utf-8")
-                                if chunk:
-                                    transport.write(_build_chunked_frame(chunk))
-                            transport.write(b"0\r\n\r\n")
-                        except Exception:
-                            logger.warning("Streaming response error", exc_info=True)
-                            try:
-                                transport.write(b"0\r\n\r\n")
-                            except Exception:
-                                logger.debug("Failed to write chunked trailer", exc_info=True)
+                            # OPT-write_async_result: zero-alloc direct fd write
+                            self._core.write_async_result(_raw, transport, status_code, keep_alive, self._sock_fd)
+                    else:
+                        resp = self._core.build_response_from_any(_raw, status_code, keep_alive)
+                        if resp is not None:
+                            transport.write(resp)
+                        else:
+                            # StreamingResponse — chunked transfer encoding
+                            await _write_chunked_streaming(transport, _raw)
                 return _raw
 
             if exit_stack is not None:
@@ -1699,12 +1837,16 @@ class CppHttpProtocol(asyncio.Protocol):
                     raw = await _call_and_write()
             else:
                 raw = await _call_and_write()
-            # BackgroundTasks support
+            # BackgroundTasks support: run tasks from Response.background (direct return)
             background = getattr(raw, 'background', None)
             if background is not None:
                 await background()
+            # Run background tasks accumulated during DI resolution (e.g. from sub-deps
+            # that receive `background_tasks: BackgroundTasks` and add tasks).
+            if di_bg_tasks is not None and getattr(di_bg_tasks, 'tasks', None):
+                await di_bg_tasks()
         except Exception as exc:
-            self._write_error(exc, keep_alive)
+            await self._dispatch_exception(exc, keep_alive)
         finally:
             self._core.record_request_end()
 
@@ -1732,56 +1874,24 @@ class CppHttpProtocol(asyncio.Protocol):
             status_code = int(ir.status_code) if ir.status_code else 200
             transport = self._transport
             if transport and not transport.is_closing():
-                resp = self._core.build_response_from_any(raw, status_code, True)
-                if resp is not None:
-                    transport.write(resp)
+                _raw_type = type(raw)
+                if _raw_type is dict or _raw_type is list:
+                    _resp = self._core.build_response(raw, status_code, True)
+                    if _resp:
+                        transport.write(_resp)
+                    # dicts/lists never carry BackgroundTasks
                 else:
-                    # StreamingResponse — chunked transfer encoding
-                    status = getattr(raw, 'status_code', status_code)
-                    headers_list = []
-                    if hasattr(raw, 'raw_headers'):
-                        headers_list = raw.raw_headers
-                    elif hasattr(raw, 'headers'):
-                        for k, v in raw.headers.items():
-                            headers_list.append((k, v))
-                    prefix = _STREAMING_STATUS_LINES.get(status)
-                    if prefix is not None:
-                        buf = bytearray(prefix)
+                    resp = self._core.build_response_from_any(raw, status_code, True)
+                    if resp is not None:
+                        transport.write(resp)
                     else:
-                        phrase = _STATUS_PHRASES.get(status, "")
-                        buf = bytearray(f"HTTP/1.1 {status} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
-                    hdr_parts = []
-                    for hname, hvalue in headers_list:
-                        if isinstance(hname, str):
-                            hname = hname.encode("latin-1")
-                        if isinstance(hvalue, str):
-                            hvalue = hvalue.encode("latin-1")
-                        hdr_parts.append(hname)
-                        hdr_parts.append(b": ")
-                        hdr_parts.append(hvalue)
-                        hdr_parts.append(b"\r\n")
-                    hdr_parts.append(b"\r\n")
-                    buf.extend(b"".join(hdr_parts))
-                    transport.write(bytes(buf))
-                    try:
-                        async for chunk in raw.body_iterator:
-                            if isinstance(chunk, str):
-                                chunk = chunk.encode("utf-8")
-                            if chunk:
-                                transport.write(_build_chunked_frame(chunk))
-                        transport.write(b"0\r\n\r\n")
-                    except Exception:
-                        logger.warning("Streaming response error", exc_info=True)
-                        try:
-                            transport.write(b"0\r\n\r\n")
-                        except Exception:
-                            logger.debug("Failed to write chunked trailer", exc_info=True)
-            # BackgroundTasks support
-            background = getattr(raw, 'background', None)
-            if background is not None:
-                await background()
+                        await _write_chunked_streaming(transport, raw)
+                    # BackgroundTasks support
+                    background = getattr(raw, 'background', None)
+                    if background is not None:
+                        await background()
         except Exception as exc:
-            self._write_error(exc, True)
+            await self._dispatch_exception(exc, True)
         finally:
             self._core.record_request_end()
 
@@ -1799,9 +1909,14 @@ class CppHttpProtocol(asyncio.Protocol):
             ws_param = _ws_sig_cache.get(ep_id, "websocket")
             kwargs[ws_param] = ws
             await endpoint(**kwargs)
+        except WebSocketDisconnect:
+            # Normal lifecycle — client closed the connection. Not an error.
+            pass
         except Exception as exc:
             ws._metrics.errors += 1
-            raise
+            # Log but do NOT re-raise: _ws_task is never awaited by anyone, so
+            # re-raising produces asyncio's "Task exception was never retrieved".
+            logger.error("Unhandled exception in WebSocket endpoint", exc_info=True)
         finally:
             try:
                 if not ws._closed:
@@ -1848,6 +1963,12 @@ async def _create_server(
     if hasattr(app, "_sync_routes_to_core"):
         app._sync_routes_to_core()
 
+    # OPT-A: Register app exception handlers for async dispatch paths
+    _set_app_exception_handlers(
+        dict(getattr(app, 'exception_handlers', {})),
+        {k: v for k, v in getattr(app, 'exception_handlers', {}).items() if isinstance(k, int)},
+    )
+
     # Sync CORS config to C++ core
     if hasattr(core_app, "configure_cors"):
         for mw in getattr(app, "user_middleware", []):
@@ -1893,7 +2014,7 @@ async def _create_server(
     active_count = [0]  # mutable int via list — avoids nonlocal overhead
 
     # Pre-populate protocol pool to avoid __init__ on first connections
-    _PREWARM = 512
+    _PREWARM = int(os.environ.get("FASTAPI_PREWARM_CONNS", "512"))
     for _ in range(_PREWARM if _MAX_CONNECTIONS == 0 else min(_PREWARM, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
@@ -2051,23 +2172,49 @@ async def run_server(
     except (ImportError, ValueError, OSError):
         pass
 
-    # Sysctl tuning — skip in worker mode (parent already ran it)
+    # Sysctl tuning — skip in worker mode (parent already ran it).
+    # Write directly to /proc/sys/ — no subprocess fork+exec overhead.
     if not _is_worker:
-        try:
-            import subprocess
-            for _cmd in (
-                "sysctl -w net.core.somaxconn=65535",
-                "sysctl -w net.ipv4.tcp_max_syn_backlog=65535",
-                "sysctl -w net.core.netdev_max_backlog=65535",
-                "sysctl -w net.ipv4.tcp_tw_reuse=1",
-                "sysctl -w net.ipv4.tcp_fin_timeout=10",
-                # "sysctl -w net.ipv4.tcp_fastopen=3",    # TFO client+server: saves 1 RTT on reconnect
-            ):
-                subprocess.run(_cmd.split(), capture_output=True, timeout=2)
-        except Exception:
-            pass
+        _sysctl_map = {
+            "/proc/sys/net/core/somaxconn": "65535",
+            "/proc/sys/net/ipv4/tcp_max_syn_backlog": "65535",
+            "/proc/sys/net/core/netdev_max_backlog": "65535",
+            "/proc/sys/net/ipv4/tcp_tw_reuse": "1",
+            "/proc/sys/net/ipv4/tcp_fin_timeout": "10",
+        }
+        for _path, _val in _sysctl_map.items():
+            try:
+                with open(_path, "w") as _f:
+                    _f.write(_val)
+            except OSError:
+                pass  # not root / not Linux — silently ignore
 
     loop = asyncio.get_event_loop()
+
+    # ── Scheduler tuning: reduce OS preemption jitter (Linux/WSL2 only) ──────────
+    # Root cause of benchmark variance: Hyper-V vCPU steal time + Linux CFS jitter.
+    # SCHED_FIFO prevents CFS from preempting this process for any normal-priority
+    # task, and reduces Hyper-V VMBus interrupt frequency (fewer context switches
+    # → fewer hypervisor interventions). Requires root / CAP_SYS_NICE.
+    if sys.platform != "win32":
+        _cpu_aff = os.environ.get("FASTAPI_CPU_AFFINITY", "")
+        if _cpu_aff:
+            try:
+                _cpuset = {int(x.strip()) for x in _cpu_aff.split(",") if x.strip()}
+                os.sched_setaffinity(0, _cpuset)
+            except (AttributeError, ValueError, OSError, PermissionError):
+                pass
+        _rt_prio = int(os.environ.get("FASTAPI_RT_PRIORITY", "0"))
+        if _rt_prio > 0:
+            try:
+                import ctypes as _ctypes
+                _libc = _ctypes.CDLL("libc.so.6", use_errno=True)
+                class _SchedParam(_ctypes.Structure):
+                    _fields_ = [("sched_priority", _ctypes.c_int)]
+                # SCHED_FIFO=1: real-time FIFO, no time-slicing, not preemptable by CFS
+                _libc.sched_setscheduler(0, 1, _ctypes.byref(_SchedParam(_rt_prio)))
+            except Exception:
+                pass  # non-root, non-Linux, or WSL2 without privilege — silently skip
 
     # ── GC control: disable automatic collection to prevent multi-second gen2 pauses
     # Default thresholds (700/10/10) cause gen2 scans of ALL live objects.
@@ -2166,9 +2313,10 @@ async def run_server(
     active_count = [0]  # mutable int via list — faster than len(set) in hot path
 
     # Pre-populate protocol pool BEFORE gc.freeze() so protocols are frozen
-    # Workers use smaller pool — high per-worker counts waste memory (COW page faults)
-    # With N workers sharing C connections, each worker handles ~C/N connections.
-    _PREWARM = 128 if _is_worker else 512
+    # Protocol pool prewarm: enough to absorb the first burst without allocation.
+    # Keep it modest — each protocol holds a 16 KB C++ http_buf.
+    # 64 covers typical burst; OS will handle the rest via pool reuse.
+    _PREWARM = int(os.environ.get("FASTAPI_PREWARM_CONNS", "64" if _is_worker else "128"))
     for _ in range(_PREWARM if _MAX_CONNECTIONS == 0 else min(_PREWARM, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
@@ -2181,7 +2329,8 @@ async def run_server(
     # For sync endpoints, gen0 is nearly empty → scan < 0.1ms.
     gc.collect(0)
     gc.collect(1)
-    gc.collect(2)   # full collection — clean up any startup cycles
+    # Skip gen2 — scanning all pydantic/starlette objects at startup costs 50-100ms.
+    # CPython refcounting handles short-lived objects; gen2 cycles are rare at startup.
     gc.freeze()     # move ALL survivors to permanent generation
 
     # ── GC strategy: freeze + refcounting, no runtime collections ───────
@@ -2203,18 +2352,19 @@ async def run_server(
         if active_count[0] == 0:
             gc.collect(1)
         else:
-            # Safety net: prevent unbounded memory growth from cyclic user code
+            # Safety net: prevent unbounded memory growth from cyclic user code.
+            # RSS threshold lowered to 50 MB (was 100 MB) for faster detection.
             try:
                 import resource as _resource
                 current_rss = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
-                if _last_rss[0] > 0 and current_rss > _last_rss[0] + 100_000:
+                if _last_rss[0] > 0 and current_rss > _last_rss[0] + 50_000:
                     gc.collect(0)  # fast gen0 only (<1ms)
                 _last_rss[0] = current_rss
             except (ImportError, AttributeError):
                 pass
-        loop.call_later(600.0, _gc_maintenance)
+        loop.call_later(30.0, _gc_maintenance)  # 30s instead of 600s — catches cycles sooner
 
-    loop.call_later(600.0, _gc_maintenance)
+    loop.call_later(30.0, _gc_maintenance)
 
     def _protocol_factory() -> asyncio.Protocol:
         # Optional connection limit (disabled by default — no cap like uWS/Fiber/Bun)
@@ -2315,7 +2465,11 @@ async def run_server(
             now = _monotonic()
             batch: list = []
             for p in active_connections:
-                if p._ka_deadline > 0 and now > p._ka_deadline:
+                # Lazy ka_deadline update: connection was active since last sweep
+                if p._ka_needs_reset:
+                    p._ka_needs_reset = False
+                    p._ka_deadline = now + p._ka_timeout
+                elif p._ka_deadline > 0 and now > p._ka_deadline:
                     batch.append(p)
                 if len(batch) >= 100:
                     for proto in batch:

@@ -1,54 +1,10 @@
-
-
-import time
-import os
+import asyncio
 import sys
-from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi._ws_groups import WsConnectionGroup
 
 app = FastAPI()
-
-
-def _fmt(bytes_val: int) -> str:
-    """Format bytes into a human-readable string."""
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(bytes_val) < 1024:
-            return f"{bytes_val:.2f} {unit}"
-        bytes_val /= 1024
-    return f"{bytes_val:.2f} TB"
-
-
-def _mem(b: int) -> dict:
-    """Return a {bytes, human} pair matching the Go MemoryInfo struct."""
-    return {"bytes": b, "human": _fmt(b)}
-
-
-def _read_proc_self() -> dict:
-    """Read /proc/self/status for VmRSS, VmSize etc. (Linux)."""
-    info = {}
-    try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith(("VmRSS:", "VmSize:", "VmData:")):
-                    key, val = line.split(":", 1)
-                    info[key] = int(val.strip().split()[0]) * 1024  # kB → bytes
-    except (FileNotFoundError, PermissionError):
-        pass
-    return info
-
-
-def _humanize_time(seconds: float) -> str:
-    """Turn elapsed seconds into a human-friendly string."""
-    if seconds < 60:
-        return f"{int(seconds)} seconds ago"
-    elif seconds < 3600:
-        return f"{int(seconds // 60)} minutes ago"
-    elif seconds < 86400:
-        return f"{int(seconds // 3600)} hours ago"
-    else:
-        return f"{int(seconds // 86400)} days ago"
-
 
 @app.get("/")
 def root():
@@ -59,33 +15,35 @@ async def root():
     return {"message": "Hello World"}
 
 
-@app.get("/hlth")
-def health():
-    elapsed = time.time() - _startup_time
-
-    # Memory via /proc
-    current_alloc = peak_alloc = 0
-    proc = _read_proc_self()
-    rss = proc.get("VmRSS", 0)
-    vms = proc.get("VmSize", 0)
-    heap_data = proc.get("VmData", 0)
-
-    return {
-        "uptime": _humanize_time(elapsed),
-        "version": sys.version.split()[0],
-        "environment": os.getenv("APP_ENV", "development"),
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "memory": {
-            "alloc": _mem(current_alloc),
-            "total_alloc": _mem(peak_alloc),
-            "sys": _mem(vms),
-            "heap_alloc": _mem(rss),
-            "heap_sys": _mem(heap_data),
-        },
-    }
+# Use WsConnectionGroup: builds frame once, broadcasts to all — O(1) frame build
+# regardless of room size. WeakSet auto-cleans disconnected connections.
+_groups = WsConnectionGroup()
 
 
-_startup_time = time.time()
+async def broadcast_message(room_id: str, message: str):
+    await asyncio.sleep(2)  # simulate heavy work
+    _groups.broadcast_text(room_id, f"[background] {message}")
+
+
+@app.post("/send/{room_id}")
+async def send_message(room_id: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(broadcast_message, room_id, "Hello from background task")
+    return {"status": "task started"}
+
+@app.websocket("/ws/{room_id}")
+async def websocket_room(websocket: WebSocket, room_id: str):
+    await websocket.accept()
+
+    _groups.join(websocket, room_id)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            _groups.broadcast_text(room_id, data)
+
+    except WebSocketDisconnect:
+        _groups.leave(websocket, room_id)
+
 
 if __name__ == "__main__":
     import sys
@@ -98,5 +56,5 @@ if __name__ == "__main__":
             host = arg.split("=")[1]
     
     print(f"🚀 Starting server at {host}:{port}...")
-    app.run(host=host, port=port, workers=2)
+    app.run(host=host, port=port, workers=1)
     

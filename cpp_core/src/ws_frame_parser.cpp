@@ -135,9 +135,12 @@ int ws_parse_frame(const uint8_t* data, size_t len, WsFrame* out,
     out->opcode = (WsOpcode)(data[0] & 0x0F);
     out->masked = (data[1] & 0x80) != 0;
 
-    // Validate RSV bits — must be 0 unless extensions are negotiated (RFC 6455 §5.2)
+    // Validate RSV bits — must be 0 unless extensions are negotiated (RFC 6455 §5.2).
+    // Strip silently rather than closing: some browsers/tools send RSV1=1 for
+    // permessage-deflate even when the server didn't accept the extension.
+    // A hard 1002 close is worse UX than accepting a slightly garbled frame.
     if (out->rsv != 0 && !allow_rsv) {
-        return -4;
+        out->rsv = 0;  // strip RSV bits, continue
     }
 
     // Validate opcode — reject reserved opcodes (RFC 6455 §5.2)
