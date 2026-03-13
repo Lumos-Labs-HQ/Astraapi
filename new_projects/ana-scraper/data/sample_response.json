@@ -1,0 +1,57 @@
+{
+  "task_id": 1,
+  "scraped_at": "2026-03-13T06:00:00Z",
+  "search_params": {
+    "goDeptAirpCd": "HND",
+    "goArrAirpCd": "CTS",
+    "goDeptDt": "20260415",
+    "rtnDeptDt": "20260418",
+    "adultCnt": 2,
+    "districtCd": "02",
+    "checkInDt": "20260415",
+    "checkOutDt": "20260418"
+  },
+  "hotels": [
+    {
+      "faclCd": "01234",
+      "faclNam": "フェアフィールド・バイ・マリオット札幌",
+      "adrs": "北海道札幌市中央区南４条東１丁目",
+      "lat": 43.058,
+      "lng": 141.359,
+      "starRating": 4,
+      "reviewScore": 4.2,
+      "planList": [
+        {
+          "planCd": "EARLY21",
+          "planNam": "早トク２１（２１日前予約プラン）／素泊まり",
+          "price": {
+            "pricePerKind": [
+              {
+                "kindTypeCd": "001",
+                "kindTypeNam": "大人",
+                "kindTypePrice": 48600
+              }
+            ],
+            "priceWithAir": {
+              "priceWithAir": 97200
+            }
+          },
+          "flightInfo": {
+            "goFlightNo": "NH061",
+            "goDepTime": "0630",
+            "goArvTime": "0820",
+            "goDepAirpCd": "HND",
+            "goArvAirpCd": "CTS",
+            "rtFlightNo": "NH066",
+            "rtDepTime": "1940",
+            "rtArvTime": "2125",
+            "rtDepAirpCd": "CTS",
+            "rtArvAirpCd": "HND"
+          }
+        }
+      ]
+    }
+  ],
+  "total_elements": 47,
+  "total_pages": 3
+}

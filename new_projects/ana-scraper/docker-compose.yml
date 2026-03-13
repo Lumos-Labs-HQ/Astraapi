@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: ana_mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: ana_scraper
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  scraper:
+    build: .
+    container_name: ana_scraper
+    restart: "no"          # run once; use --all or --task-id as needed
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGO_URI: mongodb://mongodb:27017/ana_scraper
+      DB_NAME: ana_scraper
+      EXCEL_PATH: /app/config/tasks.xlsx
+      REQUEST_DELAY: "1.5"
+    volumes:
+      - ./config:/app/config      # mount Excel task file here
+      - ./logs:/app/logs          # log output
+    command: ["python", "-m", "scraper.main", "--all"]
+
+volumes:
+  mongo_data:
+    driver: local
