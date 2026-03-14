@@ -1,0 +1,12 @@
+{
+  "type": "RecoverableError",
+  "code": "MERR0003",
+  "errors": [
+    {
+      "message": "必ず航空便（往復）をお選びください。 (SERR0034)"
+    },
+    {
+      "message": "航空便の往復期間内で１つ以上の宿泊施設をお選びください。 (SERR0035)"
+    }
+  ]
+}

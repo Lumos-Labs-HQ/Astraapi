@@ -34,14 +34,36 @@ Product: ANA Travelers Dynamic Package (航空券＋宿泊 = Flight + Hotel)
 https://www.ana.co.jp/domtour/booking/csm/search/DSCP0390/
 ```
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `init` | GET | Initialize session, get CSRF token |
-| `searchHotel` | POST | Get hotel list + prices (**main data**) |
-| `getCriteriaList` | POST | Get filter counts |
-| `searchFlight` | POST | Get flight options |
+| Endpoint | Method | Content-Type | Purpose |
+|----------|--------|-------------|---|
+| `init` | GET | — | Initialize session cookies + CSRF token |
+| `searchFlight` | POST | `application/x-www-form-urlencoded` | Get available flights (go/return) |
+| `getCriteriaList` | POST | `application/json` | **Sets flight selection in server session (required before searchHotel)** |
+| `searchHotel` | POST | `application/json` | Get hotel list + prices (**main data**, paginated) |
 
 ---
+
+## ✅ Confirmed 4-Step API Flow (working as of 2026-03-14)
+
+```
+1. GET  /init             → query params (airports, dates, pax, area)
+                           → session cookies + CSRF token
+
+2. POST /searchFlight     → form-urlencoded (ALL fields required)
+                           → go_flights[], rt_flights[] with cartKeyDpAir
+
+3. POST /getCriteriaList  → JSON with goFlightInfo + rtnFlightInfo (full flight objects)
+                           → registers flight selection in server session
+                           → REQUIRED: without this, searchHotel returns SERR0034
+
+4. POST /searchHotel      → JSON (blank flight fields — server uses session)
+                           → returns ALL hotels + plans + prices (paginated)
+```
+
+**WHY step 3 is needed:** The ANA server validates that a flight was selected before
+allowing hotel search. `getCriteriaList` is the endpoint that sets this server-side
+session state when the user clicks a flight radio button in the browser.
+
 
 ## 🔐 Authentication Flow
 
@@ -339,18 +361,19 @@ Header row: **Row 21** | Data rows: **Row 22+** | Active tasks: **~303**
 ## 📝 TODO Checklist
 
 - [x] Reverse-engineer ANA API endpoints
-- [x] Build `ana_client.py` with session + pagination
+- [x] Discover correct 4-step flow (init→searchFlight→getCriteriaList→searchHotel)
+- [x] Build `ana_client.py` with correct 4-step session + pagination
 - [x] Build `mongo_client.py` with upsert logic
-- [x] Build `task_loader.py` — updated to read ACTUAL Excel columns
+- [x] Build `task_loader.py` — reads ACTUAL Excel columns (incl. col I for biweekly/150)
 - [x] Build `main.py` task runner with CLI args
 - [x] Create `test_run.py` for dry-run testing
-- [ ] Verify end-to-end: `python test_run.py --task-id 1 --dry-run`
-- [ ] Verify pagination works across all pages
-- [ ] Test MongoDB save: `python test_run.py --task-id 1`
-- [ ] Write `Dockerfile` (done skeleton)
-- [ ] Write `docker-compose.yml` (done skeleton)
-- [ ] Write `README.md`
-- [ ] Create sample MongoDB JSON output
+- [x] Verify end-to-end: HND→ISG 20260315 → 263 hotels, 27 pages ✅
+- [x] Fix `searchFlight` 400 error (missing airport/pax/child fields)
+- [x] Fix `searchHotel` SERR0034 error (missing getCriteriaList flight-set step)
+- [x] Excel col I: '隔週' → is_biweekly, '150' → date_range_days=150
+- [ ] Verify MongoDB save end-to-end
+- [ ] Test with `docker compose up -d`
+- [ ] Verify sample CSV output format matches MongoDB schema
 
 ---
 
@@ -358,5 +381,5 @@ Header row: **Row 21** | Data rows: **Row 22+** | Active tasks: **~303**
 
 | Date | What was done |
 |------|--------------|
-| 2026-03-13 | Reverse-engineered API via browser network capture. Found 4 endpoints. Confirmed CSRF flow via HTML meta tags. Confirmed session cookie mechanism. Confirmed JSON response structure with `faclNam`, `planList`, `priceWithAir`, `flightInfo`. |
-| 2026-03-14 | Received client Excel + CSV sample. Mapped all 23 Excel columns. Rewrote `task_loader.py` (header=row21, data=row22+). Created `test_run.py`. Verified 303 tasks load correctly. |
+| 2026-03-13 | Reversed-engineered API via browser capture. Found CSRF flow, pagination. |
+| 2026-03-14 | Received client Excel + CSV. Mapped all columns. Fixed searchFlight 400 (missing pax fields). Discovered getCriteriaList as flight-selection setter. Full 4-step flow confirmed: 263 hotels / 27 pages for HND→ISG. |

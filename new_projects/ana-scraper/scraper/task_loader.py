@@ -87,7 +87,8 @@ class SearchTask:
     region_code: str = ""
     adults: int = 2
     nights: int = 2
-    date_range_days: int = 90
+    date_range_days: int = 90   # 90 (default) or 150 (from col I)
+    is_biweekly: bool = False   # True when col I contains '隔週'
     run_weekday: int = 5        # 0=Mon … 6=Sun
     hotel_name: Optional[str] = None
     go_flight_filter: str = "最安値"    # "ANA" | "最安値"
@@ -224,6 +225,7 @@ def load_tasks(excel_path: Optional[str] = None) -> List[SearchTask]:
                 continue
 
             run_weekday_raw = row[3]    # Col D
+            exec_week_raw  = str(row[8] or "").strip()   # Col I  ('隔週' | '150' | '')
             destination = str(row[7] or "").strip()   # Col H
             pattern = str(row[10] or "").strip()       # Col K
             dept_airport = str(row[11] or "").strip()  # Col L
@@ -247,6 +249,10 @@ def load_tasks(excel_path: Optional[str] = None) -> List[SearchTask]:
             nights = int(nights_raw) if isinstance(nights_raw, (int, float)) else 2
             adults = int(adults_raw) if isinstance(adults_raw, (int, float)) else 2
 
+            # Col I: '150' → 150-day fetch; '隔週' → biweekly run; both can coexist
+            is_biweekly     = "隔週" in exec_week_raw
+            date_range_days = 150 if "150" in exec_week_raw else 90
+
             task = SearchTask(
                 task_id=task_id,
                 dept_airport=dept_airport,
@@ -256,7 +262,8 @@ def load_tasks(excel_path: Optional[str] = None) -> List[SearchTask]:
                 pattern=pattern,
                 adults=adults,
                 nights=nights,
-                date_range_days=90,
+                date_range_days=date_range_days,
+                is_biweekly=is_biweekly,
                 run_weekday=_parse_weekday(run_weekday_raw),
                 hotel_name=hotel_name,
                 go_flight_filter=go_filter,

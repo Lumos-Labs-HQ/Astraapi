@@ -1,0 +1,2271 @@
+{
+  "pageInfo": {
+    "page": {
+      "content": [
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "10963",
+          "faclCd": "01",
+          "faclNam": "フェアフィールド・バイ・マリオット札幌",
+          "zipCd": "060-0054",
+          "adrs": "北海道札幌市中央区南４条東１丁目",
+          "latitude": "43.0571829494",
+          "longitude": "141.358627297",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1096301/images/1096301_23219122_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1096301/images/1096301_23219122_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1096301/images/1096301_23219122_l.jpg",
+              "picUrlO": null,
+              "picNam": "外観（2024AWARDロゴ入り）",
+              "picComment": "南側から見たホテル外観　創成川沿いの便利な立地です"
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1096301/images/1096301_00169_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1096301/images/1096301_00169_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1096301/images/1096301_00169_l.jpg",
+              "picUrlO": null,
+              "picNam": "バスルーム一例",
+              "picComment": "大きめのバスタブが特徴のユニットバスタイプ。足を延ばしてゆっくりご入浴いただけます。"
+            }
+          ],
+          "accessInfoList": [
+            "新千歳空港よりホテルまで車で所要時間約60分",
+            "地下鉄南北線すすきの駅3番出口より徒歩で所要時間約5分"
+          ],
+          "tripadvisor": {
+            "rate": 3.8,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/4.0-36734-4.png",
+            "count": 400,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1096301"
+          },
+          "dpSupplierFlg": "1",
+          "recommendFlg": "0",
+          "planCont": 57,
+          "planList": [
+            {
+              "cartKeyDpHotel": "10963:01:K03H00:N043:002:20",
+              "planCd": "K03H00",
+              "productCd": "20",
+              "planNam": "早トク２１（２１日前予約プラン）／素泊まり",
+              "forRsvNam": "禁煙　洋室　ダブル　＜全室禁煙＞※添い寝幼児を含めて2名定員の客室です",
+              "stockLimitsNo": "N043",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "18  ",
+              "maxRoomArea": "18  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "1",
+              "plusMile": 500,
+              "mileRsvTermFrom": "20260121",
+              "mileRsvTermTo": "20260212",
+              "dispMileRsvTerm": "予約対象期間:2026年01月21日～2026年02月12日",
+              "mileStayTermFrom": "20260301",
+              "mileStayTermTo": "20260430",
+              "dispMileStayTerm": "宿泊対象期間:2026年03月01日～2026年04月30日",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 38800
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 77600
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 7,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10963&faclCd=01&planCd=K03H00&stockLimitsNo=N043&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10963:01:K03F00:N043:002:20",
+              "planCd": "K03F00",
+              "productCd": "20",
+              "planNam": "早トク７（７日前予約プラン）【素泊まり】",
+              "forRsvNam": "禁煙　洋室　ダブル　＜全室禁煙＞※添い寝幼児を含めて2名定員の客室です",
+              "stockLimitsNo": "N043",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "18  ",
+              "maxRoomArea": "18  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "1",
+              "plusMile": 500,
+              "mileRsvTermFrom": "20250313",
+              "mileRsvTermTo": "20250522",
+              "dispMileRsvTerm": "予約対象期間:2025年03月13日～2025年05月22日",
+              "mileStayTermFrom": "20250401",
+              "mileStayTermTo": "20250522",
+              "dispMileStayTerm": "宿泊対象期間:2025年04月01日～2025年05月22日",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 39000
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 78000
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 7,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10963&faclCd=01&planCd=K03F00&stockLimitsNo=N043&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10963:01:K02B00:N043:002:20",
+              "planCd": "K02B00",
+              "productCd": "20",
+              "planNam": "◆５００マイル◆ダイナミックパッケージ　プラスマイル付きプラン",
+              "forRsvNam": "禁煙　洋室　ダブル　＜全室禁煙＞※添い寝幼児を含めて2名定員の客室です",
+              "stockLimitsNo": "N043",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "18  ",
+              "maxRoomArea": "18  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "1",
+              "plusMile": 500,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 39600
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 79200
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 7,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10963&faclCd=01&planCd=K02B00&stockLimitsNo=N043&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=10963&faclCd=01&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "13759",
+          "faclCd": "00",
+          "faclNam": "ＨＡＫＯＤＡＴＥ　男爵倶楽部　ＨＯＴＥＬ＆ＲＥＳＯＲＴＳ",
+          "zipCd": "040-0064",
+          "adrs": "北海道函館市大手町２２－１０",
+          "latitude": "41.7712122246",
+          "longitude": "140.724699959",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1375900/images/1375900_00024_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1375900/images/1375900_00024_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1375900/images/1375900_00024_l.jpg",
+              "picUrlO": null,
+              "picNam": "エントランス（外観）",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1375900/images/1375900_00161_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1375900/images/1375900_00161_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1375900/images/1375900_00161_l.jpg",
+              "picUrlO": null,
+              "picNam": "ビューバス（一例）",
+              "picComment": "全室ビューバス仕様。大きな窓からはお外の景色もご覧いただけます。"
+            }
+          ],
+          "accessInfoList": [
+            "函館空港よりＪＲ函館駅までバスで所要時間約20分",
+            "ＪＲ函館駅より徒歩で所要時間約3分"
+          ],
+          "tripadvisor": {
+            "rate": 4.5,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/4.5-36734-4.png",
+            "count": 295,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1375900"
+          },
+          "dpSupplierFlg": "1",
+          "recommendFlg": "0",
+          "planCont": 93,
+          "planList": [
+            {
+              "cartKeyDpHotel": "13759:00:S0000R:#006:001:20",
+              "planCd": "S0000R",
+              "productCd": "20",
+              "planNam": "【早トク３０／食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　スタンダードツイン",
+              "stockLimitsNo": "#006",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": "41  ",
+              "maxRoomArea": "41  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 42700
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 85400
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 2,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=13759&faclCd=00&planCd=S0000R&stockLimitsNo=%23006&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "13759:00:S0000P:#006:001:20",
+              "planCd": "S0000P",
+              "productCd": "20",
+              "planNam": "【食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　スタンダードツイン",
+              "stockLimitsNo": "#006",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": "41  ",
+              "maxRoomArea": "41  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 43200
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 86400
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 2,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=13759&faclCd=00&planCd=S0000P&stockLimitsNo=%23006&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "13759:00:S0000Y:#006:001:20",
+              "planCd": "S0000Y",
+              "productCd": "20",
+              "planNam": "【５００マイル付／食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　スタンダードツイン",
+              "stockLimitsNo": "#006",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": "41  ",
+              "maxRoomArea": "41  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "1",
+              "plusMile": 500,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 43900
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 87800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 2,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=13759&faclCd=00&planCd=S0000Y&stockLimitsNo=%23006&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=13759&faclCd=00&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "20046",
+          "faclCd": "00",
+          "faclNam": "京王プレリアホテル札幌",
+          "zipCd": "060-0808",
+          "adrs": "北海道札幌市北区北８条西４丁目１１番地１",
+          "latitude": "43.070263    ",
+          "longitude": "141.348246   ",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/2004600/images/2004600_00045_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/2004600/images/2004600_00045_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/2004600/images/2004600_00045_l.jpg",
+              "picUrlO": null,
+              "picNam": "京王プレリアホテル札幌【外観】",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/2004600/images/2004600_00108_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/2004600/images/2004600_00108_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/2004600/images/2004600_00108_l.jpg",
+              "picUrlO": null,
+              "picNam": "２階大浴場",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/2004600/images/2004600_00105_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/2004600/images/2004600_00105_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/2004600/images/2004600_00105_l.jpg",
+              "picUrlO": null,
+              "picNam": "１階フロントカウンター",
+              "picComment": null
+            }
+          ],
+          "accessInfoList": [
+            "新千歳空港よりJR札幌駅まで電車で所要時間約37～40分",
+            "JR快速エアポート札幌駅より徒歩で所要時間約3分"
+          ],
+          "tripadvisor": {
+            "rate": 4.2,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/4.0-36734-4.png",
+            "count": 147,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=2004600"
+          },
+          "dpSupplierFlg": "1",
+          "recommendFlg": "0",
+          "planCont": 23,
+          "planList": [
+            {
+              "cartKeyDpHotel": "20046:00:K01M00:N006:002:20",
+              "planCd": "K01M00",
+              "productCd": "20",
+              "planNam": "【ＡＮＡ限定】お一人様大歓迎！ワンランク上のお部屋に泊まるご褒美プラン　素泊り",
+              "forRsvNam": "禁煙　洋室　ダブル　コンフォートダブル",
+              "stockLimitsNo": "N006",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "20  ",
+              "maxRoomArea": "20  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 41900
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 83800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 27,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=20046&faclCd=00&planCd=K01M00&stockLimitsNo=N006&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "20046:00:K00B00:N006:002:20",
+              "planCd": "K00B00",
+              "productCd": "20",
+              "planNam": "【ＡＮＡバーゲンプラン★素泊り】　札幌駅から徒歩３分！大浴場などの館内施設も充実！",
+              "forRsvNam": "禁煙　洋室　ダブル　コンフォートダブル",
+              "stockLimitsNo": "N006",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "20  ",
+              "maxRoomArea": "20  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 41900
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 83800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 27,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=20046&faclCd=00&planCd=K00B00&stockLimitsNo=N006&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "20046:00:K00500:N006:002:20",
+              "planCd": "K00500",
+              "productCd": "20",
+              "planNam": "【早トク２８★】　２８日前までの早期予約限定だからお得！★素泊り★",
+              "forRsvNam": "禁煙　洋室　ダブル　コンフォートダブル",
+              "stockLimitsNo": "N006",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "20  ",
+              "maxRoomArea": "20  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 42400
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 84800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 27,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=20046&faclCd=00&planCd=K00500&stockLimitsNo=N006&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=20046&faclCd=00&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "10749",
+          "faclCd": "01",
+          "faclNam": "イマジンホテル＆リゾート函館",
+          "zipCd": "042-0932",
+          "adrs": "北海道函館市湯川町３丁目１－１７",
+          "latitude": "41.7735489285",
+          "longitude": "140.790759365",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1074901/images/1074901_00161_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1074901/images/1074901_00161_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1074901/images/1074901_00161_l.jpg",
+              "picUrlO": null,
+              "picNam": null,
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1074901/images/1074901_00179_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1074901/images/1074901_00179_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1074901/images/1074901_00179_l.jpg",
+              "picUrlO": null,
+              "picNam": "【８階うすけしの湯‐露天風呂】",
+              "picComment": "【８階うすけしの湯‐露天風呂】空と海を間近に感じ、心が洗われるひとときをお過ごしいただけます"
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1074901/images/1074901_00164_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1074901/images/1074901_00164_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1074901/images/1074901_00164_l.jpg",
+              "picUrlO": null,
+              "picNam": null,
+              "picComment": null
+            }
+          ],
+          "accessInfoList": [
+            "函館空港よりホテルまで車で所要時間約10分",
+            "ＪＲ函館本線函館駅より車で所要時間約20分"
+          ],
+          "tripadvisor": {
+            "rate": 3.8,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/4.0-36734-4.png",
+            "count": 123,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1074901"
+          },
+          "dpSupplierFlg": "1",
+          "recommendFlg": "0",
+          "planCont": 64,
+          "planList": [
+            {
+              "cartKeyDpHotel": "10749:01:S0001F:#025:001:20",
+              "planCd": "S0001F",
+              "productCd": "20",
+              "planNam": "【早トク３０／食事なし】温泉プラン",
+              "forRsvNam": "禁煙　和室【シティービュー】ガイア館　バスなし・トイレ付き（シャワーブースのみ）",
+              "stockLimitsNo": "#025",
+              "usePreReqNo": "001",
+              "usePreReqNam": "2名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "01",
+              "roomtypeNam": "和室",
+              "minRoomArea": "10  ",
+              "maxRoomArea": "14  ",
+              "roomUnitFlg": "1",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 41800
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 83600
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 2,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10749&faclCd=01&planCd=S0001F&stockLimitsNo=%23025&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10749:01:S0001C:#025:001:20",
+              "planCd": "S0001C",
+              "productCd": "20",
+              "planNam": "【食事なし】温泉プラン",
+              "forRsvNam": "禁煙　和室【シティービュー】ガイア館　バスなし・トイレ付き（シャワーブースのみ）",
+              "stockLimitsNo": "#025",
+              "usePreReqNo": "001",
+              "usePreReqNam": "2名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "01",
+              "roomtypeNam": "和室",
+              "minRoomArea": "10  ",
+              "maxRoomArea": "14  ",
+              "roomUnitFlg": "1",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 42400
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 84800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 2,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10749&faclCd=01&planCd=S0001C&stockLimitsNo=%23025&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10749:01:S0001Q:#025:001:20",
+              "planCd": "S0001Q",
+              "productCd": "20",
+              "planNam": "【３００マイル付／食事なし】温泉プラン",
+              "forRsvNam": "禁煙　和室【シティービュー】ガイア館　バスなし・トイレ付き（シャワーブースのみ）",
+              "stockLimitsNo": "#025",
+              "usePreReqNo": "001",
+              "usePreReqNam": "2名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "01",
+              "roomtypeNam": "和室",
+              "minRoomArea": "10  ",
+              "maxRoomArea": "14  ",
+              "roomUnitFlg": "1",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "1",
+              "plusMile": 300,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 42800
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 85600
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 2,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10749&faclCd=01&planCd=S0001Q&stockLimitsNo=%23025&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=10749&faclCd=01&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "10005",
+          "faclCd": "00",
+          "faclNam": "ホテルグレイスリー札幌",
+          "zipCd": "060-0004",
+          "adrs": "北海道札幌市中央区北四条西４丁目１－８",
+          "latitude": "43.0663038126",
+          "longitude": "141.349400143",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1000500/images/1000500_89643369_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1000500/images/1000500_89643369_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1000500/images/1000500_89643369_l.jpg",
+              "picUrlO": null,
+              "picNam": "外観（2024AWARDロゴ入り）",
+              "picComment": null
+            }
+          ],
+          "accessInfoList": [
+            "新千歳空港よりホテルまで車で所要時間約60分",
+            "ＪＲ札幌駅より徒歩で所要時間約1分"
+          ],
+          "tripadvisor": {
+            "rate": 4.0,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/4.0-36734-4.png",
+            "count": 881,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1000500"
+          },
+          "dpSupplierFlg": "1",
+          "recommendFlg": "0",
+          "planCont": 116,
+          "planList": [
+            {
+              "cartKeyDpHotel": "10005:00:K08D00:N028:002:20",
+              "planCd": "K08D00",
+              "productCd": "20",
+              "planNam": "【スペシャルパック】［素泊まり］札幌駅徒歩１分＆地下街直結＋最大２１時間ステイ",
+              "forRsvNam": "禁煙　洋室　ダブル　【スタンダード】ダブル・15平米",
+              "stockLimitsNo": "N028",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "15  ",
+              "maxRoomArea": "15  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 39000
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 78000
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 1,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10005&faclCd=00&planCd=K08D00&stockLimitsNo=N028&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10005:00:S02L00:#010:001:20",
+              "planCd": "S02L00",
+              "productCd": "20",
+              "planNam": "【早トク３０／食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　ツイン",
+              "stockLimitsNo": "#010",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": null,
+              "maxRoomArea": null,
+              "roomUnitFlg": null,
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "1",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 39300
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 78600
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 11,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10005&faclCd=00&planCd=S02L00&stockLimitsNo=%23010&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10005:00:S000BQ:#010:001:20",
+              "planCd": "S000BQ",
+              "productCd": "20",
+              "planNam": "【食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　ツイン",
+              "stockLimitsNo": "#010",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": null,
+              "maxRoomArea": null,
+              "roomUnitFlg": null,
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "1",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 39800
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 79600
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 11,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10005&faclCd=00&planCd=S000BQ&stockLimitsNo=%23010&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=10005&faclCd=00&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "16398",
+          "faclCd": "00",
+          "faclNam": "ホテル京阪　札幌",
+          "zipCd": "060-0806",
+          "adrs": "北海道札幌市北区北六条西６丁目１－９",
+          "latitude": "43.0674808293",
+          "longitude": "141.346116162",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1639800/images/1639800_00085_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1639800/images/1639800_00085_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1639800/images/1639800_00085_l.jpg",
+              "picUrlO": null,
+              "picNam": "ホテル外観（正面入り口）",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1639800/images/1639800_00099_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1639800/images/1639800_00099_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1639800/images/1639800_00099_l.jpg",
+              "picUrlO": null,
+              "picNam": "大浴場",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1639800/images/1639800_00104_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1639800/images/1639800_00104_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1639800/images/1639800_00104_l.jpg",
+              "picUrlO": null,
+              "picNam": "セルフランドリー",
+              "picComment": "大浴場脱衣所にランドリーマシンを設置しております。"
+            }
+          ],
+          "accessInfoList": [
+            "新千歳空港よりホテルまで車で所要時間約60分",
+            "JR函館本線札幌駅西口より徒歩で所要時間約4分"
+          ],
+          "tripadvisor": {
+            "rate": 4.2,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/4.0-36734-4.png",
+            "count": 963,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1639800"
+          },
+          "dpSupplierFlg": "0",
+          "recommendFlg": "1",
+          "planCont": 110,
+          "planList": [
+            {
+              "cartKeyDpHotel": "16398:00:S0003P:#018:002:20",
+              "planCd": "S0003P",
+              "productCd": "20",
+              "planNam": "【早トク３０／食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　シングル　セミダブルベッド利用（ベッド幅１４０ｃｍ）　15平米",
+              "stockLimitsNo": "#018",
+              "usePreReqNo": "002",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "04",
+              "roomtypeNam": "洋室（シングル）",
+              "minRoomArea": null,
+              "maxRoomArea": null,
+              "roomUnitFlg": null,
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "1",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 38900
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 77800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 7,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=16398&faclCd=00&planCd=S0003P&stockLimitsNo=%23018&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "16398:00:K03F00:N022:001:20",
+              "planCd": "K03F00",
+              "productCd": "20",
+              "planNam": "早トク３０（３０日前予約プラン）（食事なし）",
+              "forRsvNam": "禁煙　洋室　セミダブル（2名）　15平米",
+              "stockLimitsNo": "N022",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "10",
+              "roomtypeNam": "洋室（セミダブル）",
+              "minRoomArea": "15  ",
+              "maxRoomArea": "15  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 39400
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 78800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 1,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=16398&faclCd=00&planCd=K03F00&stockLimitsNo=N022&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "16398:00:S0003P:#017:002:20",
+              "planCd": "S0003P",
+              "productCd": "20",
+              "planNam": "【早トク３０／食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　ツイン　16平米",
+              "stockLimitsNo": "#017",
+              "usePreReqNo": "002",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": null,
+              "maxRoomArea": null,
+              "roomUnitFlg": null,
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "1",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 39500
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 79000
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 2,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=16398&faclCd=00&planCd=S0003P&stockLimitsNo=%23017&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=16398&faclCd=00&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "10001",
+          "faclCd": "01",
+          "faclNam": "ＡＮＡクラウンプラザホテル札幌　ｂｙ　ＩＨＧ",
+          "zipCd": "060-0003",
+          "adrs": "北海道札幌市中央区北３条西１－２－９",
+          "latitude": "43.0656658814",
+          "longitude": "141.355154695",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1000101/images/1000101_63799528_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1000101/images/1000101_63799528_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1000101/images/1000101_63799528_l.jpg",
+              "picUrlO": null,
+              "picNam": "外観（2024AWARDロゴ入り）",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1000101/images/1000101_51215348_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1000101/images/1000101_51215348_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1000101/images/1000101_51215348_l.jpg",
+              "picUrlO": null,
+              "picNam": "デラックスタイプ　バスタブ",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1000101/images/1000101_28786889_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1000101/images/1000101_28786889_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1000101/images/1000101_28786889_l.jpg",
+              "picUrlO": null,
+              "picNam": "１Ｆメインロビー",
+              "picComment": null
+            }
+          ],
+          "accessInfoList": [
+            "新千歳空港よりホテルまで車で所要時間約60分",
+            "ＪＲ函館本線札幌駅より徒歩で所要時間約7分"
+          ],
+          "tripadvisor": {
+            "rate": 3.7,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/3.5-36734-4.png",
+            "count": 1214,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1000101"
+          },
+          "dpSupplierFlg": "0",
+          "recommendFlg": "1",
+          "planCont": 108,
+          "planList": [
+            {
+              "cartKeyDpHotel": "10001:01:K0DU00:N143:002:20",
+              "planCd": "K0DU00",
+              "productCd": "20",
+              "planNam": "☆１０００マイル☆ダイナミックパッケージ　プラスマイル付きプラン【食事なし】",
+              "forRsvNam": "禁煙　洋室　ツイン　スタンダード",
+              "stockLimitsNo": "N143",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": "21  ",
+              "maxRoomArea": "21  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "1",
+              "plusMile": 1000,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 40400
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 80800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 5,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10001&faclCd=01&planCd=K0DU00&stockLimitsNo=N143&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10001:01:S05502:#070:001:20",
+              "planCd": "S05502",
+              "productCd": "20",
+              "planNam": "【食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　ツイン",
+              "stockLimitsNo": "#070",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": null,
+              "maxRoomArea": null,
+              "roomUnitFlg": null,
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "1",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 40900
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 81800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 22,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10001&faclCd=01&planCd=S05502&stockLimitsNo=%23070&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10001:01:K0DU00:N107:002:20",
+              "planCd": "K0DU00",
+              "productCd": "20",
+              "planNam": "☆１０００マイル☆ダイナミックパッケージ　プラスマイル付きプラン【食事なし】",
+              "forRsvNam": "禁煙　洋室　ダブル　コンフォート",
+              "stockLimitsNo": "N107",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "21.2",
+              "maxRoomArea": "21.2",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "1",
+              "plusMile": 1000,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 41400
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 82800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 5,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10001&faclCd=01&planCd=K0DU00&stockLimitsNo=N107&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=10001&faclCd=01&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "10683",
+          "faclCd": "00",
+          "faclNam": "アパホテル＆リゾート〈札幌〉",
+          "zipCd": "005-0804",
+          "adrs": "北海道札幌市南区川沿四条２丁目",
+          "latitude": "42.9946431194",
+          "longitude": "141.33462747 ",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1068300/images/1068300_00093_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1068300/images/1068300_00093_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1068300/images/1068300_00093_l.jpg",
+              "picUrlO": null,
+              "picNam": "ホテル全景",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1068300/images/1068300_00113_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1068300/images/1068300_00113_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1068300/images/1068300_00113_l.jpg",
+              "picUrlO": null,
+              "picNam": "露天風呂",
+              "picComment": "粋美の湯ー満点風呂ー（露天風呂）"
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1068300/images/1068300_00160_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1068300/images/1068300_00160_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1068300/images/1068300_00160_l.jpg",
+              "picUrlO": null,
+              "picNam": "屋内プール「ＤＯＳＡＮＣＯ」",
+              "picComment": "屋内プール「ＤＯＳＡＮＣＯ」２０２４年７月２０日（土）新設オープン！"
+            }
+          ],
+          "accessInfoList": [
+            "新千歳空港よりホテルまで車で所要時間約70分",
+            "地下鉄南北線真駒内駅より車で所要時間約10分"
+          ],
+          "tripadvisor": {
+            "rate": 3.3,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/3.5-36734-4.png",
+            "count": 320,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1068300"
+          },
+          "dpSupplierFlg": "0",
+          "recommendFlg": "1",
+          "planCont": 46,
+          "planList": [
+            {
+              "cartKeyDpHotel": "10683:00:K01900:N010:001:20",
+              "planCd": "K01900",
+              "productCd": "20",
+              "planNam": "【素泊まり・事前決済限定】一秒チェックインにおすすめ！非接触一秒チェックイン体験プラン",
+              "forRsvNam": "喫煙可　洋室　ツイン　大浴殿＆露天＆サウナ付",
+              "stockLimitsNo": "N010",
+              "usePreReqNo": "001",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": "23  ",
+              "maxRoomArea": "23  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 38800
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 77600
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 116,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10683&faclCd=00&planCd=K01900&stockLimitsNo=N010&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10683:00:K01900:N009:001:20",
+              "planCd": "K01900",
+              "productCd": "20",
+              "planNam": "【素泊まり・事前決済限定】一秒チェックインにおすすめ！非接触一秒チェックイン体験プラン",
+              "forRsvNam": "禁煙　洋室　ツイン　大浴殿＆露天＆サウナ付",
+              "stockLimitsNo": "N009",
+              "usePreReqNo": "001",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": "23  ",
+              "maxRoomArea": "23  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 38800
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 77600
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 377,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10683&faclCd=00&planCd=K01900&stockLimitsNo=N009&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10683:00:K01700:N009:001:20",
+              "planCd": "K01700",
+              "productCd": "20",
+              "planNam": "【素泊まり】サウナ・露天風呂付き大浴殿・屋内プール完備【駐車場無料】",
+              "forRsvNam": "禁煙　洋室　ツイン　大浴殿＆露天＆サウナ付",
+              "stockLimitsNo": "N009",
+              "usePreReqNo": "001",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": "23  ",
+              "maxRoomArea": "23  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 38900
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 77800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 377,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10683&faclCd=00&planCd=K01700&stockLimitsNo=N009&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=10683&faclCd=00&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "14115",
+          "faclCd": "00",
+          "faclNam": "ラビスタ函館ベイ（共立リゾート）",
+          "zipCd": "040-0065",
+          "adrs": "北海道函館市豊川町１２－６",
+          "latitude": "41.7670322857",
+          "longitude": "140.71978006 ",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1411500/images/1411500_00135_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1411500/images/1411500_00135_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1411500/images/1411500_00135_l.jpg",
+              "picUrlO": null,
+              "picNam": "外観（夜）",
+              "picComment": null
+            }
+          ],
+          "accessInfoList": [
+            "函館空港よりベイエリア前までバスで所要時間約30分",
+            "ＪＲ函館本線函館駅より徒歩で所要時間約15分"
+          ],
+          "tripadvisor": {
+            "rate": 4.3,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/4.5-36734-4.png",
+            "count": 1946,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1411500"
+          },
+          "dpSupplierFlg": "0",
+          "recommendFlg": "0",
+          "planCont": 25,
+          "planList": [
+            {
+              "cartKeyDpHotel": "14115:00:S00168:#042:001:20",
+              "planCd": "S00168",
+              "productCd": "20",
+              "planNam": "【食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　ツイン　シャワーブースのみ",
+              "stockLimitsNo": "#042",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": "※バスなし・シャワーブースのみのお部屋となります。",
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": null,
+              "maxRoomArea": null,
+              "roomUnitFlg": null,
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 45700
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 91400
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 8,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=14115&faclCd=00&planCd=S00168&stockLimitsNo=%23042&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "14115:00:S00168:#040:001:20",
+              "planCd": "S00168",
+              "productCd": "20",
+              "planNam": "【食事なし】シティプラン",
+              "forRsvNam": "禁煙　洋室　シングル　シャワーブースのみ",
+              "stockLimitsNo": "#040",
+              "usePreReqNo": "001",
+              "usePreReqNam": "１名１室利用",
+              "usePreReqDtl": "※バスなし・シャワーブースのみのお部屋となります。",
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 1,
+              "numPTo": 1,
+              "roomtypeCd": "04",
+              "roomtypeNam": "洋室（シングル）",
+              "minRoomArea": null,
+              "maxRoomArea": null,
+              "roomUnitFlg": null,
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 46800
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 93600
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 7,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 2,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=14115&faclCd=00&planCd=S00168&stockLimitsNo=%23040&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "14115:00:S00167:#042:001:20",
+              "planCd": "S00167",
+              "productCd": "20",
+              "planNam": "【朝食付き】シティプラン",
+              "forRsvNam": "禁煙　洋室　ツイン　シャワーブースのみ",
+              "stockLimitsNo": "#042",
+              "usePreReqNo": "001",
+              "usePreReqNam": "２名１室利用",
+              "usePreReqDtl": "※バスなし・シャワーブースのみのお部屋となります。",
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": "室",
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "05",
+              "roomtypeNam": "洋室（ツイン）",
+              "minRoomArea": null,
+              "maxRoomArea": null,
+              "roomUnitFlg": null,
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "朝食付",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 47900
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 95800
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 8,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=14115&faclCd=00&planCd=S00167&stockLimitsNo=%23042&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=001&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=14115&faclCd=00&useDt=20260314&extAccFlg=0"
+        },
+        {
+          "checkInDt": "20260413",
+          "checkOutDt": "20260414",
+          "districtCd": "02",
+          "regionCd": "",
+          "areaCd": "",
+          "coptCd": "10058",
+          "faclCd": "01",
+          "faclNam": "函館国際ホテル",
+          "zipCd": "040-0064",
+          "adrs": "北海道函館市大手町５－１０",
+          "latitude": "41.7697242402",
+          "longitude": "140.722204734",
+          "faclImages": [
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1005801/images/1005801_00220_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1005801/images/1005801_00220_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1005801/images/1005801_00220_l.jpg",
+              "picUrlO": null,
+              "picNam": "ホテル外観",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1005801/images/1005801_00225_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1005801/images/1005801_00225_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1005801/images/1005801_00225_l.jpg",
+              "picUrlO": null,
+              "picNam": "本館１３階天然温泉展望大浴場「汐見の湯」",
+              "picComment": null
+            },
+            {
+              "picUrlS": "https://image.ana.co.jp/hotel/1005801/images/1005801_00121_s.jpg",
+              "picUrlM": "https://image.ana.co.jp/hotel/1005801/images/1005801_00121_m.jpg",
+              "picUrlL": "https://image.ana.co.jp/hotel/1005801/images/1005801_00121_l.jpg",
+              "picUrlO": null,
+              "picNam": "ロビー",
+              "picComment": null
+            }
+          ],
+          "accessInfoList": [
+            "函館空港よりホテルまで車で所要時間約20分",
+            "ＪＲ函館本線函館駅より徒歩で所要時間約8分"
+          ],
+          "tripadvisor": {
+            "rate": 4.0,
+            "imageUrl": "http://www.tripadvisor.com/img/cdsi/img2/ratings/traveler/4.0-36734-4.png",
+            "count": 911,
+            "url": "https://www.tripadvisor.com/WidgetEmbed-cdspropertydetail?display=true&partnerId=206A2C0E46484820B4FB66FA0D898539&lang=ja&locationId=1005801"
+          },
+          "dpSupplierFlg": "0",
+          "recommendFlg": "0",
+          "planCont": 252,
+          "planList": [
+            {
+              "cartKeyDpHotel": "10058:01:K05900:N051:002:20",
+              "planCd": "K05900",
+              "productCd": "20",
+              "planNam": "【早トク２８／素泊まり】身軽に函館滞在プラン",
+              "forRsvNam": "禁煙　洋室　ダブル　プレミアムキング",
+              "stockLimitsNo": "N051",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "27  ",
+              "maxRoomArea": "27  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 43700
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 87400
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 5,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10058&faclCd=01&planCd=K05900&stockLimitsNo=N051&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10058:01:K04800:N051:002:20",
+              "planCd": "K04800",
+              "productCd": "20",
+              "planNam": "【早トク２８／素泊まり】身軽に函館滞在プラン",
+              "forRsvNam": "禁煙　洋室　ダブル　プレミアムキング",
+              "stockLimitsNo": "N051",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "27  ",
+              "maxRoomArea": "27  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 44000
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 88000
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 5,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10058&faclCd=01&planCd=K04800&stockLimitsNo=N051&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            },
+            {
+              "cartKeyDpHotel": "10058:01:K05500:N051:002:20",
+              "planCd": "K05500",
+              "productCd": "20",
+              "planNam": "【スタンダード／素泊まり】身軽に函館滞在を！",
+              "forRsvNam": "禁煙　洋室　ダブル　プレミアムキング",
+              "stockLimitsNo": "N051",
+              "usePreReqNo": "002",
+              "usePreReqNam": "2名1室利用",
+              "usePreReqDtl": null,
+              "usePreReqUnit": "1",
+              "dispUseReqUnitNam": null,
+              "numPFrom": 2,
+              "numPTo": 2,
+              "roomtypeCd": "06",
+              "roomtypeNam": "洋室（ダブル）",
+              "minRoomArea": "27  ",
+              "maxRoomArea": "27  ",
+              "roomUnitFlg": "0",
+              "laySideFlg": "1",
+              "kidsLaySideFlg": "0",
+              "mileFlg": "0",
+              "plusMile": 0,
+              "mileRsvTermFrom": null,
+              "mileRsvTermTo": null,
+              "dispMileRsvTerm": "",
+              "mileStayTermFrom": null,
+              "mileStayTermTo": null,
+              "dispMileStayTerm": "",
+              "dispMealCondition": "食事なし",
+              "price": {
+                "pricePerKind": [
+                  {
+                    "kindTypeCd": "001",
+                    "kindTypeNam": "大人",
+                    "kindTypePrice": 44200
+                  }
+                ],
+                "priceWithAir": {
+                  "priceWithAir": 88400
+                },
+                "addPrice": null,
+                "completePrice": null,
+                "completeDiffPrice": null,
+                "gotocpnDiscountAmount": {
+                  "gotocpnDiscountAmount": null
+                }
+              },
+              "stock": 5,
+              "nightsPossFrom": 1,
+              "nightsPossTo": 99,
+              "carInfo": null,
+              "soinePicMap": null,
+              "roomCount": 1,
+              "dispTotalAmountFlg": "1",
+              "planDetailUrl": "search/DSEP0090/init?coptCd=10058&faclCd=01&planCd=K05500&stockLimitsNo=N051&matCd=20&useDt=20260413&gdCls=1&usePreReqNo=002&extAccFlg=0"
+            }
+          ],
+          "stockLimitsTagMap": null,
+          "planDetailUrl": "search/DSEP0080/init?screenCls=1&coptCd=10058&faclCd=01&useDt=20260314&extAccFlg=0"
+        }
+      ],
+      "totalElements": 341,
+      "last": false,
+      "totalPages": 35,
+      "numberOfElements": 10,
+      "size": 10,
+      "number": 0,
+      "sort": [
+        {
+          "direction": "ASC",
+          "property": "recommend",
+          "ignoreCase": false,
+          "nullHandling": "NATIVE",
+          "ascending": true
+        }
+      ],
+      "first": true
+    },
+    "beginPageNumber": 0,
+    "lastNumber": 10,
+    "previousPageNumber": 0,
+    "nextPageNumber": 1,
+    "endPageNumber": 4,
+    "firstNumber": 1
+  },
+  "hotelMode": "NORMAL",
+  "allotDd": null,
+  "allotTm": null,
+  "returnDd": null,
+  "returnTm": null,
+  "criteriaCd": "",
+  "noBedCnt": 0,
+  "dbVersionTime": "20260314141500",
+  "resultType": "0"
+}

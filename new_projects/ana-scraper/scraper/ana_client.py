@@ -1,18 +1,18 @@
 """
-ANA Domestic Tour HTTP Client
-Handles session initialization, CSRF extraction, flight search, and hotel search.
-All data fetched via direct HTTPS — no browser automation.
+ANA Domestic Tour HTTP Client — correct 4-step flow (confirmed working 2026-03-14)
+All requests via direct HTTPS; no browser automation.
 
-Correct API flow (confirmed by live browser network capture 2026-03-14):
-    1. GET  /init            → query-params: airports, dates, pax → cookies + CSRF
-    2. POST /searchFlight    → form-urlencoded (ALL fields required) → go/rt flight lists
-    3. POST /searchHotel     → JSON body → hotel + plan list (paginated)
+Flow:
+  1. GET  /init             → session cookies + CSRF token
+  2. POST /searchFlight     → available go/return flights (form-urlencoded)
+  3. POST /getCriteriaList  → sets chosen flight in server-side session (JSON)
+  4. POST /searchHotel      → returns hotel list + plans + prices (JSON, paginated)
 
-Fixed fields for searchFlight (cause of 400 errors):
-    goDeptAirpCd, goArrAirpCd, rtnDeptAirpCd, rtnArrAirpCd,
-    adultCnt, infantCnt, infant2Cnt, childA-HDpCnt (all 0),
-    directDispFlg, checkInDt, checkOutDt,
-    depCalTextName_Second, arrCalTextName_Second
+Why this works:
+  • Only step 3 (getCriteriaList with goFlightInfo + rtnFlightInfo) makes the server
+    aware of which flight is selected, satisfying SERR0034/SERR0035 validation.
+  • searchHotel then returns ALL hotels regardless of flight (client requirement:
+    save everything, filter later by flight number or hotel name on MongoDB side).
 """
 
 import re
@@ -39,44 +39,34 @@ DEFAULT_HEADERS = {
     "Connection": "keep-alive",
 }
 
-# Japanese weekday abbreviations for date display text sent to API
 _JP_WEEKDAY = ["（月）", "（火）", "（水）", "（木）", "（金）", "（土）", "（日）"]
-_JP_MONTH = ["", "1月", "2月", "3月", "4月", "5月", "6月",
-             "7月", "8月", "9月", "10月", "11月", "12月"]
+_JP_MONTH   = ["", "1月", "2月", "3月", "4月", "5月", "6月",
+               "7月", "8月", "9月", "10月", "11月", "12月"]
 
 
 def _jp_date_text(yyyymmdd: str) -> str:
-    """Convert '20260420' → '4月20日（月）' (Japanese date display string)."""
+    """'20260413' → '4月13日（月）'"""
     d = date(int(yyyymmdd[:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8]))
     return f"{_JP_MONTH[d.month]}{d.day}日{_JP_WEEKDAY[d.weekday()]}"
 
 
 class ANAClient:
     """
-    Client for fetching ANA Domestic Tour (Flight + Hotel) package prices.
+    ANA Domestic Tour (Flight + Hotel) scraper.
 
-    Usage:
-        client = ANAClient()
-        result = client.search_all_pages(
-            dept_code="HND",
-            arr_code="ISG",
-            go_date="20260420",
-            return_date="20260422",
-            adults=2,
-            district_code="08",
-        )
+    Returns ALL search results per date so that MongoDB filtering by flight
+    number and/or hotel name can be done post-query.
     """
 
     def __init__(self, request_delay: float = 1.5):
-        self.session = requests.Session()
-        self.session.headers.update(DEFAULT_HEADERS)
         self.request_delay = request_delay
-        self._csrf_token: Optional[str] = None
+        self._session: Optional[requests.Session] = None
+        self._csrf: Optional[str] = None
         self._init_url: Optional[str] = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ #
+    # Public                                                               #
+    # ------------------------------------------------------------------ #
 
     def search_all_pages(
         self,
@@ -90,312 +80,255 @@ class ANAClient:
         sort_cls: str = "recommend",
     ) -> Dict[str, Any]:
         """
-        Full flow: init → searchFlight → searchHotel (all pages).
+        Full 4-step flow: init → searchFlight → getCriteriaList → searchHotel (all pages).
 
         Returns:
-            {
-              "search_params": {...},
-              "hotels": [...],        # full list across all pages
-              "total_elements": int,
-              "total_pages": int,
-              "go_flights": [...],    # raw go flight options
-              "rt_flights": [...],    # raw return flight options
-            }
+          {
+            "search_params": { goDeptAirpCd, goArrAirpCd, goDeptDt, ... },
+            "hotels":        [ ... all hotel+plan objects across all pages ... ],
+            "total_elements": int,
+            "total_pages":    int,
+            "go_flights":     [ ... ],  # from searchFlight
+            "rt_flights":     [ ... ],
+          }
         """
         search_params = {
             "goDeptAirpCd": dept_code,
-            "goArrAirpCd": arr_code,
-            "goDeptDt": go_date,
-            "rtnDeptDt": return_date,
-            "adultCnt": adults,
-            "districtCd": district_code,
-            "checkInDt": go_date,
-            "checkOutDt": return_date,
+            "goArrAirpCd":  arr_code,
+            "goDeptDt":     go_date,
+            "rtnDeptDt":    return_date,
+            "adultCnt":     adults,
+            "districtCd":   district_code,
+            "checkInDt":    go_date,
+            "checkOutDt":   return_date,
         }
 
-        # Fresh session per task run
-        self._reset_session()
+        self._new_session()
 
-        # Step 1: GET /init → cookies + CSRF
+        # Step 1 — GET /init
         self._init_session(dept_code, arr_code, go_date, return_date, adults, district_code)
 
-        # Step 2: POST /searchFlight → flight availability
-        flight_data = self._search_flight(dept_code, arr_code, go_date, return_date, adults)
-        go_flights = flight_data.get("goResponse", {}).get("flights", [])
-        rt_flights = flight_data.get("reResponse", {}).get("flights", [])
-
+        # Step 2 — POST /searchFlight
+        go_flights, rt_flights = self._search_flight(
+            dept_code, arr_code, go_date, return_date, adults)
         logger.info(
-            "%s→%s [%s→%s]: %d outbound/%d return flights",
-            dept_code, arr_code, go_date, return_date,
-            len(go_flights), len(rt_flights),
+            "%s→%s [%s]: go=%d rt=%d flights",
+            dept_code, arr_code, go_date, len(go_flights), len(rt_flights),
         )
 
-        if not go_flights and not rt_flights:
-            logger.warning("No flights for %s→%s on %s", dept_code, arr_code, go_date)
+        if not go_flights or not rt_flights:
+            logger.warning("No flights found — skipping hotel search")
             return {
-                "search_params": search_params,
-                "hotels": [],
+                "search_params":  search_params,
+                "hotels":         [],
                 "total_elements": 0,
-                "total_pages": 0,
-                "go_flights": [],
-                "rt_flights": [],
+                "total_pages":    0,
+                "go_flights":     go_flights,
+                "rt_flights":     rt_flights,
             }
 
-        # Step 3: POST /searchHotel (page 1)
-        page1 = self._fetch_hotel_page(
-            go_date, return_date, district_code, region_code, sort_cls, page_num=""
-        )
-        page_info = page1.get("pageInfo", {}).get("page", {})
-        total_pages = page_info.get("totalPages", 1)
-        all_hotels = list(page_info.get("content", []))
+        # Step 3 — POST /getCriteriaList (set flight selection in server session)
+        self._select_flight(go_flights[0], rt_flights[0], go_date, return_date, district_code)
+
+        # Step 4 — POST /searchHotel (get ALL hotels, all pages)
+        page1       = self._fetch_hotel_page(go_date, return_date,
+                                              district_code, region_code, sort_cls, "")
+        page_info   = page1.get("pageInfo", {}).get("page", {})
+        total_pages  = page_info.get("totalPages", 1)
+        all_hotels   = list(page_info.get("content", []))
 
         logger.info(
             "  page 1/%d: %d hotels (total=%s)",
             total_pages, len(all_hotels), page_info.get("totalElements", "?"),
         )
 
-        # Step 4: Remaining pages
         for page in range(2, total_pages + 1):
             time.sleep(self.request_delay)
-            result = self._fetch_hotel_page(
-                go_date, return_date, district_code, region_code, sort_cls,
-                page_num=str(page)
-            )
+            result  = self._fetch_hotel_page(go_date, return_date,
+                                              district_code, region_code, sort_cls, str(page))
             content = result.get("pageInfo", {}).get("page", {}).get("content", [])
             all_hotels.extend(content)
             logger.info("  page %d/%d: +%d hotels", page, total_pages, len(content))
 
         return {
-            "search_params": search_params,
-            "hotels": all_hotels,
+            "search_params":  search_params,
+            "hotels":         all_hotels,
             "total_elements": page_info.get("totalElements", len(all_hotels)),
-            "total_pages": total_pages,
-            "go_flights": go_flights,
-            "rt_flights": rt_flights,
+            "total_pages":    total_pages,
+            "go_flights":     go_flights,
+            "rt_flights":     rt_flights,
         }
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------ #
+    # Internal helpers                                                     #
+    # ------------------------------------------------------------------ #
 
-    def _reset_session(self):
-        """Start a fresh requests.Session to clear old cookies/state."""
-        self.session = requests.Session()
-        self.session.headers.update(DEFAULT_HEADERS)
-        self._csrf_token = None
+    def _new_session(self):
+        s = requests.Session()
+        s.headers.update(DEFAULT_HEADERS)
+        self._session  = s
+        self._csrf     = None
         self._init_url = None
 
-    def _init_session(
-        self,
-        dept_code: str,
-        arr_code: str,
-        go_date: str,
-        return_date: str,
-        adults: int,
-        district_code: str,
-    ):
-        """
-        GET /init — sets session cookies (JSESSIONID, ATDCSMSID, ATDSVR)
-        and extracts CSRF token from the HTML <meta name="_csrf"> tag.
-        """
-        params = {
-            "goDeptAirpCd": dept_code,
-            "goArrAirpCd":  arr_code,
-            "goDeptDt":     go_date,
-            "rtnDeptDt":    return_date,
-            "adultCnt":     str(adults),
-            "districtCd":   district_code,
-            "checkInDt":    go_date,
-            "checkOutDt":   return_date,
-        }
-        resp = self.session.get(f"{BASE_URL}/init", params=params, timeout=30)
+    def _init_session(self, dept: str, arr: str, go: str, ret: str,
+                      adults: int, district: str):
+        """GET /init — seeds session cookies and extracts CSRF token."""
+        resp = self._session.get(
+            f"{BASE_URL}/init",
+            params={
+                "goDeptAirpCd": dept, "goArrAirpCd": arr,
+                "goDeptDt": go, "rtnDeptDt": ret,
+                "adultCnt": str(adults), "districtCd": district,
+                "checkInDt": go, "checkOutDt": ret,
+            },
+            timeout=30,
+        )
         resp.raise_for_status()
         self._init_url = resp.url
 
-        match = re.search(r'<meta name="_csrf" content="([^"]+)"', resp.text)
-        if not match:
-            raise ValueError(
-                f"CSRF token not found in /init response for "
-                f"{dept_code}→{arr_code} on {go_date}. "
-                f"Status={resp.status_code}, Content-Type={resp.headers.get('Content-Type')}"
-            )
-        self._csrf_token = match.group(1)
-        logger.debug(
-            "init OK — CSRF: %s | cookies: %s",
-            self._csrf_token[:12] + "…",
-            list(self.session.cookies.keys()),
-        )
+        m = re.search(r'<meta name="_csrf" content="([^"]+)"', resp.text)
+        if not m:
+            raise ValueError(f"CSRF not found for {dept}→{arr} on {go}")
+        self._csrf = m.group(1)
+        logger.debug("init OK — CSRF=%s… cookies=%s",
+                     self._csrf[:12], list(self._session.cookies.keys()))
 
-        # Set XHR headers for all subsequent AJAX requests
-        self.session.headers.update({
+        self._session.headers.update({
             "X-Requested-With": "XMLHttpRequest",
-            "X-CSRF-Token":     self._csrf_token,
+            "X-CSRF-Token":     self._csrf,
             "Referer":          self._init_url,
             "Origin":           "https://www.ana.co.jp",
         })
 
-    def _search_flight(
-        self,
-        dept_code: str,
-        arr_code: str,
-        go_date: str,
-        return_date: str,
-        adults: int,
-    ) -> Dict[str, Any]:
-        """
-        POST /searchFlight — application/x-www-form-urlencoded.
-
-        ALL fields are required. Missing any location / pax field causes 400.
-        Fields confirmed by live browser network capture (2026-03-14):
-
-          depCalTextName_Second  → Japanese date display text (e.g. '4月20日（月）')
-          goDeptDt               → YYYYMMDD
-          goDeptAirpCd           → departure IATA code
-          goArrAirpCd            → arrival IATA code
-          arrCalTextName_Second  → Japanese date display text
-          rtnDeptDt              → YYYYMMDD
-          rtnDeptAirpCd          → return departure = arr_code
-          rtnArrAirpCd           → return arrival  = dept_code
-          adultCnt               → number of adults
-          infant2Cnt             → 0
-          infantCnt              → 0
-          childA-HDpCnt          → 0 each (10 child category fields)
-          directDispFlg          → 0 (show all, not just direct)
-          _csrf                  → CSRF token from /init
-          checkInDt              → YYYYMMDD (= go_date)
-          checkOutDt             → YYYYMMDD (= return_date)
-        """
-        form_data = {
-            # Date display text (Japanese) — required by server
-            "depCalTextName_Second": _jp_date_text(go_date),
-            "goDeptDt":              go_date,
-            # Outbound airports
-            "goDeptAirpCd":          dept_code,
-            "goArrAirpCd":           arr_code,
-            # Return date + airports (return flight goes arr→dept)
-            "arrCalTextName_Second": _jp_date_text(return_date),
-            "rtnDeptDt":             return_date,
-            "rtnDeptAirpCd":         arr_code,    # ← was missing! Return departs FROM arr
-            "rtnArrAirpCd":          dept_code,   # ← was missing! Return arrives TO dept
-            # Passenger counts
-            "adultCnt":              str(adults),
-            "infant2Cnt":            "0",
-            "infantCnt":             "0",
-            # Child categories (A-J style codes) — must send zeros
-            "childADpCnt":           "0",
-            "childCDpCnt":           "0",
-            "childIDpCnt":           "0",
-            "childJDpCnt":           "0",
-            "childEDpCnt":           "0",
-            "childFDpCnt":           "0",
-            "childGDpCnt":           "0",
-            "childHDpCnt":           "0",
-            "childBDpCnt":           "0",
-            "childDDpCnt":           "0",
-            # Flight type: 0 = all (direct + connecting), 1 = direct only
-            "directDispFlg":         "0",
-            # CSRF
-            "_csrf":                 self._csrf_token,
-            # Hotel dates
-            "checkInDt":             go_date,
-            "checkOutDt":            return_date,
-        }
-
+    def _search_flight(self, dept: str, arr: str, go: str, ret: str,
+                       adults: int):
+        """POST /searchFlight → (go_flights, rt_flights)."""
         time.sleep(self.request_delay)
-        resp = self.session.post(
+        resp = self._session.post(
             f"{BASE_URL}/searchFlight",
-            data=form_data,
+            data={
+                "depCalTextName_Second": _jp_date_text(go),
+                "goDeptDt":             go,
+                "goDeptAirpCd":         dept,
+                "goArrAirpCd":          arr,
+                "arrCalTextName_Second": _jp_date_text(ret),
+                "rtnDeptDt":            ret,
+                "rtnDeptAirpCd":        arr,   # return departs FROM destination
+                "rtnArrAirpCd":         dept,  # return arrives TO origin
+                "adultCnt":             str(adults),
+                "infant2Cnt":           "0",
+                "infantCnt":            "0",
+                "childADpCnt": "0", "childBDpCnt": "0",
+                "childCDpCnt": "0", "childDDpCnt": "0",
+                "childEDpCnt": "0", "childFDpCnt": "0",
+                "childGDpCnt": "0", "childHDpCnt": "0",
+                "childIDpCnt": "0", "childJDpCnt": "0",
+                "directDispFlg": "0",
+                "_csrf":         self._csrf,
+                "checkInDt":     go,
+                "checkOutDt":    ret,
+            },
             headers={
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Accept":       "application/json, text/javascript, */*; q=0.01",
+                "Accept":       "application/json, */*; q=0.01",
             },
             timeout=60,
         )
-
         if not resp.ok:
-            body_preview = resp.text[:600]
-            logger.warning(
-                "searchFlight %d for %s→%s [%s]: %s",
-                resp.status_code, dept_code, arr_code, go_date, body_preview,
-            )
-            # Return empty — caller will handle no-flight case gracefully
-            return {}
+            logger.warning("searchFlight %d: %s", resp.status_code, resp.text[:300])
+            return [], []
+        data = resp.json()
+        return (
+            data.get("goResponse", {}).get("flights", []),
+            data.get("reResponse", {}).get("flights", []),
+        )
 
-        try:
-            return resp.json()
-        except Exception:
-            logger.error("searchFlight non-JSON response: %s", resp.text[:300])
-            return {}
-
-    def _fetch_hotel_page(
-        self,
-        go_date: str,
-        return_date: str,
-        district_code: str,
-        region_code: str,
-        sort_cls: str,
-        page_num: str,
-    ) -> Dict[str, Any]:
+    def _select_flight(self, go_flight: Dict, rt_flight: Dict,
+                       go: str, ret: str, district: str):
         """
-        POST /searchHotel — application/json.
-
-        All fields confirmed by live browser network capture (2026-03-14).
-        Server uses session state (airports/pax) set during /init.
+        POST /getCriteriaList with goFlightInfo + rtnFlightInfo.
+        This registers the flight selection in the server-side session,
+        which is required before searchHotel will accept the request.
         """
-        payload = {
-            # Filter fields (blank = no filter)
-            "criteriaCondId":         "",
-            "hotelName":              "",
-            "coptCd":                 "",
-            "faclCd":                 "",
-            "coptFaclCd":             "",       # new required field
-            "fromPriceCd":            "",
-            "toPriceCd":              "",
-            "rcPlanDispFlg":          "0",
-            "openStockPlanFlg":       "1",      # show available plans
-            "stockLimitsNo":          "",
-            "planCd":                 "",
-            # Location
-            "districtCd":             district_code,
-            "regionCd":               region_code,
-            "areaCd":                 "",
-            # Date display text (Japanese)
-            "depCalTextName_Second_3": _jp_date_text(go_date),
-            "checkInDt":              go_date,
-            "arrCalTextName_Second_4": _jp_date_text(return_date),
-            "checkOutDt":             return_date,
-            # Sort and pagination
-            "sortCls":                sort_cls,
-            "pageNum":                page_num,
-            # CSRF
-            "_csrf":                  self._csrf_token,
-            # Flight dates (server matches flights loaded in session)
-            "segments":               None,
-            "goDeptDt":               go_date,
-            "reDeptDt":               return_date,
-        }
-
         time.sleep(self.request_delay)
-        resp = self.session.post(
-            f"{BASE_URL}/searchHotel",
-            json=payload,
+        resp = self._session.post(
+            f"{BASE_URL}/getCriteriaList",
+            json={
+                "criteriaCondId":   "",
+                "hotelName":        "",
+                "coptCd":           "",
+                "faclCd":           "",
+                "coptFaclCd":       "",
+                "fromPriceCd":      "",
+                "toPriceCd":        "",
+                "rcPlanDispFlg":    "0",
+                "openStockPlanFlg": "1",
+                "stockLimitsNo":    "",
+                "planCd":           "",
+                "districtCd":       district,
+                "regionCd":         "",
+                "areaCd":           "",
+                "checkInDt":        go,
+                "checkOutDt":       ret,
+                "_csrf":            self._csrf,
+                "segments":         None,
+                "goDeptDt":         go,
+                "reDeptDt":         ret,
+                "goFlightInfo":     go_flight,
+                "rtnFlightInfo":    rt_flight,
+            },
             headers={
                 "Content-Type": "application/json; charset=UTF-8",
-                "Accept":       "application/json, text/javascript, */*; q=0.01",
+                "Accept":       "application/json, */*; q=0.01",
+            },
+            timeout=30,
+        )
+        if not resp.ok:
+            logger.warning(
+                "getCriteriaList %d: %s", resp.status_code, resp.text[:300])
+        else:
+            logger.debug("getCriteriaList OK (flight set in session)")
+
+    def _fetch_hotel_page(self, go: str, ret: str, district: str,
+                          region: str, sort_cls: str, page_num: str) -> Dict:
+        """POST /searchHotel — one page of hotels."""
+        time.sleep(self.request_delay)
+        resp = self._session.post(
+            f"{BASE_URL}/searchHotel",
+            json={
+                "criteriaCondId":   "",
+                "hotelName":        "",
+                "coptCd":           "",
+                "faclCd":           "",
+                "coptFaclCd":       "",
+                "fromPriceCd":      "",
+                "toPriceCd":        "",
+                "rcPlanDispFlg":    "0",
+                "openStockPlanFlg": "1",
+                "stockLimitsNo":    "",
+                "planCd":           "",
+                "districtCd":       district,
+                "regionCd":         region,
+                "areaCd":           "",
+                "depCalTextName_Second_3": _jp_date_text(go),
+                "checkInDt":              go,
+                "arrCalTextName_Second_4": _jp_date_text(ret),
+                "checkOutDt":             ret,
+                "sortCls":   sort_cls,
+                "pageNum":   page_num,
+                "_csrf":     self._csrf,
+                "segments":  None,
+                "goDeptDt":  go,
+                "reDeptDt":  ret,
+            },
+            headers={
+                "Content-Type": "application/json; charset=UTF-8",
+                "Accept":       "application/json, */*; q=0.01",
             },
             timeout=60,
         )
-
         if not resp.ok:
-            logger.error(
-                "searchHotel %d [page=%r]: %s",
-                resp.status_code, page_num, resp.text[:800],
-            )
+            logger.error("searchHotel %d [page=%r]: %s",
+                         resp.status_code, page_num, resp.text[:800])
             resp.raise_for_status()
-
-        try:
-            return resp.json()
-        except Exception:
-            logger.error("searchHotel non-JSON: %s", resp.text[:300])
-            resp.raise_for_status()
-            return {}
+        return resp.json()
