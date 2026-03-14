@@ -15,6 +15,12 @@ import time
 from datetime import date, timedelta
 from typing import List, Optional
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 from scraper.ana_client import ANAClient
 from scraper.mongo_client import MongoSaver
 from scraper.task_loader import SearchTask, load_tasks

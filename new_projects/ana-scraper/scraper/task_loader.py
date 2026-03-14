@@ -47,18 +47,22 @@ DESTINATION_TO_DISTRICT: dict[str, str] = {
     "東京": "04",
     "東海": "05",
     "北陸": "05",
+    "中部": "05",        # Tokai/Chubu (Nagoya area)
     "名古屋": "05",
     "近畿": "06",
     "関西": "06",
     "大阪": "06",
     "中国": "07",
     "四国": "07",
+    "中四国": "07",      # Chugoku + Shikoku combined
     "広島": "07",
     "九州": "08",
     "沖縄": "08",
+    "九州・沖縄": "08",
     "福岡": "08",
     "鹿児島": "08",
 }
+
 
 # Weekday string → Python weekday number (0=Mon, 6=Sun)
 WEEKDAY_MAP: dict[str, int] = {
