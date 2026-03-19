@@ -1033,14 +1033,22 @@ def _flatten_deps(
 
         # Collect param names this dep needs from request kwargs
         param_names: set[str] = set()
+        required_query_params: set[str] = set()  # required query params (no default)
+        required_body_params: set[str] = set()   # required body params (no default)
         for f in sub_dep.query_params:
             param_names.add(f.name)
+            if f.required:
+                required_query_params.add(f.name)
         for f in sub_dep.header_params:
             param_names.add(f.name)
         for f in sub_dep.cookie_params:
             param_names.add(f.name)
         for f in sub_dep.path_params:
             param_names.add(f.name)
+        for f in sub_dep.body_params:
+            param_names.add(f.name)
+            if f.required:
+                required_body_params.add(f.name)
 
         # Detect security scheme deps (HTTPBearer, HTTPBasic, etc.)
         # These are resolved natively by C++ auth extraction — no Starlette needed
@@ -1070,14 +1078,19 @@ def _flatten_deps(
             'http_connection_param_name': sub_dep.http_connection_param_name,
             'child_names': child_names,
             'param_names': param_names,
+            'required_query_params': required_query_params,
+            'required_body_params': required_body_params,
+            'security_scopes_param': sub_dep.security_scopes_param_name,
+            'oauth_scopes': list(sub_dep.own_oauth_scopes or []) + list(sub_dep.parent_oauth_scopes or []),
             'is_security': is_security,
             'security_type': security_type,
             'auto_error': auto_error,
             'security_cred_cls': security_cred_cls,
+            'response_param_name': sub_dep.response_param_name,
         })
 
 
-def _make_lightweight_request(raw_headers, method, path):
+def _make_lightweight_request(raw_headers, method, path, app=None):
     """Create a lightweight Starlette Request from raw headers for security deps.
 
     Security dependencies (HTTPBearer, HTTPBasic, etc.) access request.headers
@@ -1110,10 +1123,12 @@ def _make_lightweight_request(raw_headers, method, path):
         "headers": header_list,
         "root_path": "",
     }
+    if app is not None:
+        scope["app"] = app
     return Request(scope)
 
 
-def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
+def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _app=None):
     """Resolve dependencies in topological order (sync version).
 
     Uses module-level pre-imported constants (_DEP_HTTP_EXC_TYPES, _HTTPAuthCreds,
@@ -1121,6 +1136,7 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
     """
     resolved = {}
     errors = []
+    sub_response = None
 
     # Pop C++-injected request info from kwargs (prevent leaking to endpoint)
     raw_headers = kwargs_dict.pop('__raw_headers__', None)
@@ -1199,15 +1215,56 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
                 if pname in kwargs_dict:
                     dep_kwargs[pname] = kwargs_dict[pname]
 
+            # Validate required query params -- produce proper Pydantic-style errors
+            _req_qp = node.get('required_query_params')
+            if _req_qp:
+                for _rp in _req_qp:
+                    if _rp not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("query", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                            "url": "https://errors.pydantic.dev/2.0/v/missing",
+                        })
+                if errors:
+                    continue
+            # Validate required body params
+            _req_bp = node.get('required_body_params')
+            if _req_bp:
+                for _rp in _req_bp:
+                    if _rp not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("body", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                        })
+                if errors:
+                    continue
+
             # Inject Request object if needed (fallback for non-security deps)
             if node['needs_request'] or node['needs_http_connection']:
                 if request_obj is None:
                     request_obj = _make_lightweight_request(
-                        raw_headers, raw_method, raw_path)
+                        raw_headers, raw_method, raw_path, _app)
                 param_name = node['request_param_name'] or \
                     node['http_connection_param_name']
                 if param_name:
                     dep_kwargs[param_name] = request_obj
+
+            # Inject Response object if dep declares response param
+            _resp_param = node.get('response_param_name')
+            if _resp_param:
+                if sub_response is None:
+                    sub_response = Response()
+                dep_kwargs[_resp_param] = sub_response
+
+            # Inject SecurityScopes if dep declares security_scopes param
+            _ss_param = node.get('security_scopes_param')
+            if _ss_param:
+                from fastapi.security.oauth2 import SecurityScopes as _SecurityScopes
+                dep_kwargs[_ss_param] = _SecurityScopes(scopes=node.get('oauth_scopes') or [])
 
             result = node['call'](**dep_kwargs)
             resolved[node['name']] = result
@@ -1223,10 +1280,10 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
                 "type": "dependency_error",
             })
 
-    return (resolved, errors)
+    return (resolved, errors, sub_response)
 
 
-async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
+async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _app=None):
     """Resolve dependencies in topological order (async version).
 
     Uses module-level pre-imported constants (_DEP_HTTP_EXC_TYPES, _HTTPAuthCreds,
@@ -1234,6 +1291,7 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
     """
     resolved = {}
     errors = []
+    sub_response = None
 
     # Pop C++-injected request info from kwargs (prevent leaking to endpoint)
     raw_headers = kwargs_dict.pop('__raw_headers__', None)
@@ -1312,15 +1370,56 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                 if pname in kwargs_dict:
                     dep_kwargs[pname] = kwargs_dict[pname]
 
+            # Validate required query params -- produce proper Pydantic-style errors
+            _req_qp = node.get('required_query_params')
+            if _req_qp:
+                for _rp in _req_qp:
+                    if _rp not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("query", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                            "url": "https://errors.pydantic.dev/2.0/v/missing",
+                        })
+                if errors:
+                    continue
+            # Validate required body params
+            _req_bp = node.get('required_body_params')
+            if _req_bp:
+                for _rp in _req_bp:
+                    if _rp not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("body", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                        })
+                if errors:
+                    continue
+
             # Inject Request object if needed (fallback for non-security deps)
             if node['needs_request'] or node['needs_http_connection']:
                 if request_obj is None:
                     request_obj = _make_lightweight_request(
-                        raw_headers, raw_method, raw_path)
+                        raw_headers, raw_method, raw_path, _app)
                 param_name = node['request_param_name'] or \
                     node['http_connection_param_name']
                 if param_name:
                     dep_kwargs[param_name] = request_obj
+
+            # Inject Response object if dep declares response param
+            _resp_param = node.get('response_param_name')
+            if _resp_param:
+                if sub_response is None:
+                    sub_response = Response()
+                dep_kwargs[_resp_param] = sub_response
+
+            # Inject SecurityScopes if dep declares security_scopes param
+            _ss_param = node.get('security_scopes_param')
+            if _ss_param:
+                from fastapi.security.oauth2 import SecurityScopes as _SecurityScopes
+                dep_kwargs[_ss_param] = _SecurityScopes(scopes=node.get('oauth_scopes') or [])
 
             # Call the dependency
             if node['is_coro']:
@@ -1340,10 +1439,10 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                 "type": "dependency_error",
             })
 
-    return (resolved, errors)
+    return (resolved, errors, sub_response)
 
 
-async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES):
+async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _app=None):
     """Resolve dependencies including generator (yield) deps using AsyncExitStack.
 
     Returns (resolved_dict, errors_list, exit_stack).
@@ -1352,6 +1451,7 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
     exit_stack = AsyncExitStack()
     resolved = {}
     errors = []
+    sub_response = None
 
     # Pop C++-injected request info from kwargs
     raw_headers = kwargs_dict.pop('__raw_headers__', None)
@@ -1430,14 +1530,53 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                 if pname in kwargs_dict:
                     dep_kwargs[pname] = kwargs_dict[pname]
 
+            _req_qp = node.get('required_query_params')
+            if _req_qp:
+                for _rp in _req_qp:
+                    if _rp not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("query", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                            "url": "https://errors.pydantic.dev/2.0/v/missing",
+                        })
+                if errors:
+                    continue
+            _req_bp = node.get('required_body_params')
+            if _req_bp:
+                for _rp in _req_bp:
+                    if _rp not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("body", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                        })
+                if errors:
+                    continue
+
             if node['needs_request'] or node['needs_http_connection']:
                 if request_obj is None:
                     request_obj = _make_lightweight_request(
-                        raw_headers, raw_method, raw_path)
+                        raw_headers, raw_method, raw_path, _app)
                 param_name = node['request_param_name'] or \
                     node['http_connection_param_name']
                 if param_name:
                     dep_kwargs[param_name] = request_obj
+
+            # Inject Response object if dep declares response param
+            _resp_param = node.get('response_param_name')
+            if _resp_param:
+                if sub_response is None:
+                    sub_response = Response()
+                dep_kwargs[_resp_param] = sub_response
+
+            # Inject SecurityScopes if dep declares security_scopes param
+            _ss_param = node.get('security_scopes_param')
+            if _ss_param:
+                from fastapi.security.oauth2 import SecurityScopes as _SecurityScopes
+                dep_kwargs[_ss_param] = _SecurityScopes(scopes=node.get('oauth_scopes') or [])
 
             if node.get('is_async_gen'):
                 # Async generator dep: wrap as async context manager and enter
@@ -1469,25 +1608,74 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                 "type": "dependency_error",
             })
 
-    return (resolved, errors, exit_stack)
+    return (resolved, errors, exit_stack, sub_response)
 
 
-def _make_dep_solver(dependant: Dependant):
+def _dep_tree_has_special_params(dep: Any) -> bool:
+    """Return True if dep or any sub-dep uses special injection params the C++ fast path cannot provide."""
+    _SPECIAL = ('request_param_name', 'response_param_name', 'background_tasks_param_name',
+                'http_connection_param_name', 'websocket_param_name', 'security_scopes_param_name')
+    stack = [dep]
+    while stack:
+        d = stack.pop()
+        if any(getattr(d, attr, None) for attr in _SPECIAL):
+            return True
+        stack.extend(d.dependencies)
+    return False
+
+
+def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Optional[Any] = None):
     """Create a fast dependency solver callable for C++ fast path.
 
-    Returns a callable that takes (kwargs_dict) and returns (values_dict, errors_list).
-    The kwargs_dict may contain C++-injected keys (__raw_headers__, __method__,
-    __path__) for security dependencies that need a Request object.
-
-    Resolves dependencies recursively in depth-first topological order:
-    - Leaf dependencies (e.g., HTTPBearer.__call__) are resolved first
-    - Parent dependencies receive the resolved values of their children
-    - Dependencies that need a Request object get a lightweight Request built
-      from the raw headers injected by C++.
-
-    HTTPException is re-raised (not caught) so C++ can return proper status codes.
-    Raises ValueError if a generator dependency is found (not supported in fast path).
+    When dependency_overrides_provider is given, overrides are applied at call time
+    so app.dependency_overrides changes are respected without re-registration.
     """
+
+    def _apply_overrides(dep, overrides):
+        """Recursively replace dep.call with override callable."""
+        for sub_dep in dep.dependencies:
+            if sub_dep.call is None:
+                continue
+            override = overrides.get(sub_dep.call)
+            if override is not None and override is not sub_dep.call:
+                new_sub = get_dependant(
+                    path=sub_dep.path or "/",
+                    call=override,
+                    name=sub_dep.name,
+                )
+                sub_dep.call = override
+                sub_dep.dependencies = new_sub.dependencies
+                sub_dep.query_params = new_sub.query_params
+                sub_dep.header_params = new_sub.header_params
+                sub_dep.cookie_params = new_sub.cookie_params
+                sub_dep.path_params = new_sub.path_params
+                sub_dep.body_params = new_sub.body_params
+                sub_dep.request_param_name = new_sub.request_param_name
+                sub_dep.http_connection_param_name = new_sub.http_connection_param_name
+                sub_dep.response_param_name = new_sub.response_param_name
+                sub_dep.background_tasks_param_name = new_sub.background_tasks_param_name
+                sub_dep.security_scopes_param_name = new_sub.security_scopes_param_name
+                sub_dep.is_coroutine_callable = new_sub.is_coroutine_callable
+            else:
+                _apply_overrides(sub_dep, overrides)
+
+    def _build_nodes(dep, overrides, orig_consumed):
+        """Build dep_nodes applying overrides, return (nodes, injectable_names, consumed_params)."""
+        import copy
+        dep_copy = copy.deepcopy(dep)
+        if overrides:
+            _apply_overrides(dep_copy, overrides)
+        nodes: list[dict] = []
+        _flatten_deps(dep_copy, nodes, set())
+        inj: set[str] = set()
+        for sd in dep_copy.dependencies:
+            if sd.name and sd.call is not None:
+                inj.add(sd.name)
+        consumed: set[str] = set(orig_consumed)  # start with original consumed params
+        for n in nodes:
+            consumed.update(n['param_names'])
+        return nodes, inj, consumed
+
     # Pre-analyze the entire dependency tree at registration time
     dep_nodes: list[dict] = []
     _flatten_deps(dependant, dep_nodes, set())
@@ -1511,61 +1699,87 @@ def _make_dep_solver(dependant: Dependant):
     for node in dep_nodes:
         dep_consumed_params.update(node['param_names'])
 
-    # Check for generator (yield) dependencies — require AsyncExitStack cleanup
+    # Check for generator (yield) dependencies
     has_gen = any(node.get('is_gen') or node.get('is_async_gen') for node in dep_nodes)
 
     if has_gen:
-        # Generator deps need AsyncExitStack; return exit_stack embedded in injected
         async def _solve_gen_async(kwargs_dict):
             import asyncio
-            # Force async_di dispatch: ensure C++ sees PYGEN_NEXT.
-            # Without this, if all gen deps have no internal `await`, the dep_solver
-            # would complete synchronously and C++ would pass __exit_stack__ to the
-            # endpoint as an unexpected kwarg → TypeError.
-            await asyncio.sleep(0)
-            resolved, errors, exit_stack = await _resolve_deps_gen(dep_nodes, kwargs_dict)
-            if injectable_names:
-                injected = {k: v for k, v in resolved.items()
-                            if k in injectable_names}
+            overrides = (
+                getattr(dependency_overrides_provider, 'dependency_overrides', None)
+                if dependency_overrides_provider is not None else None
+            ) or {}
+            if overrides:
+                nodes, inj, consumed = _build_nodes(dependant, overrides, dep_consumed_params)
             else:
-                injected = {}
-            for pname in dep_consumed_params:
+                nodes, inj, consumed = dep_nodes, injectable_names, dep_consumed_params
+            await asyncio.sleep(0)
+            resolved, errors, exit_stack, sub_response = await _resolve_deps_gen(nodes, kwargs_dict, _app=dependency_overrides_provider)
+            injected = {k: v for k, v in resolved.items() if k in inj} if inj else {}
+            for pname in consumed:
                 kwargs_dict.pop(pname, None)
-            # Embed exit_stack so _handle_async_di can clean up after endpoint
             injected['__exit_stack__'] = exit_stack
-            return (injected, errors)
+            return (injected, errors, None, sub_response)
         return _solve_gen_async
 
-    # Check if any dep in the tree is async
     any_async = any(node['is_coro'] for node in dep_nodes)
 
     if any_async:
+        _has_response_deps = any(node.get('response_param_name') for node in dep_nodes)
         async def _solve_async(kwargs_dict):
-            resolved, errors = await _resolve_deps_async(dep_nodes, kwargs_dict)
-            if injectable_names:
-                injected = {k: v for k, v in resolved.items()
-                            if k in injectable_names}
+            if _has_response_deps:
+                import asyncio as _asyncio; await _asyncio.sleep(0)  # Force async path for sub_response header merging
+            overrides = (
+                getattr(dependency_overrides_provider, 'dependency_overrides', None)
+                if dependency_overrides_provider is not None else None
+            ) or {}
+            if overrides:
+                nodes, inj, consumed = _build_nodes(dependant, overrides, dep_consumed_params)
+                # Inject query params not extracted by C++ (override may need new params)
+                try:
+                    from fastapi._cpp_server import _current_query_string
+                    _qs = _current_query_string.get()
+                except Exception:
+                    _qs = b''
+                if _qs:
+                    from urllib.parse import parse_qs
+                    for k, vs in parse_qs(_qs.decode('latin-1'), keep_blank_values=True).items():
+                        if k not in kwargs_dict:
+                            kwargs_dict[k] = vs[0] if len(vs) == 1 else vs
             else:
-                injected = {}
-            # Remove params consumed by sub-deps so they aren't passed to the endpoint
-            for pname in dep_consumed_params:
+                nodes, inj, consumed = dep_nodes, injectable_names, dep_consumed_params
+            resolved, errors, sub_response = await _resolve_deps_async(nodes, kwargs_dict, _app=dependency_overrides_provider)
+            injected = {k: v for k, v in resolved.items() if k in inj} if inj else {}
+            for pname in consumed:
                 kwargs_dict.pop(pname, None)
-            return (injected, errors)
+            return (injected, errors, None, sub_response)
         return _solve_async
     else:
         def _solve_sync(kwargs_dict):
-            resolved, errors = _resolve_deps_sync(dep_nodes, kwargs_dict)
-            if injectable_names:
-                injected = {k: v for k, v in resolved.items()
-                            if k in injectable_names}
+            overrides = (
+                getattr(dependency_overrides_provider, 'dependency_overrides', None)
+                if dependency_overrides_provider is not None else None
+            ) or {}
+            if overrides:
+                nodes, inj, consumed = _build_nodes(dependant, overrides, dep_consumed_params)
+                try:
+                    from fastapi._cpp_server import _current_query_string
+                    _qs = _current_query_string.get()
+                except Exception:
+                    _qs = b''
+                if _qs:
+                    from urllib.parse import parse_qs
+                    for k, vs in parse_qs(_qs.decode('latin-1'), keep_blank_values=True).items():
+                        if k not in kwargs_dict:
+                            kwargs_dict[k] = vs[0] if len(vs) == 1 else vs
             else:
-                injected = {}
-            # Remove params consumed by sub-deps so they aren't passed to the endpoint
-            for pname in dep_consumed_params:
+                nodes, inj, consumed = dep_nodes, injectable_names, dep_consumed_params
+            resolved, errors, sub_response = _resolve_deps_sync(nodes, kwargs_dict, _app=dependency_overrides_provider)
+            injected = {k: v for k, v in resolved.items() if k in inj} if inj else {}
+            for pname in consumed:
                 kwargs_dict.pop(pname, None)
-            return (injected, errors)
+            return (injected, errors, None, sub_response)
         return _solve_sync
-
 
 class APIRoute(routing.Route):
     def __init__(
@@ -1747,12 +1961,7 @@ class APIRoute(routing.Route):
             self.dependant.call is not None
             and not getattr(self.dependant, 'is_gen_callable', False)
             and not getattr(self.dependant, 'is_async_gen_callable', False)
-            and not self.dependant.request_param_name
-            and not self.dependant.response_param_name
-            and not self.dependant.background_tasks_param_name
-            and not self.dependant.http_connection_param_name
-            and not self.dependant.websocket_param_name
-            and not self.dependant.security_scopes_param_name
+            and not _dep_tree_has_special_params(self.dependant)
             and not (self.body_field and isinstance(
                 self.body_field.field_info, params.Form
             ))
@@ -1766,7 +1975,7 @@ class APIRoute(routing.Route):
         if self._fast_path_eligible:
             if self.dependant.dependencies:
                 try:
-                    self._dep_solver = _make_dep_solver(self.dependant)
+                    self._dep_solver = _make_dep_solver(self.dependant, self.dependency_overrides_provider)
                 except ValueError:
                     self._fast_path_eligible = False
             # Build param validator for routes with constrained/required params.

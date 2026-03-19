@@ -217,6 +217,9 @@ typedef struct {
     // Set by Python when active_count > 80% of MAX_CONNECTIONS.
     int force_close = 0;  // int for Py_T_INT member access from Python
 
+    // Trailing slash redirect control
+    bool redirect_slashes = true;  // Set to false to disable 307 redirects
+
     // Fast-path return protocol: last sync-consumed byte count
     // Set by handle_http before returning Py_True. Python reads via tp_members.
     // Avoids per-request PyTuple_New(2) + PyLong_FromLongLong() allocation.

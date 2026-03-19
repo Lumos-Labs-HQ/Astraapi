@@ -1,22 +1,29 @@
-"""Concurrency utilities — replaces starlette.concurrency."""
+"""Concurrency utilities - replaces starlette.concurrency."""
 import asyncio
+import concurrent.futures
 import functools
 import inspect
 from typing import Any, AsyncGenerator, Callable, TypeVar
 
 T = TypeVar("T")
 
+# Shared thread pool - avoids per-call executor creation overhead.
+_threadpool = concurrent.futures.ThreadPoolExecutor()
+
 
 async def run_in_threadpool(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Run a sync function in the default executor.
+    """Run a sync function in the default thread pool.
 
-    Uses asyncio.get_running_loop().run_in_executor() directly — zero overhead
-    vs anyio/sniffio backend detection. The server is asyncio/uvloop-only.
+    Submits directly to a ThreadPoolExecutor and wraps the future, bypassing
+    loop.run_in_executor() which (via uvloop) calls the deprecated
+    asyncio.iscoroutinefunction() on every call in Python 3.14+.
     """
     loop = asyncio.get_running_loop()
     if kwargs:
         func = functools.partial(func, **kwargs)
-    return await loop.run_in_executor(None, func, *args)
+    return await asyncio.wrap_future(
+        _threadpool.submit(func, *args), loop=loop
+    )
 
 
 async def iterate_in_threadpool(iterator: Any) -> AsyncGenerator:

@@ -1009,6 +1009,7 @@ class FastAPI(AppBase):
         )
         # ── v2.0: Initialize C++ core ─────────────────────────────────────
         self._core_app = CoreApp()
+        self._core_app.redirect_slashes = bool(redirect_slashes)
         self._routes_synced: bool = False
 
     # ── Lazy router + webhooks properties ─────────────────────────────────
@@ -1280,12 +1281,10 @@ class FastAPI(AppBase):
                 else:
                     _final = actual_rc(content=result, status_code=status_code)
 
-            # Schedule background tasks as fire-and-forget after response is returned.
-            # create_task schedules bg() on the running event loop; it executes after
-            # the current synchronous flow completes (i.e., after C++ writes the response).
-            if _bg is not None and getattr(_bg, 'tasks', None):
-                import asyncio as _asyncio
-                _asyncio.create_task(_bg())
+            # Attach bg tasks to response for _handle_async_di to run
+            # inside the exit_stack (before gen dep cleanup).
+            if _final is not None and _bg is not None and getattr(_bg, 'tasks', None):
+                _final.__cpp_bg_tasks__ = _bg
 
             return _final
 
@@ -1371,7 +1370,7 @@ class FastAPI(AppBase):
             if not isinstance(route, APIRoute):
                 continue
             endpoint = route.endpoint
-            _is_coro = inspect.iscoroutinefunction(endpoint)
+            _is_coro = inspect.iscoroutinefunction(endpoint) or inspect.iscoroutinefunction(inspect.unwrap(endpoint))
             _methods = sorted(route.methods) if route.methods else ["GET"]
             # HTTP spec §9.3.1: any resource supporting GET MUST also support HEAD.
             # Auto-register HEAD so clients/proxies get correct HEAD responses
@@ -1420,6 +1419,19 @@ class FastAPI(AppBase):
                 # Register fast-path metadata for eligible routes
                 if getattr(route, '_fast_path_eligible', False):
                     dep = route.dependant
+                    # Collect all body params: route's own + deps' body params
+                    _all_body_params = list(dep.body_params)
+                    _seen_bp = {f.name for f in _all_body_params}
+                    def _collect_dep_body_params(d):
+                        for sub in d.dependencies:
+                            if sub.call is None:
+                                continue
+                            for f in sub.body_params:
+                                if f.name not in _seen_bp:
+                                    _seen_bp.add(f.name)
+                                    _all_body_params.append(f)
+                            _collect_dep_body_params(sub)
+                    _collect_dep_body_params(dep)
                     body_param_name = (
                         dep.body_params[0].name if dep.body_params else None
                     )
@@ -1429,12 +1441,55 @@ class FastAPI(AppBase):
                         else None
                     )
                     dep_solver = getattr(route, '_dep_solver', None)
-                    param_validator = getattr(route, '_param_validator', None)
+                    _raw_pv = getattr(route, '_param_validator', None)
+                    # Wrap param_validator to handle dependency_overrides:
+                    # - skip original validation (override may change required params)
+                    # - validate override dep's required query params instead
+                    if _raw_pv is not None and dep_solver is not None:
+                        _app_ref = self
+                        _inner_pv = _raw_pv
+                        _route_dep = dep
+                        def _pv_with_override_check(kwargs_dict, _pv=_inner_pv, _app=_app_ref, _dep=_route_dep):
+                            overrides = getattr(_app, 'dependency_overrides', None)
+                            if not overrides:
+                                return _pv(kwargs_dict)
+                            # Validate required params of override deps (including sub-deps)
+                            # Also check query string for params not extracted by C++ FieldSpec
+                            from fastapi.dependencies.utils import get_dependant
+                            from urllib.parse import parse_qs
+                            try:
+                                from fastapi._cpp_server import _current_query_string
+                                _qs_bytes = _current_query_string.get()
+                                _qs_params = set(parse_qs(_qs_bytes.decode('latin-1'), keep_blank_values=True).keys()) if _qs_bytes else set()
+                            except Exception:
+                                _qs_params = set()
+                            _available = set(kwargs_dict.keys()) | _qs_params
+                            errors = []
+                            visited = set()
+                            def _collect_required(d):
+                                """Recursively collect required query params from dep tree."""
+                                override = overrides.get(d.call)
+                                target = get_dependant(path='/', call=override) if override is not None else d
+                                for f in target.query_params:
+                                    if f.required and f.name not in _available:
+                                        errors.append({"type": "missing", "loc": ["query", f.name], "msg": "Field required", "input": None})
+                                for sub in target.dependencies:
+                                    if sub.call and id(sub.call) not in visited:
+                                        visited.add(id(sub.call))
+                                        _collect_required(sub)
+                            for sub in _dep.dependencies:
+                                if sub.call and id(sub.call) not in visited:
+                                    visited.add(id(sub.call))
+                                    _collect_required(sub)
+                            return ({}, errors)
+                        param_validator = _pv_with_override_check
+                    else:
+                        param_validator = _raw_pv
                     self._core_app.register_fast_spec(
                         route_index,
                         body_param_name,
                         field_specs,
-                        dep.body_params if dep.body_params else None,
+                        _all_body_params if _all_body_params else None,
                         getattr(route, '_embed_body_fields', False),
                         dep if dep.dependencies else None,
                         dep_solver,
@@ -1452,7 +1507,7 @@ class FastAPI(AppBase):
                     dep_solver = None
                     if dep.dependencies:
                         try:
-                            dep_solver = _make_dep_solver(dep)
+                            dep_solver = _make_dep_solver(dep, self)
                         except Exception:
                             pass
                     raw_specs = getattr(route, '_batch_specs', [])
@@ -1481,7 +1536,7 @@ class FastAPI(AppBase):
                     dep_solver = None
                     if dep.dependencies:
                         try:
-                            dep_solver = _make_dep_solver(dep)
+                            dep_solver = _make_dep_solver(dep, self)
                         except Exception:
                             pass
                     raw_specs = getattr(route, '_batch_specs', [])

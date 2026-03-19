@@ -1,6 +1,12 @@
 """Test configuration — sets up resource limits and test fixes."""
+import os
 import resource
 import sys
+
+# Disable pydantic plugins (e.g. logfire) before any import triggers pydantic.
+# The logfire plugin tries to spawn threads during import, which fails in
+# resource-constrained environments (WSL, CI with low thread limits).
+os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "1")
 
 
 def _patch_starlette_routing():

@@ -1135,27 +1135,10 @@ static PyObject* CoreApp_get_response_filters(CoreAppObject* self, PyObject* arg
 static inline PyObject* coerce_param(std::string_view val, ParamType type_tag) {
     switch (type_tag) {
         case TYPE_INT: {
-            // Ultra-fast path: small positive integers (1-6 digits, no sign)
-            // Covers 99%+ of path/query integer params (IDs, page, limit, etc.)
-            if (val.size() >= 1 && val.size() <= 6) {
-                long v = 0;
-                bool all_digit = true;
-                for (char c : val) {
-                    if (c < '0' || c > '9') { all_digit = false; break; }
-                    v = v * 10 + (c - '0');
-                }
-                if (all_digit) return PyLong_FromLong(v);
-            }
-            // Fast path: std::from_chars works directly on string_view — no copy needed
-            if (val.size() <= 20) {
-                long long v = 0;
-                auto [ptr, ec] = std::from_chars(val.data(), val.data() + val.size(), v);
-                if (ec == std::errc{} && ptr == val.data() + val.size()) {
-                    return PyLong_FromLongLong(v);
-                }
-            }
-            // Fallback: return original string — param_validator will catch the type
-            // error and produce a proper 422 without crashing the server
+            // Return original string so param_validator passes it to Pydantic.
+            // This ensures validation error 'input' field shows the raw string
+            // (e.g. "42") not the coerced int (42), matching standard FastAPI.
+            // Pydantic coerces "42" -> 42 on success; on failure shows "42".
             return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
         }
         case TYPE_FLOAT: {
@@ -2976,7 +2959,7 @@ static PyObject* dispatch_one_request(
             }
             alt_buf[alt_len] = '\0';
         }
-        auto alt_match = do_redirect_check ? self->router.at(alt_buf, alt_len) : std::nullopt;
+        auto alt_match = (do_redirect_check && self->redirect_slashes) ? self->router.at(alt_buf, alt_len) : std::nullopt;
         if (alt_match) {
             if (!rt_frozen) lock.unlock();
             --self->counters.active_requests;
@@ -3749,16 +3732,35 @@ static PyObject* dispatch_one_request(
                         PyDict_Update(kwargs.get(), dep_values);
                     }
 
-                    // If there are validation errors, return 422
+                    // If there are validation errors, return 422 with full error detail
                     if (dep_errors && PyList_Check(dep_errors) && PyList_GET_SIZE(dep_errors) > 0) {
+                        // Incref dep_errors before decref dep_raw: dep_errors is a borrowed
+                        // reference into dep_raw tuple; decref-ing dep_raw first would free it.
+                        Py_INCREF(dep_errors);
                         Py_DECREF(dep_raw);
                         --self->counters.active_requests;
                         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                         Py_DECREF(endpoint_local);
                         Py_XDECREF(body_params_local);
-                        PyRef resp(build_http_error_response(422, "Validation Error", req.keep_alive,
-                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-                        if (resp) write_response_direct(sock_fd, transport, resp.get());
+                        // Serialize actual errors: {"detail": [...]} like param_validator path
+                        PyRef err_dict(PyDict_New());
+                        if (err_dict) {
+                            if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+                            PyDict_SetItem(err_dict.get(), s_detail_key_global, dep_errors);
+                            PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
+                            if (err_json) {
+                                char* ej_data; Py_ssize_t ej_len;
+                                PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
+                                build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
+                                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                            } else {
+                                PyErr_Clear();
+                                PyRef resp(build_http_error_response(422, "Validation Error", req.keep_alive,
+                                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                                if (resp) write_response_direct(sock_fd, transport, resp.get());
+                            }
+                        }
+                        Py_DECREF(dep_errors);
                         return make_consumed_true(self, req.total_consumed);
                     }
                 }
@@ -4015,8 +4017,8 @@ body_done:
             // Zero params — fastest path: no args tuple, no kwargs dict
             coro = PyRef(PyObject_CallNoArgs(endpoint_local));
         } else {
-            // Use vectorcall dict — avoids creating empty args tuple
-            coro = PyRef(PyObject_VectorcallDict(endpoint_local, nullptr, 0, kwargs.get()));
+            // PyObject_Call is safe for all callable types (wrapped funcs, class instances, async gens).
+            coro = PyRef(PyObject_Call(endpoint_local, g_empty_tuple, kwargs.get()));
         }
     }
     Py_DECREF(endpoint_local);  // release our strong ref
@@ -5629,6 +5631,7 @@ static PyMethodDef CoreApp_methods[] = {
 static PyMemberDef CoreApp_members[] = {
     {"last_consumed", Py_T_PYSSIZET, offsetof(CoreAppObject, last_consumed), Py_READONLY, nullptr},
     {"force_close", Py_T_INT, offsetof(CoreAppObject, force_close), 0, nullptr},
+    {"redirect_slashes", Py_T_BOOL, offsetof(CoreAppObject, redirect_slashes), 0, nullptr},
     {nullptr}
 };
 

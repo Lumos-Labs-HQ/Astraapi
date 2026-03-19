@@ -239,6 +239,7 @@ addopts = [
   "--strict-markers",
   "--ignore=docs_src",
   "-W", "ignore::pytest.PytestCollectionWarning",
+  "-p", "no:logfire",
 ]
 xfail_strict = true
 junit_family = "xunit2"
@@ -255,6 +256,8 @@ filterwarnings = [
     # Ref: https://github.com/python-trio/trio/pull/3054
     # Remove once there's a new version of Trio
     'ignore:The `hash` argument is deprecated*:DeprecationWarning:trio',
+    # logfire Pydantic plugin fails to load on Python 3.14 (missing _ctypes)
+    "ignore:ModuleNotFoundError while loading the `logfire-plugin`.*:UserWarning:pydantic",
 ]
 
 [tool.coverage.run]

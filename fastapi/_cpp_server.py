@@ -318,6 +318,41 @@ def _set_app_exception_handlers(exc_handlers: dict, status_handlers: dict) -> No
     _app_status_handlers = status_handlers
 
 
+# HTTP middleware dispatch functions registered at startup.
+# Each entry is an async callable(dispatch_func, request) -> response.
+# Empty list = zero overhead on hot path (no middleware registered).
+_http_middleware_dispatchers: list = []
+
+
+def _set_http_middleware_dispatchers(dispatchers: list) -> None:
+    global _http_middleware_dispatchers
+    _http_middleware_dispatchers = dispatchers
+
+
+# Test-mode exception capture (raise_server_exceptions support)
+_raise_server_exceptions: bool = False
+_last_server_exception = None
+
+# ContextVar: stores the raw query string for the current request.
+# Set in data_received() before C++ processes the request so that
+# dep_solver can inject params for dependency_overrides that introduce
+# new query parameters not in the original FieldSpec.
+from contextvars import ContextVar as _ContextVar
+_current_query_string: _ContextVar[bytes] = _ContextVar('_current_query_string', default=b'')
+
+
+def _set_raise_server_exceptions(enabled: bool) -> None:
+    global _raise_server_exceptions
+    _raise_server_exceptions = enabled
+
+
+def _pop_server_exception():
+    global _last_server_exception
+    exc = _last_server_exception
+    _last_server_exception = None
+    return exc
+
+
 # ── Pydantic validation (initialized at import time) ─────────────────────────
 
 try:
@@ -950,6 +985,21 @@ class _RejectProtocol(asyncio.Protocol):
 
 # ── Coroutine driver — properly forwards exceptions via throw() ──────────────
 
+def _inject_headers_into_response(resp: bytes, extra_headers: list) -> bytes:
+    """Inject extra headers into pre-built HTTP response bytes, before \r\n\r\n."""
+    sep = b'\r\n\r\n'
+    idx = resp.find(sep)
+    if idx == -1:
+        return resp
+    extra = b''
+    for k, v in extra_headers:
+        if isinstance(k, str): k = k.encode('latin-1')
+        if isinstance(v, str): v = v.encode('latin-1')
+        if k.lower() == b'content-length': continue
+        extra += b'\r\n' + k + b': ' + v
+    return resp[:idx] + extra + resp[idx:] if extra else resp
+
+
 async def _drive_coro(coro: Any, first_yield: Any) -> Any:
     """Drive a partially-consumed coroutine to completion.
 
@@ -991,6 +1041,113 @@ async def _drive_coro(coro: Any, first_yield: Any) -> Any:
             next_yield = coro.send(result)
         except StopIteration as e:
             return e.value
+
+
+async def _run_http_middleware(
+    raw: Any,
+    dispatchers: list,
+    extra_headers: list,
+    status_code: int,
+    keep_alive: bool,
+    transport: Any,
+    core: Any,
+    sock_fd: int,
+    raw_headers: Any,
+    method: str,
+    path: str,
+) -> Any:
+    """Run @app.middleware("http") chain after endpoint execution.
+
+    Builds a minimal Request and a pre-populated Response, runs each
+    middleware dispatch function, then writes the final response.
+    Only called when _http_middleware_dispatchers is non-empty.
+    """
+    from fastapi.requests import Request
+    from fastapi.responses import Response, JSONResponse
+
+    # Build minimal ASGI scope for Request
+    header_list = []
+    if raw_headers:
+        for item in raw_headers:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                name, value = item
+                if isinstance(name, str): name = name.lower().encode('latin-1')
+                elif isinstance(name, bytes): name = name.lower()
+                if isinstance(value, str): value = value.encode('latin-1')
+                header_list.append((name, value))
+
+    # Parse path and query string
+    _path, _, _qs = path.partition('?')
+    scope = {
+        "type": "http",
+        "method": method if isinstance(method, str) else method.decode('latin-1'),
+        "path": _path or '/',
+        "query_string": _qs.encode('latin-1') if _qs else b'',
+        "headers": header_list,
+        "root_path": "",
+    }
+
+    # Build pre-populated response from endpoint result
+    _raw_type = type(raw)
+    if _raw_type is dict or _raw_type is list:
+        resp_obj = JSONResponse(content=raw, status_code=status_code)
+    elif hasattr(raw, 'body') or hasattr(raw, 'media_type'):
+        resp_obj = raw  # already a Response
+    else:
+        resp_obj = JSONResponse(content=raw, status_code=status_code)
+    # Preserve shim-attached lifecycle objects (bg tasks, exit_stack)
+    _cpp_bg = getattr(raw, '__cpp_bg_tasks__', None)
+    _cpp_stack = getattr(raw, '__cpp_exit_stack__', None)
+    if _cpp_bg is not None: resp_obj.__cpp_bg_tasks__ = _cpp_bg
+    if _cpp_stack is not None: resp_obj.__cpp_exit_stack__ = _cpp_stack
+
+    # Apply extra headers from sub-deps
+    if extra_headers:
+        for k, v in extra_headers:
+            _k = k.decode('latin-1') if isinstance(k, bytes) else k
+            _v = v.decode('latin-1') if isinstance(v, bytes) else v
+            resp_obj.headers[_k] = _v
+
+    # Build call_next that returns the pre-built response
+    async def call_next(request: Any) -> Any:
+        return resp_obj
+
+    # Run middleware chain in reverse order (last registered = outermost)
+    request = Request(scope)
+    current_response = resp_obj
+    for dispatch_fn in reversed(dispatchers):
+        _prev = current_response
+        async def _call_next_for(req: Any, _r=_prev) -> Any:
+            return _r
+        current_response = await dispatch_fn(request, _call_next_for)
+        if current_response is None:
+            current_response = _prev
+
+    # Write final response
+    final = current_response
+    # Propagate lifecycle objects to final response if not already present
+    if not hasattr(final, '__cpp_bg_tasks__') and hasattr(resp_obj, '__cpp_bg_tasks__'):
+        final.__cpp_bg_tasks__ = resp_obj.__cpp_bg_tasks__
+    if not hasattr(final, '__cpp_exit_stack__') and hasattr(resp_obj, '__cpp_exit_stack__'):
+        final.__cpp_exit_stack__ = resp_obj.__cpp_exit_stack__
+    if transport and not transport.is_closing():
+        _sc = getattr(final, 'status_code', status_code)
+        _body = getattr(final, 'body', None)
+        if _body is not None and isinstance(_body, bytes):
+            # Response object: build from parts
+            # _build_response_from_parts expects list of (str, str) tuples
+            _hdrs = []
+            for _k, _v in final.headers.items():
+                _hdrs.append((
+                    _k.decode('latin-1') if isinstance(_k, bytes) else _k,
+                    _v.decode('latin-1') if isinstance(_v, bytes) else _v,
+                ))
+            transport.write(_build_response_from_parts(_sc, _hdrs, _body, keep_alive))
+        else:
+            resp = core.build_response_from_any(final, _sc, keep_alive)
+            if resp is not None:
+                transport.write(resp)
+    return final
 
 
 async def _write_chunked_streaming(transport: Any, raw: Any) -> None:
@@ -1230,6 +1387,19 @@ class CppHttpProtocol(asyncio.Protocol):
             return
 
         sock_fd = self._sock_fd
+
+        # Extract query string from raw HTTP request line and store in ContextVar.
+        # This allows dep_solver to inject params for dependency_overrides that
+        # introduce new query parameters not in the original FieldSpec.
+        _qs = b''
+        _nl = data.find(b'\r\n')
+        if _nl > 0:
+            _req_line = data[:_nl]
+            _q = _req_line.find(b'?')
+            if _q >= 0:
+                _sp = _req_line.find(b' ', _q)
+                _qs = _req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:]
+        _current_query_string.set(_qs)
 
         # ── Get first result: fused append+dispatch if available, else separate ────────────
         core_ad = self._core_append_dispatch
@@ -1661,6 +1831,9 @@ class CppHttpProtocol(asyncio.Protocol):
             except Exception:
                 pass
         logger.exception("Unhandled exception in endpoint")
+        if _raise_server_exceptions:
+            global _last_server_exception
+            _last_server_exception = exc
         transport.write(_500_RESP)
 
     # ── Async endpoint dispatch ──────────────────────────────────────────
@@ -1686,15 +1859,32 @@ class CppHttpProtocol(asyncio.Protocol):
                 else:
                     # OPT-3.4: Unified C++ type dispatch (str/int/bool/None/Pydantic/Response)
                     # Returns None only for StreamingResponse (needs Python async iteration).
-                    resp = self._core.build_response_from_any(raw, status_code, keep_alive)
-                    if resp is not None:
-                        transport.write(resp)
+                    # Run HTTP middleware if registered
+                    if _http_middleware_dispatchers:
+                        raw = await _run_http_middleware(
+                            raw, _http_middleware_dispatchers,
+                            [], status_code, keep_alive,
+                            transport, self._core, self._sock_fd,
+                            None, 'GET', '/'
+                        )
                     else:
-                        await _write_chunked_streaming(transport, raw)
+                        resp = self._core.build_response_from_any(raw, status_code, keep_alive)
+                        if resp is not None:
+                            transport.write(resp)
+                        else:
+                            await _write_chunked_streaming(transport, raw)
                     # BackgroundTasks: only non-primitive returns can have them
                     background = getattr(raw, 'background', None)
                     if background is not None:
                         await background()
+                    # Shim lifecycle: bg tasks then exit_stack
+                    _shim_bg = getattr(raw, '__cpp_bg_tasks__', None)
+                    import sys
+                    if _shim_bg is not None and getattr(_shim_bg, 'tasks', None):
+                        await _shim_bg()
+                    _shim_stack = getattr(raw, '__cpp_exit_stack__', None)
+                    if _shim_stack is not None:
+                        await _shim_stack.aclose()
         except Exception as exc:
             await self._dispatch_exception(exc, keep_alive)
         finally:
@@ -1801,7 +1991,7 @@ class CppHttpProtocol(asyncio.Protocol):
                 exit_stack = None
 
             # Call endpoint — handle sync vs async, and wrap with exit_stack for gen dep cleanup
-            _is_async_endpoint = inspect.iscoroutinefunction(endpoint)
+            _is_async_endpoint = inspect.iscoroutinefunction(endpoint) or inspect.iscoroutinefunction(inspect.unwrap(endpoint))
 
             async def _call_and_write() -> Any:
                 """Call endpoint and write response (used both in and out of exit_stack)."""
@@ -1811,40 +2001,61 @@ class CppHttpProtocol(asyncio.Protocol):
                     _raw = endpoint(**kwargs)
                 transport = self._transport
                 if transport and not transport.is_closing():
-                    _raw_type = type(_raw)
-                    if _raw_type is dict or _raw_type is list:
-                        if _di_extra_headers and _encode_to_json_bytes is not None:
-                            # OPT-B: merge sub-dep response headers into JSON response
-                            _body = _encode_to_json_bytes(_raw)
-                            _merged = [(b"content-type", b"application/json")] + _di_extra_headers
-                            transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
-                        else:
-                            # OPT-write_async_result: zero-alloc direct fd write
-                            self._core.write_async_result(_raw, transport, status_code, keep_alive, self._sock_fd)
+                    # Run HTTP middleware if registered (@app.middleware("http"))
+                    # Zero overhead when empty: branch not taken.
+                    if _http_middleware_dispatchers:
+                        _raw = await _run_http_middleware(
+                            _raw, _http_middleware_dispatchers,
+                            _di_extra_headers, status_code, keep_alive,
+                            transport, self._core, self._sock_fd,
+                            kwargs.get('__raw_headers__'), kwargs.get('__method__', 'GET'),
+                            kwargs.get('__path__', '/')
+                        )
                     else:
-                        resp = self._core.build_response_from_any(_raw, status_code, keep_alive)
-                        if resp is not None:
-                            transport.write(resp)
+                        _raw_type = type(_raw)
+                        if _raw_type is dict or _raw_type is list:
+                            if _di_extra_headers and _encode_to_json_bytes is not None:
+                                # OPT-B: merge sub-dep response headers into JSON response
+                                _body = _encode_to_json_bytes(_raw)
+                                _merged = [(b"content-type", b"application/json")] + _di_extra_headers
+                                transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
+                            else:
+                                # OPT-write_async_result: zero-alloc direct fd write
+                                self._core.write_async_result(_raw, transport, status_code, keep_alive, self._sock_fd)
                         else:
-                            # StreamingResponse — chunked transfer encoding
-                            await _write_chunked_streaming(transport, _raw)
+                            resp = self._core.build_response_from_any(_raw, status_code, keep_alive)
+                            if resp is not None:
+                                if _di_extra_headers:
+                                    # Inject sub-dep headers into pre-built response bytes
+                                    resp = _inject_headers_into_response(resp, _di_extra_headers)
+                                transport.write(resp)
+                            else:
+                                # StreamingResponse — chunked transfer encoding
+                                await _write_chunked_streaming(transport, _raw)
+                    # Run shim bg tasks (from BackgroundTasks param) after middleware
+                    _shim_bg = getattr(_raw, '__cpp_bg_tasks__', None)
+                    if _shim_bg is not None and getattr(_shim_bg, 'tasks', None):
+                        await _shim_bg()
                 return _raw
 
             if exit_stack is not None:
-                # Write response INSIDE exit_stack context so cleanup happens after
-                # response bytes are serialized (important for mutable return values).
+                # Write response AND run background tasks INSIDE exit_stack so
+                # cleanup (generator dep teardown) happens AFTER bg tasks complete.
+                # This matches FastAPI semantics: bg tasks see pre-cleanup dep state.
                 async with exit_stack:
                     raw = await _call_and_write()
+                    background = getattr(raw, 'background', None)
+                    if background is not None:
+                        await background()
+                    if di_bg_tasks is not None and getattr(di_bg_tasks, 'tasks', None):
+                        await di_bg_tasks()
             else:
                 raw = await _call_and_write()
-            # BackgroundTasks support: run tasks from Response.background (direct return)
-            background = getattr(raw, 'background', None)
-            if background is not None:
-                await background()
-            # Run background tasks accumulated during DI resolution (e.g. from sub-deps
-            # that receive `background_tasks: BackgroundTasks` and add tasks).
-            if di_bg_tasks is not None and getattr(di_bg_tasks, 'tasks', None):
-                await di_bg_tasks()
+                background = getattr(raw, 'background', None)
+                if background is not None:
+                    await background()
+                if di_bg_tasks is not None and getattr(di_bg_tasks, 'tasks', None):
+                    await di_bg_tasks()
         except Exception as exc:
             await self._dispatch_exception(exc, keep_alive)
         finally:
@@ -1968,6 +2179,18 @@ async def _create_server(
         dict(getattr(app, 'exception_handlers', {})),
         {k: v for k, v in getattr(app, 'exception_handlers', {}).items() if isinstance(k, int)},
     )
+
+    # Register @app.middleware("http") dispatch functions for async response path
+    _http_dispatchers = []
+    for _mw in getattr(app, 'user_middleware', []):
+        _cls = getattr(_mw, 'cls', None) or (_mw[0] if isinstance(_mw, (list, tuple)) else None)
+        _cls_name = getattr(_cls, '__name__', '')
+        if _cls_name == 'BaseHTTPMiddleware':
+            _kw = getattr(_mw, 'kwargs', {}) or {}
+            _dispatch = _kw.get('dispatch')
+            if _dispatch is not None:
+                _http_dispatchers.append(_dispatch)
+    _set_http_middleware_dispatchers(_http_dispatchers)
 
     # Sync CORS config to C++ core
     if hasattr(core_app, "configure_cors"):
@@ -2519,6 +2742,9 @@ async def run_server(
                 unix_sock.close()
             except OSError:
                 pass
+
+        # Reset middleware dispatchers so they don't leak to subsequent servers
+        _set_http_middleware_dispatchers([])
 
         # Short drain for reload workers; normal drain otherwise
         drain_timeout = 0.5 if _is_reload_worker else 5.0

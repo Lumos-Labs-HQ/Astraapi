@@ -166,6 +166,7 @@ class TestClient:
         # Populated with starlette-compatible default so tests expecting
         # 'User-Agent: testclient' pass even without explicit headers.
         self.headers: Any = httpx.Headers({"user-agent": "testclient"})
+        self._raise_server_exceptions = raise_server_exceptions
 
     def _ensure_started(self) -> None:
         """Start the server on first use (lazy init — no FDs opened at construction)."""
@@ -245,7 +246,24 @@ class TestClient:
             loop.close()
 
     async def _serve(self, loop: asyncio.AbstractEventLoop) -> None:
-        from fastapi._cpp_server import _create_server
+        from fastapi._cpp_server import _create_server, _set_raise_server_exceptions
+        _set_raise_server_exceptions(self._raise_server_exceptions)
+        # Run lifespan startup before signalling ready
+        _lifespan_cm = None
+        _router = getattr(self.app, "router", None)
+        _lh = getattr(_router, "lifespan_context", None) if _router else None
+        if _lh is not None:
+            _lifespan_cm = _lh(self.app)
+            _ls_state = await _lifespan_cm.__aenter__()
+            if _ls_state is not None:
+                _app_state = getattr(self.app, "state", None)
+                if _app_state is not None:
+                    _sd = getattr(_app_state, "_state", None)
+                    if isinstance(_sd, dict):
+                        _sd.update(_ls_state)
+                    elif isinstance(_ls_state, dict):
+                        for _k, _v in _ls_state.items():
+                            setattr(_app_state, _k, _v)
         server = await _create_server(self.app, "127.0.0.1", self._port)
         # Use asyncio.Event for clean shutdown instead of polling every 50ms.
         # The stop event is set by close() via loop.call_soon_threadsafe().
@@ -255,40 +273,80 @@ class TestClient:
         await stop_event.wait()
         server.close()
         await server.wait_closed()
+        if _lifespan_cm is not None:
+            await _lifespan_cm.__aexit__(None, None, None)
 
     # -- HTTP methods (all lazy-start) ---------------------------------------
 
+    def _check_exc(self) -> None:
+        """Re-raise any server exception captured during the last request."""
+        if not self._raise_server_exceptions:
+            return
+        from fastapi._cpp_server import _pop_server_exception
+        exc = _pop_server_exception()
+        if exc is not None:
+            raise exc
+
+    def _sync_raise_flag(self) -> None:
+        """Sync _raise_server_exceptions global to this client's setting before each request."""
+        from fastapi._cpp_server import _set_raise_server_exceptions
+        _set_raise_server_exceptions(self._raise_server_exceptions)
+
     def get(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
-        return self._client.get(url, **kwargs)
+        self._sync_raise_flag()
+        resp = self._client.get(url, **kwargs)
+        self._check_exc()
+        return resp
 
     def post(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
-        return self._client.post(url, **kwargs)
+        self._sync_raise_flag()
+        resp = self._client.post(url, **kwargs)
+        self._check_exc()
+        return resp
 
     def put(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
-        return self._client.put(url, **kwargs)
+        self._sync_raise_flag()
+        resp = self._client.put(url, **kwargs)
+        self._check_exc()
+        return resp
 
     def patch(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
-        return self._client.patch(url, **kwargs)
+        self._sync_raise_flag()
+        resp = self._client.patch(url, **kwargs)
+        self._check_exc()
+        return resp
 
     def delete(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
-        return self._client.delete(url, **kwargs)
+        self._sync_raise_flag()
+        resp = self._client.delete(url, **kwargs)
+        self._check_exc()
+        return resp
 
     def options(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
-        return self._client.options(url, **kwargs)
+        self._sync_raise_flag()
+        resp = self._client.options(url, **kwargs)
+        self._check_exc()
+        return resp
 
     def head(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
-        return self._client.head(url, **kwargs)
+        self._sync_raise_flag()
+        resp = self._client.head(url, **kwargs)
+        self._check_exc()
+        return resp
 
     def request(self, method: str, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
-        return self._client.request(method, url, **kwargs)
+        self._sync_raise_flag()
+        resp = self._client.request(method, url, **kwargs)
+        self._check_exc()
+        return resp
 
     def websocket_connect(
         self, url: str, subprotocols: list[str] | None = None, **kwargs: Any
@@ -317,9 +375,29 @@ class TestClient:
             except Exception:
                 pass
 
+    def _stop_server(self) -> None:
+        """Stop the server thread and wait for it to finish (runs lifespan shutdown)."""
+        if self._stop_event is not None and self._loop_ref is not None:
+            self._loop_ref.call_soon_threadsafe(self._stop_event.set)
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+        self._thread = None
+        self._client = None
+
     def __enter__(self) -> "TestClient":
+        self._ensure_started()
         return self
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+        self._stop_server()
+
+    @property
+    def app_state(self) -> Any:
+        """Return the lifespan state dict from app.state, or None if empty."""
+        app_state = getattr(self.app, "state", None)
+        if app_state is None:
+            return None
+        state_dict = getattr(app_state, "_state", {})
+        return state_dict if state_dict else None
 
