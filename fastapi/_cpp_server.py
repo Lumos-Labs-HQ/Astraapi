@@ -823,7 +823,7 @@ class CppWebSocket:
             self.client_state = WebSocketState.DISCONNECTED
             return {"type": "websocket.disconnect", "code": self._parse_close_code(payload)}
         elif opcode == 0x1:
-            return {"type": "websocket.receive", "text": payload.decode("utf-8")}
+            return {"type": "websocket.receive", "text": payload if isinstance(payload, str) else payload.decode("utf-8")}
         else:
             return {"type": "websocket.receive", "bytes": payload}
 
@@ -1921,7 +1921,8 @@ class CppHttpProtocol(asyncio.Protocol):
         if isinstance(exc, RequestValidationError):
             try:
                 from fastapi._core_bridge import serialize_error_response
-                body = serialize_error_response(exc.errors())
+                errors = [{k: v for k, v in e.items() if k != "url"} for e in exc.errors()]
+                body = serialize_error_response(errors)
                 transport.write(
                     _build_response_from_parts(422, [(b"content-type", b"application/json")], body, keep_alive)
                 )
@@ -2121,7 +2122,7 @@ class CppHttpProtocol(asyncio.Protocol):
                 else:
                     _raw = endpoint(**kwargs)
                 # Merge response headers set by endpoint (response: Response param)
-                nonlocal _di_extra_headers
+                nonlocal status_code, _di_extra_headers
                 if _di_response_obj is not None:
                     _post_hdrs = []
                     _raw_hdrs2 = getattr(_di_response_obj, "raw_headers", None)

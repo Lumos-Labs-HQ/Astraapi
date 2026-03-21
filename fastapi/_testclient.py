@@ -63,11 +63,16 @@ class WebSocketTestSession:
             raise self._error
         return self
 
-    def __exit__(self, *args: Any) -> None:
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         try:
             self._close_sync()
         except Exception:
             pass
+        # If exiting normally (no exception), raise WebSocketDisconnect
+        # to match Starlette test client behavior (server sees disconnect)
+        if exc_type is None:
+            from fastapi._websocket import WebSocketDisconnect
+            raise WebSocketDisconnect(code=1000)
 
     def _run(self) -> None:
         try:

@@ -149,6 +149,7 @@ struct RouteInfo {
     std::optional<std::string> operation_id;
     bool has_body;
     bool is_form;
+    bool is_multi_method = false;  // true when same path has multiple method routes
     std::optional<FastRouteSpec> fast_spec;
 };
 

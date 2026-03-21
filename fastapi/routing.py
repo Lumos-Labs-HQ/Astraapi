@@ -1213,7 +1213,6 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                             "loc": ("query", _rp),
                             "msg": "Field required",
                             "input": None,
-                            "url": "https://errors.pydantic.dev/2.0/v/missing",
                         })
                 if errors:
                     continue
@@ -1385,7 +1384,6 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                             "loc": ("query", _rp),
                             "msg": "Field required",
                             "input": None,
-                            "url": "https://errors.pydantic.dev/2.0/v/missing",
                         })
                 if errors:
                     continue
@@ -1561,7 +1559,6 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                             "loc": ("query", _rp),
                             "msg": "Field required",
                             "input": None,
-                            "url": "https://errors.pydantic.dev/2.0/v/missing",
                         })
                 if errors:
                     continue

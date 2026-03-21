@@ -33,7 +33,8 @@ async def request_validation_exception_handler(
 ) -> JSONResponse:
     # Core fast-path: serialize error dicts directly to JSON bytes in one
     # call, skipping jsonable_encoder() + JSONResponse.render() overhead.
-    body_bytes = serialize_error_response(exc.errors())
+    errors = [{k: v for k, v in e.items() if k != "url"} for e in exc.errors()]
+    body_bytes = serialize_error_response(errors)
     return Response(
         content=body_bytes,
         status_code=422,

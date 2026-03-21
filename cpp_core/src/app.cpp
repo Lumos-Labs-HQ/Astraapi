@@ -77,6 +77,7 @@ static inline bool ci_contains(const char* s, size_t s_len, const char* needle, 
 // ── Module-level cached imports (consolidated, cleaned up at exit) ────────────
 static PyObject* s_http_exc_type = nullptr;         // starlette.exceptions.HTTPException
 static PyObject* s_fastapi_http_exc_type = nullptr;  // fastapi.exceptions.HTTPException
+static PyObject* s_validation_exc_type = nullptr;    // fastapi.exceptions.RequestValidationError
 static PyObject* s_resume_func = nullptr;            // fastapi._core_app._resume_coro
 static PyObject* s_request_body_to_args = nullptr;   // fastapi.dependencies.utils.request_body_to_args
 static PyObject* s_form_data_class = nullptr;         // fastapi._datastructures_impl.FormData
@@ -148,6 +149,7 @@ static inline PyObject* get_cached_method(const char* data, size_t len, bool& is
 void cleanup_cached_refs() {
     Py_CLEAR(s_http_exc_type);
     Py_CLEAR(s_fastapi_http_exc_type);
+    Py_CLEAR(s_validation_exc_type);
     Py_CLEAR(s_resume_func);
     Py_CLEAR(s_request_body_to_args);
     Py_CLEAR(s_form_data_class);
@@ -197,6 +199,11 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     if (!s_fastapi_http_exc_type) {
         PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
         if (mod) s_fastapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else PyErr_Clear();
+    }
+    if (!s_validation_exc_type) {
+        PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
+        if (mod) s_validation_exc_type = PyObject_GetAttrString(mod.get(), "RequestValidationError");
         else PyErr_Clear();
     }
 
@@ -303,6 +310,19 @@ static bool is_http_exception(PyObject* exc_type) {
         if (r == 1) return true;
     }
     return false;
+}
+
+static bool is_validation_exception(PyObject* exc_type) {
+    if (!exc_type) return false;
+    if (!s_validation_exc_type) {
+        PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
+        if (mod) s_validation_exc_type = PyObject_GetAttrString(mod.get(), "RequestValidationError");
+        else PyErr_Clear();
+    }
+    if (!s_validation_exc_type) return false;
+    int r = PyObject_IsSubclass(exc_type, s_validation_exc_type);
+    if (r < 0) PyErr_Clear();
+    return r == 1;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -952,7 +972,7 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
         "response_model_field", "response_class", "include", "exclude",
         "exclude_unset", "exclude_defaults", "exclude_none",
         "tags", "summary", "description", "operation_id",
-        "has_body", "is_form", nullptr
+        "has_body", "is_form", "is_multi_method", nullptr
     };
 
     const char* path = nullptr;
@@ -969,15 +989,15 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
     const char* summary = nullptr;
     const char* description = nullptr;
     const char* operation_id = nullptr;
-    int has_body = 0, is_form = 0;
+    int has_body = 0, is_form = 0, is_multi_method_arg = 0;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-            "sOOp|HOOOOpppOzzzpp", (char**)kwlist,
+            "sOOp|HOOOOpppOzzzppp", (char**)kwlist,
             &path, &methods_list, &endpoint, &is_coroutine,
             &status_code, &response_model_field, &response_class,
             &include, &exclude, &exclude_unset, &exclude_defaults, &exclude_none,
             &tags_list, &summary, &description, &operation_id,
-            &has_body, &is_form)) {
+            &has_body, &is_form, &is_multi_method_arg)) {
         return nullptr;
     }
 
@@ -1020,9 +1040,30 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
     route.operation_id = operation_id ? std::optional<std::string>(operation_id) : std::nullopt;
     route.has_body = (bool)has_body;
     route.is_form = (bool)is_form;
+    route.is_multi_method = (bool)is_multi_method_arg;
 
     {
         std::unique_lock lock(self->routes_mutex);
+        // Check if path already registered — merge method mask + store per-method endpoint
+        auto existing = self->router.at(path, strlen(path));
+        if (existing.has_value() && existing->route_index >= 0) {
+            int eidx = existing->route_index;
+            RouteInfo& er = self->routes[eidx];
+            // Merge method mask; Python group dispatcher handles per-method routing
+            er.method_mask |= route.method_mask;
+            er.has_body = er.has_body || route.has_body;
+            er.is_multi_method = true;
+            // Clear fast spec body params so C++ does not require body for all methods
+            if (er.fast_spec.has_value()) {
+                auto& fs = *er.fast_spec;
+                Py_XDECREF(fs.body_params); fs.body_params = nullptr;
+                fs.has_body_params = false;
+                fs.body_param_name = nullptr;
+            }
+            Py_DECREF(route.endpoint);
+            route.endpoint = nullptr;
+            return PyLong_FromUnsignedLongLong(er.route_id);
+        }
         int idx = (int)self->routes.size();
         self->router.insert(path, idx);
         self->routes.push_back(std::move(route));
@@ -3115,10 +3156,39 @@ static PyObject* dispatch_one_request(
         spec.has_query_params || spec.has_header_params ||
         spec.has_cookie_params || has_body_params_local ||
         spec.has_dependencies || !req.query_string.empty() ||
-        is_form_local;
+        is_form_local || route.is_multi_method;
 
     PyRef kwargs(needs_kwargs ? PyDict_New() : nullptr);
     if (needs_kwargs && !kwargs) return nullptr;
+
+    // Inject __method__ and __body__ for multi-method routes (group dispatcher needs them)
+    if (route.is_multi_method && kwargs) {
+        bool mc = false;
+        PyObject* ms = get_cached_method(req.method.data, req.method.len, mc);
+        if (ms) { PyDict_SetItem(kwargs.get(), s_m_key, ms); if (!mc) Py_DECREF(ms); }
+        // Pass raw body bytes so group dispatcher can parse body params
+        if (req.body.len > 0) {
+            PyRef body_bytes(PyBytes_FromStringAndSize(req.body.data, (Py_ssize_t)req.body.len));
+            if (body_bytes) {
+                static PyObject* s_body_key = nullptr;
+                if (!s_body_key) s_body_key = PyUnicode_InternFromString("__body__");
+                PyDict_SetItem(kwargs.get(), s_body_key, body_bytes.get());
+            }
+        }
+        // Pass content-type header
+        for (int hi = 0; hi < req.header_count; hi++) {
+            if (req.headers[hi].name.len == 12 &&
+                strncasecmp(req.headers[hi].name.data, "content-type", 12) == 0) {
+                PyRef ct(PyUnicode_FromStringAndSize(req.headers[hi].value.data, (Py_ssize_t)req.headers[hi].value.len));
+                if (ct) {
+                    static PyObject* s_ct_key = nullptr;
+                    if (!s_ct_key) s_ct_key = PyUnicode_InternFromString("__content_type__");
+                    PyDict_SetItem(kwargs.get(), s_ct_key, ct.get());
+                }
+                break;
+            }
+        }
+    }
 
     // ── Path parameters — O(1) hash map lookup ────────────────────────
     if (needs_kwargs && match->param_count > 0) {
@@ -4467,9 +4537,61 @@ body_done:
                 --self->counters.active_requests;
                 return make_consumed_true(self, req.total_consumed);
             }
+        } else if (is_validation_exception(exc_type)) {
+            PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
+            static PyObject* s_errors_str2 = nullptr;
+            if (!s_errors_str2) s_errors_str2 = PyUnicode_InternFromString("errors");
+            PyRef em(exc_val ? PyObject_GetAttr(exc_val, s_errors_str2) : nullptr);
+            PyRef el_raw(em ? PyObject_CallNoArgs(em.get()) : nullptr);
+            if (!el_raw) PyErr_Clear();
+            // Strip "url" key from each error dict (pydantic v2 adds it)
+            PyRef el(nullptr);
+            if (el_raw && PyList_Check(el_raw.get())) {
+                static PyObject* s_url_key = nullptr;
+                if (!s_url_key) s_url_key = PyUnicode_InternFromString("url");
+                Py_ssize_t nerr = PyList_GET_SIZE(el_raw.get());
+                PyRef filtered(PyList_New(nerr));
+                if (filtered) {
+                    for (Py_ssize_t ei = 0; ei < nerr; ei++) {
+                        PyObject* orig = PyList_GET_ITEM(el_raw.get(), ei);
+                        if (PyDict_Check(orig)) {
+                            PyRef copy(PyDict_Copy(orig));
+                            if (copy) { PyDict_DelItem(copy.get(), s_url_key); PyErr_Clear(); }
+                            Py_INCREF(copy ? copy.get() : orig);
+                            PyList_SET_ITEM(filtered.get(), ei, copy ? copy.release() : (Py_INCREF(orig), orig));
+                        } else {
+                            Py_INCREF(orig);
+                            PyList_SET_ITEM(filtered.get(), ei, orig);
+                        }
+                    }
+                    el = std::move(filtered);
+                }
+            } else {
+                el = std::move(el_raw);
+            }
+            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+            static PyObject* s_det_key = nullptr;
+            if (!s_det_key) s_det_key = PyUnicode_InternFromString("detail");
+            PyRef dd(PyDict_New());
+            if (dd && el) PyDict_SetItem(dd.get(), s_det_key, el.get());
+            if (dd) {
+                int wrc422 = serialize_json_and_write_response(
+                    sock_fd, transport, dd.get(), 422, req.keep_alive,
+                    nullptr, 0, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                if (wrc422 < 0) {
+                    PyRef r422(build_http_error_response(422, "Validation Error", req.keep_alive,
+                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                    if (r422) write_response_direct(sock_fd, transport, r422.get());
+                }
+                fire_post_response_hook(self, req.method.data, req.method.len,
+                                        req.path.data, req.path.len, 422, request_start_time);
+                --self->counters.active_requests;
+                return make_consumed_true(self, req.total_consumed);
+            }
         }
         Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
     }
+
 
     PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
