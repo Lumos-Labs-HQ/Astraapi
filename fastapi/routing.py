@@ -761,16 +761,25 @@ def _build_field_specs(
             alias = get_validation_alias(field)
             tag = _get_scalar_type_tag(field) or ""
             convert = getattr(field.field_info, "convert_underscores", True)
+            is_seq = is_sequence_field(field) and not _is_json_field(field)
             is_req = field.required
             default = None if is_req else field.get_default()
-            specs.append(("header", alias, tag, field.name, False, False, convert, is_req, default))
+            specs.append(("header", alias, tag, field.name, is_seq, False, convert, is_req, default))
 
     for field in dependant.cookie_params:
-        alias = get_validation_alias(field)
-        tag = _get_scalar_type_tag(field) or ""
-        is_req = field.required
-        default = None if is_req else field.get_default()
-        specs.append(("cookie", alias, tag, field.name, False, False, False, is_req, default))
+        if lenient_issubclass(field.type_, _BaseModel):
+            # Model-based cookie param: expand inner fields
+            for inner_f in get_cached_model_fields(field.type_):
+                inner_alias = get_validation_alias(inner_f)
+                tag = _get_scalar_type_tag(inner_f) or ""
+                inner_default = None if inner_f.required else inner_f.get_default()
+                specs.append(("cookie", inner_alias, tag, inner_f.name, False, False, False, False, inner_default))
+        else:
+            alias = get_validation_alias(field)
+            tag = _get_scalar_type_tag(field) or ""
+            is_req = field.required
+            default = None if is_req else field.get_default()
+            specs.append(("cookie", alias, tag, field.name, False, False, False, is_req, default))
 
     for field in dependant.path_params:
         alias = get_validation_alias(field)
@@ -816,7 +825,9 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                 inner_specs = []
                 for inner_f in get_cached_model_fields(field.type_):
                     inner_alias = get_validation_alias(inner_f)
-                    inner_specs.append((inner_f.name, inner_alias))
+                    from fastapi.dependencies.utils import is_sequence_field as _isf
+                    inner_is_list = _isf(inner_f)
+                    inner_specs.append((inner_f.name, inner_alias, inner_is_list))
                 model_param_info.append((loc, field.name, field._type_adapter, inner_specs))
             else:
                 alias = get_validation_alias(field)
@@ -877,11 +888,14 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
         for loc, outer_name, outer_ta, inner_specs in model_param_info:
             # Collect inner field values from kwargs (C++ extracted them individually)
             inner_dict: dict = {}
-            for inner_name, inner_alias in inner_specs:
+            for inner_name, inner_alias, inner_is_list in inner_specs:
                 val = kwargs_dict.get(inner_name)
                 if val is None and inner_alias != inner_name:
                     val = kwargs_dict.get(inner_alias)
                 if val is not None:
+                    # Wrap string in list for list-type fields
+                    if inner_is_list and isinstance(val, str):
+                        val = [val]
                     inner_dict[inner_name] = val
 
             # Validate the assembled dict as the model type
@@ -895,7 +909,16 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                     new_err["loc"] = (loc,) + tuple(inner_loc)
                     errors.append(new_err)
 
-        return (values, errors)
+        # Collect consumed raw keys (individual fields assembled into models)
+        consumed: set = set()
+        for _, alias, name, _, _, _ in param_info:
+            consumed.add(alias)
+            consumed.add(name)
+        for _, outer_name, _, inner_specs in model_param_info:
+            for inner_name, inner_alias, _ in inner_specs:
+                consumed.add(inner_name)
+                consumed.add(inner_alias)
+        return (values, errors, consumed)
 
     return _validate
 
@@ -1001,14 +1024,20 @@ def _flatten_deps(
         param_names: set[str] = set()
         required_query_params: set[str] = set()  # required query params (no default)
         required_body_params: set[str] = set()   # required body params (no default)
+        required_header_params: set[str] = set()  # required header params
+        required_cookie_params: set[str] = set()  # required cookie params
         for f in sub_dep.query_params:
             param_names.add(f.name)
             if f.required:
                 required_query_params.add(f.name)
         for f in sub_dep.header_params:
             param_names.add(f.name)
+            if f.required:
+                required_header_params.add(f.alias or f.name)
         for f in sub_dep.cookie_params:
             param_names.add(f.name)
+            if f.required:
+                required_cookie_params.add(f.alias or f.name)
         for f in sub_dep.path_params:
             param_names.add(f.name)
         for f in sub_dep.body_params:
@@ -1046,6 +1075,8 @@ def _flatten_deps(
             'param_names': param_names,
             'required_query_params': required_query_params,
             'required_body_params': required_body_params,
+            'required_header_params': required_header_params,
+            'required_cookie_params': required_cookie_params,
             'security_scopes_param': sub_dep.security_scopes_param_name,
             'oauth_scopes': list(sub_dep.parent_oauth_scopes or []) + list(sub_dep.own_oauth_scopes or []),
             'is_security': is_security,
@@ -1204,6 +1235,7 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                     dep_kwargs[pname] = kwargs_dict[pname]
 
             # Validate required query params -- produce proper Pydantic-style errors
+            _prev_err_count = len(errors)
             _req_qp = node.get('required_query_params')
             if _req_qp:
                 for _rp in _req_qp:
@@ -1214,7 +1246,7 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                             "msg": "Field required",
                             "input": None,
                         })
-                if errors:
+                if len(errors) > _prev_err_count:
                     continue
             # Validate required body params
             _req_bp = node.get('required_body_params')
@@ -1227,7 +1259,33 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                             "msg": "Field required",
                             "input": None,
                         })
-                if errors:
+                if len(errors) > _prev_err_count:
+                    continue
+            # Validate required header params
+            _req_hp = node.get('required_header_params')
+            if _req_hp:
+                for _rp in _req_hp:
+                    if _rp not in dep_kwargs and _rp.replace('-', '_') not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("header", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                        })
+                if len(errors) > _prev_err_count:
+                    continue
+            # Validate required cookie params
+            _req_cp = node.get('required_cookie_params')
+            if _req_cp:
+                for _rp in _req_cp:
+                    if _rp not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("cookie", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                        })
+                if len(errors) > _prev_err_count:
                     continue
 
             # Inject Request object if needed (fallback for non-security deps)
@@ -1375,6 +1433,7 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                     dep_kwargs[pname] = kwargs_dict[pname]
 
             # Validate required query params -- produce proper Pydantic-style errors
+            _prev_err_count = len(errors)
             _req_qp = node.get('required_query_params')
             if _req_qp:
                 for _rp in _req_qp:
@@ -1385,7 +1444,7 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                             "msg": "Field required",
                             "input": None,
                         })
-                if errors:
+                if len(errors) > _prev_err_count:
                     continue
             # Validate required body params
             _req_bp = node.get('required_body_params')
@@ -1398,7 +1457,33 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                             "msg": "Field required",
                             "input": None,
                         })
-                if errors:
+                if len(errors) > _prev_err_count:
+                    continue
+            # Validate required header params
+            _req_hp = node.get('required_header_params')
+            if _req_hp:
+                for _rp in _req_hp:
+                    if _rp not in dep_kwargs and _rp.replace('-', '_') not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("header", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                        })
+                if len(errors) > _prev_err_count:
+                    continue
+            # Validate required cookie params
+            _req_cp = node.get('required_cookie_params')
+            if _req_cp:
+                for _rp in _req_cp:
+                    if _rp not in dep_kwargs:
+                        errors.append({
+                            "type": "missing",
+                            "loc": ("cookie", _rp),
+                            "msg": "Field required",
+                            "input": None,
+                        })
+                if len(errors) > _prev_err_count:
                     continue
 
             # Inject Request object if needed (fallback for non-security deps)

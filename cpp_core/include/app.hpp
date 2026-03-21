@@ -71,6 +71,8 @@ struct FieldSpec {
     ParamLocation location;
     ParamType type_tag;
     bool required;
+    bool convert_underscores;  // for header params: if false, don't match '-' as '_'
+    bool is_sequence;          // for list-typed params: collect multiple values into list
     PyObject* default_value;   // strong ref or NULL (INCREF'd in register_fast_spec)
     PyObject* py_field_name;   // pre-interned PyUnicode (strong ref)
 };

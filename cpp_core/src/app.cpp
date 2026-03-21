@@ -1364,6 +1364,8 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
             PyObject* tt = PyDict_GetItemString(spec_dict, "type_tag");
             PyObject* req = PyDict_GetItemString(spec_dict, "required");
             PyObject* def = PyDict_GetItemString(spec_dict, "default_value");
+            PyObject* cu = PyDict_GetItemString(spec_dict, "convert_underscores");
+            PyObject* isseq = PyDict_GetItemString(spec_dict, "is_sequence");
 
             fs.field_name = fn ? PyUnicode_AsUTF8(fn) : "";
             fs.alias = al ? PyUnicode_AsUTF8(al) : fs.field_name;
@@ -1371,6 +1373,8 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
             fs.location = loc ? (ParamLocation)PyLong_AsLong(loc) : LOC_QUERY;
             fs.type_tag = tt ? (ParamType)PyLong_AsLong(tt) : TYPE_STR;
             fs.required = req ? PyObject_IsTrue(req) : false;
+            fs.convert_underscores = cu ? PyObject_IsTrue(cu) : true;
+            fs.is_sequence = isseq ? PyObject_IsTrue(isseq) : false;
             if (def && def != Py_None) {
                 Py_INCREF(def);
                 fs.default_value = def;  // strong ref — DECREF'd in CoreApp_dealloc
@@ -1473,9 +1477,12 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
         final_spec.path_map[std::string_view(final_spec.path_specs[i].field_name)] = i;
     for (size_t i = 0; i < final_spec.query_specs.size(); i++) {
         const auto& fs = final_spec.query_specs[i];
-        final_spec.query_map[std::string_view(fs.field_name)] = i;
-        if (!fs.alias.empty() && fs.alias != fs.field_name)
+        // If alias differs from field_name, only match by alias (not by Python name)
+        if (!fs.alias.empty() && fs.alias != fs.field_name) {
             final_spec.query_map[std::string_view(fs.alias)] = i;
+        } else {
+            final_spec.query_map[std::string_view(fs.field_name)] = i;
+        }
     }
     for (size_t i = 0; i < final_spec.header_specs.size(); i++)
         final_spec.header_map[std::string_view(final_spec.header_specs[i].header_lookup_key)] = i;
@@ -3318,8 +3325,36 @@ static PyObject* dispatch_one_request(
                 auto hit = spec.header_map.find(normalized);
                 if (hit != spec.header_map.end()) {
                     const auto& fs = spec.header_specs[hit->second];
-                    PyRef py_val(PyUnicode_FromStringAndSize(hdr.value.data, hdr.value.len));
-                    PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
+                    // convert_underscores=False: only match if header has no '-'
+                    if (!fs.convert_underscores) {
+                        bool has_dash = false;
+                        for (size_t j = 0; j < hdr.name.len; j++) {
+                            if (hdr.name.data[j] == '-') { has_dash = true; break; }
+                        }
+                        if (has_dash) goto skip_header_match;
+                    }
+                    {
+                        PyRef py_val(PyUnicode_FromStringAndSize(hdr.value.data, hdr.value.len));
+                        if (py_val) {
+                            if (fs.is_sequence) {
+                                // Collect multiple values into a list
+                                PyObject* existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
+                                if (existing && PyList_Check(existing)) {
+                                    PyList_Append(existing, py_val.get());
+                                } else {
+                                    PyRef lst(PyList_New(1));
+                                    if (lst) {
+                                        Py_INCREF(py_val.get());
+                                        PyList_SET_ITEM(lst.get(), 0, py_val.get());
+                                        PyDict_SetItem(kwargs.get(), fs.py_field_name, lst.get());
+                                    }
+                                }
+                            } else {
+                                PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
+                            }
+                        }
+                    }
+                    skip_header_match:;
                 }
             }
         }
@@ -3801,6 +3836,10 @@ static PyObject* dispatch_one_request(
                     if (dep_values && PyDict_Check(dep_values)) {
                         PyDict_Update(kwargs.get(), dep_values);
                     }
+                    // Sentinel so _response_shim skips re-running dep_solver
+                    static PyObject* s_deps_ran_key = nullptr;
+                    if (!s_deps_ran_key) s_deps_ran_key = PyUnicode_InternFromString("__deps_ran__");
+                    PyDict_SetItem(kwargs.get(), s_deps_ran_key, Py_True);
 
                     // If there are validation errors, return 422 with full error detail
                     if (dep_errors && PyList_Check(dep_errors) && PyList_GET_SIZE(dep_errors) > 0) {
@@ -3891,7 +3930,53 @@ static PyObject* dispatch_one_request(
         // ── FAST PATH: single Pydantic model → call model_validate directly ──
         // Avoids going through request_body_to_args async wrapper
         if (spec.model_validate && json_body_obj != Py_None && spec.py_body_param_name) {
-            PyRef validated(PyObject_CallOneArg(spec.model_validate, json_body_obj));
+            // When embed_body_fields=True, json_body_obj is the full dict (e.g. {"item": {...}}).
+            // Extract the nested value for this param before calling model_validate.
+            PyObject* model_input = json_body_obj;
+            if (spec.embed_body_fields && PyDict_Check(json_body_obj)) {
+                PyObject* nested = PyDict_GetItem(json_body_obj, spec.py_body_param_name);
+                if (nested) {
+                    model_input = nested;
+                } else {
+                    // Key not found: return 422 'field required' for the body param
+                    if (!s_loc_key_global) s_loc_key_global = PyUnicode_InternFromString("loc");
+                    if (!s_body_str_global) s_body_str_global = PyUnicode_InternFromString("body");
+                    if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+                    PyRef err_item(PyDict_New());
+                    if (err_item) {
+                        PyRef loc(PyTuple_Pack(2, s_body_str_global, spec.py_body_param_name));
+                        PyRef type_str(PyUnicode_InternFromString("missing"));
+                        PyRef msg_str(PyUnicode_InternFromString("Field required"));
+                        if (loc) PyDict_SetItem(err_item.get(), s_loc_key_global, loc.get());
+                        PyDict_SetItemString(err_item.get(), "type", type_str.get());
+                        PyDict_SetItemString(err_item.get(), "msg", msg_str.get());
+                        PyDict_SetItemString(err_item.get(), "input", Py_None);
+                        PyRef err_list(PyList_New(1));
+                        if (err_list) {
+                            Py_INCREF(err_item.get());
+                            PyList_SET_ITEM(err_list.get(), 0, err_item.get());
+                            PyRef err_dict(PyDict_New());
+                            if (err_dict) {
+                                PyDict_SetItem(err_dict.get(), s_detail_key_global, err_list.get());
+                                PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
+                                if (err_json) {
+                                    char* ej_data; Py_ssize_t ej_len;
+                                    PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
+                                    build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
+                                               has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                }
+                            }
+                        }
+                    }
+                    if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                    Py_XDECREF(body_params_local);
+                    Py_DECREF(endpoint_local);
+                    --self->counters.active_requests;
+                    ++self->counters.total_errors;
+                    return make_consumed_true(self, req.total_consumed);
+                }
+            }
+            PyRef validated(PyObject_CallOneArg(spec.model_validate, model_input));
             if (validated) {
                 PyDict_SetItem(kwargs.get(), spec.py_body_param_name, validated.get());
                 Py_XDECREF(body_params_local);
@@ -3912,22 +3997,27 @@ static PyObject* dispatch_one_request(
                         PyRef error_list(err_kw ? PyObject_Call(errors_method.get(), g_empty_tuple, err_kw.get())
                                                 : PyObject_CallNoArgs(errors_method.get()));
                         if (error_list && PyList_Check(error_list.get())) {
-                            // Prepend 'body' to each error's 'loc' tuple
+                            // Prepend 'body' (and param name if embedded) to each error's 'loc' tuple
                             if (!s_loc_key_global) s_loc_key_global = PyUnicode_InternFromString("loc");
                             if (!s_body_str_global) s_body_str_global = PyUnicode_InternFromString("body");
+                            Py_ssize_t prefix_count = spec.embed_body_fields ? 2 : 1;
                             for (Py_ssize_t ei = 0; ei < PyList_GET_SIZE(error_list.get()); ei++) {
                                 PyObject* err_item = PyList_GET_ITEM(error_list.get(), ei);
                                 if (!PyDict_Check(err_item)) continue;
                                 PyObject* loc_obj = PyDict_GetItem(err_item, s_loc_key_global);
                                 if (loc_obj) {
                                     Py_ssize_t loc_len = PySequence_Length(loc_obj);
-                                    PyRef new_loc(PyTuple_New(loc_len + 1));
+                                    PyRef new_loc(PyTuple_New(loc_len + prefix_count));
                                     if (new_loc) {
                                         Py_INCREF(s_body_str_global);
                                         PyTuple_SET_ITEM(new_loc.get(), 0, s_body_str_global);
+                                        if (spec.embed_body_fields) {
+                                            Py_INCREF(spec.py_body_param_name);
+                                            PyTuple_SET_ITEM(new_loc.get(), 1, spec.py_body_param_name);
+                                        }
                                         for (Py_ssize_t li = 0; li < loc_len; li++) {
                                             PyObject* litem = PySequence_GetItem(loc_obj, li);
-                                            if (litem) PyTuple_SET_ITEM(new_loc.get(), li + 1, litem);
+                                            if (litem) PyTuple_SET_ITEM(new_loc.get(), li + prefix_count, litem);
                                         }
                                         PyDict_SetItem(err_item, s_loc_key_global, new_loc.get());
                                     }
@@ -5407,8 +5497,34 @@ static PyObject* CoreApp_parse_and_route(
                 auto hit = spec.header_map.find(normalized);
                 if (hit != spec.header_map.end()) {
                     const auto& fs = spec.header_specs[hit->second];
-                    PyRef py_val(PyUnicode_FromStringAndSize(hdr.value.data, hdr.value.len));
-                    if (py_val) PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
+                    if (!fs.convert_underscores) {
+                        bool has_dash = false;
+                        for (size_t j = 0; j < hdr.name.len; j++) {
+                            if (hdr.name.data[j] == '-') { has_dash = true; break; }
+                        }
+                        if (has_dash) goto skip_header_match2;
+                    }
+                    {
+                        PyRef py_val(PyUnicode_FromStringAndSize(hdr.value.data, hdr.value.len));
+                        if (py_val) {
+                            if (fs.is_sequence) {
+                                PyObject* existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
+                                if (existing && PyList_Check(existing)) {
+                                    PyList_Append(existing, py_val.get());
+                                } else {
+                                    PyRef lst(PyList_New(1));
+                                    if (lst) {
+                                        Py_INCREF(py_val.get());
+                                        PyList_SET_ITEM(lst.get(), 0, py_val.get());
+                                        PyDict_SetItem(kwargs.get(), fs.py_field_name, lst.get());
+                                    }
+                                }
+                            } else {
+                                PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
+                            }
+                        }
+                    }
+                    skip_header_match2:;
                 }
             }
         }

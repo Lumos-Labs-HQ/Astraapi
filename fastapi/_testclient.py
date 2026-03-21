@@ -227,9 +227,11 @@ class TestClient:
                     if self._client._state.name == 'CLOSED':
                         kw = dict(self._httpx_kwargs)
                         kw.setdefault('follow_redirects', True)
+                        _headers = dict(self.headers)
+                        _headers.setdefault('host', 'testserver')
                         self._client = httpx.Client(
                             base_url=self._base_url,
-                            headers=dict(self.headers),
+                            headers=_headers,
                             **kw,
                         )
                         return
@@ -260,9 +262,12 @@ class TestClient:
                 raise RuntimeError(f"Server startup failed: {self._server_error}")
             kw = dict(self._httpx_kwargs)
             kw.setdefault('follow_redirects', True)
+            # Inject Host: testserver to match ASGI TestClient behavior
+            _headers = dict(self.headers)
+            _headers.setdefault('host', 'testserver')
             self._client = httpx.Client(
                 base_url=self._base_url,
-                headers=dict(self.headers),
+                headers=_headers,
                 **kw,
             )
 

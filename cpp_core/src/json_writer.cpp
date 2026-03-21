@@ -31,6 +31,7 @@ extern "C" {
 static PyObject* s_datetime_type = nullptr;    // datetime.datetime
 static PyObject* s_date_type = nullptr;        // datetime.date
 static PyObject* s_time_type = nullptr;        // datetime.time
+static PyObject* s_timedelta_type = nullptr;   // datetime.timedelta
 static PyObject* s_decimal_type = nullptr;     // decimal.Decimal
 static PyObject* s_uuid_type = nullptr;        // uuid.UUID
 static PyObject* s_enum_type = nullptr;        // enum.Enum
@@ -53,6 +54,7 @@ static void _do_ensure_special_types() {
         s_datetime_type = PyObject_GetAttrString(dt_mod.get(), "datetime");
         s_date_type = PyObject_GetAttrString(dt_mod.get(), "date");
         s_time_type = PyObject_GetAttrString(dt_mod.get(), "time");
+        s_timedelta_type = PyObject_GetAttrString(dt_mod.get(), "timedelta");
     }
     PyErr_Clear();
 
@@ -417,6 +419,25 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         return 0;
     }
 
+    // datetime.timedelta → total_seconds() as JSON number
+    if (s_timedelta_type && PyObject_IsInstance(obj, s_timedelta_type)) {
+        PyRef ts(PyObject_CallMethodNoArgs(obj, PyUnicode_InternFromString("total_seconds")));
+        if (!ts) return -1;
+        double val = PyFloat_AsDouble(ts.get());
+        if (val == -1.0 && PyErr_Occurred()) return -1;
+        // Serialize as integer if whole number, else float
+        if (val == (long long)val) {
+            char tmp[32];
+            int n = snprintf(tmp, sizeof(tmp), "%lld", (long long)val);
+            buf_append(buf, tmp, (size_t)n);
+        } else {
+            char tmp[64];
+            int n = snprintf(tmp, sizeof(tmp), "%.17g", val);
+            buf_append(buf, tmp, (size_t)n);
+        }
+        return 0;
+    }
+
     // decimal.Decimal → unquoted numeric string (JSON number)
     if (s_decimal_type && PyObject_IsInstance(obj, s_decimal_type)) {
         PyRef str_val(PyObject_Str(obj));
@@ -472,6 +493,7 @@ void json_writer_cleanup() {
     Py_CLEAR(s_datetime_type);
     Py_CLEAR(s_date_type);
     Py_CLEAR(s_time_type);
+    Py_CLEAR(s_timedelta_type);
     Py_CLEAR(s_decimal_type);
     Py_CLEAR(s_uuid_type);
     Py_CLEAR(s_enum_type);

@@ -1160,7 +1160,13 @@ class FastAPI(AppBase):
             is_required = spec[7] if len(spec) > 7 else False
             default_value = spec[8] if len(spec) > 8 else None
             # For headers, the lookup key is lowercase with - replaced by _
-            header_key = field_name.lower().replace("-", "_") if loc_str == "header" else ""
+            # unless convert_underscores=False, in which case keep as-is
+            convert_underscores = spec[6] if len(spec) > 6 else True
+            if loc_str == "header":
+                header_key = field_name.lower().replace("-", "_") if convert_underscores else field_name.lower()
+            else:
+                header_key = ""
+            is_sequence = spec[4] if len(spec) > 4 else False
             result.append({
                 "field_name": field_name,
                 "alias": alias,
@@ -1169,6 +1175,8 @@ class FastAPI(AppBase):
                 "type_tag": _BATCH_SPEC_TYPE.get(tag_str, 0),
                 "required": is_required,
                 "default_value": default_value,
+                "convert_underscores": convert_underscores,
+                "is_sequence": is_sequence,
             })
         return result
 
@@ -1185,31 +1193,7 @@ class FastAPI(AppBase):
         response_model_exclude_none = route.response_model_exclude_none
         _is_async = inspect.iscoroutinefunction(original_endpoint) or inspect.iscoroutinefunction(inspect.unwrap(original_endpoint))
 
-        _dep2 = getattr(route, 'dependant', None)
-        _path_fields2 = list(getattr(_dep2, 'path_params', []) or [])
-        _query_fields2 = list(getattr(_dep2, 'query_params', []) or [])
-
         async def _response_model_shim(**kwargs: Any) -> Any:
-            _errors2: list = []
-            for _pf2 in _path_fields2:
-                _raw2 = kwargs.get(_pf2.name)
-                if _raw2 is not None:
-                    _pv2, _pe2 = _pf2.validate(_raw2, {}, loc=('path', _pf2.alias or _pf2.name))
-                    if _pe2:
-                        _errors2.extend(_pe2 if isinstance(_pe2, list) else [_pe2])
-                    else:
-                        kwargs[_pf2.name] = _pv2
-            for _qf2 in _query_fields2:
-                _raw2 = kwargs.get(_qf2.name)
-                if _raw2 is not None:
-                    _qv2, _qe2 = _qf2.validate(_raw2, {}, loc=('query', _qf2.alias or _qf2.name))
-                    if _qe2:
-                        _errors2.extend(_qe2 if isinstance(_qe2, list) else [_qe2])
-                    else:
-                        kwargs[_qf2.name] = _qv2
-            if _errors2:
-                from fastapi.exceptions import RequestValidationError
-                raise RequestValidationError(_errors2)
             if _is_async:
                 raw = await original_endpoint(**kwargs)
             else:
@@ -1246,50 +1230,28 @@ class FastAPI(AppBase):
         """Wrap a fast-path endpoint to validate/coerce path and query params."""
         original_endpoint = route.endpoint
         _is_async = inspect.iscoroutinefunction(original_endpoint)
-        _dep = getattr(route, 'dependant', None)
-        _path_fields = list(getattr(_dep, 'path_params', []) or [])
-        _query_fields = list(getattr(_dep, 'query_params', []) or [])
-        _header_fields = list(getattr(_dep, 'header_params', []) or [])
-        _cookie_fields = list(getattr(_dep, 'cookie_params', []) or [])
-        if not _path_fields and not _query_fields and not _header_fields and not _cookie_fields:
-            return original_endpoint  # no coercion needed
+        # Use _make_param_validator which handles model-based params correctly
+        try:
+            from fastapi.routing import _make_param_validator as _mpv
+            _flat = getattr(route, '_flat_dependant', None) or route.dependant
+            _validator = _mpv(_flat)
+        except Exception:
+            _validator = None
+        if _validator is None:
+            return original_endpoint
 
         async def _param_shim(**kwargs: Any) -> Any:
-            _errors: list = []
-            for _pf in _path_fields:
-                _raw = kwargs.get(_pf.name)
-                if _raw is not None:
-                    _pv, _pe = _pf.validate(_raw, {}, loc=('path', _pf.alias or _pf.name))
-                    if _pe:
-                        _errors.extend(_pe if isinstance(_pe, list) else [_pe])
-                    else:
-                        kwargs[_pf.name] = _pv
-            for _qf in _query_fields:
-                _raw = kwargs.get(_qf.name)
-                if _raw is not None:
-                    _qv, _qe = _qf.validate(_raw, {}, loc=('query', _qf.alias or _qf.name))
-                    if _qe:
-                        _errors.extend(_qe if isinstance(_qe, list) else [_qe])
-                    else:
-                        kwargs[_qf.name] = _qv
-            # Inject defaults for header/cookie params not provided by C++
-            for _hf in _header_fields:
-                if _hf.name not in kwargs:
-                    if not _hf.required:
-                        kwargs[_hf.name] = _hf.default
-                    else:
-                        _errors.append({'type': 'missing', 'loc': ('header', _hf.alias or _hf.name),
-                                         'msg': 'Field required', 'input': None})
-            for _cf in _cookie_fields:
-                if _cf.name not in kwargs:
-                    if not _cf.required:
-                        kwargs[_cf.name] = _cf.default
-                    else:
-                        _errors.append({'type': 'missing', 'loc': ('cookie', _cf.alias or _cf.name),
-                                         'msg': 'Field required', 'input': None})
+            _result = _validator(kwargs)
+            _values, _errors = _result[0], _result[1]
+            _consumed = _result[2] if len(_result) > 2 else set()
             if _errors:
                 from fastapi.exceptions import RequestValidationError
                 raise RequestValidationError(_errors)
+            # Remove raw individual fields consumed by model assembly
+            for _k in _consumed:
+                kwargs.pop(_k, None)
+            # Update with validated/coerced values
+            kwargs.update(_values)
             if _is_async:
                 return await original_endpoint(**kwargs)
             return original_endpoint(**kwargs)
@@ -1347,33 +1309,7 @@ class FastAPI(AppBase):
         _http_conn_param = getattr(getattr(route, 'dependant', None), 'http_connection_param_name', None)
         _resp_param_name = getattr(getattr(route, 'dependant', None), 'response_param_name', None)
 
-        # Build param validation specs for path+query params
-        _dep = getattr(route, 'dependant', None)
-        _path_fields = list(getattr(_dep, 'path_params', []) or [])
-        _query_fields = list(getattr(_dep, 'query_params', []) or [])
-
         async def _response_shim(**kwargs: Any) -> Any:
-            # Validate and coerce path/query params using pydantic field validators
-            _param_errors: list = []
-            for _pf in _path_fields:
-                _raw = kwargs.get(_pf.name)
-                if _raw is not None:
-                    _pv, _pe = _pf.validate(_raw, {}, loc=('path', _pf.alias or _pf.name))
-                    if _pe:
-                        _param_errors.extend(_pe if isinstance(_pe, list) else [_pe])
-                    else:
-                        kwargs[_pf.name] = _pv
-            for _qf in _query_fields:
-                _raw = kwargs.get(_qf.name)
-                if _raw is not None:
-                    _qv, _qe = _qf.validate(_raw, {}, loc=('query', _qf.alias or _qf.name))
-                    if _qe:
-                        _param_errors.extend(_qe if isinstance(_qe, list) else [_qe])
-                    else:
-                        kwargs[_qf.name] = _qv
-            if _param_errors:
-                from fastapi.exceptions import RequestValidationError
-                raise RequestValidationError(_param_errors)
             _bg = None
             if _bg_param:
                 from fastapi.background import BackgroundTasks as _BackgroundTasks
@@ -1406,7 +1342,11 @@ class FastAPI(AppBase):
             # Skip if C++ dep engine already ran deps (indicated by __bg_tasks__ in kwargs)
             _shim_bg_tasks = _bg  # may be None if endpoint has no bg param
             _cpp_bg = kwargs.pop('__bg_tasks__', None)  # C++ dep engine result
-            if _cpp_bg is not None:
+            _deps_ran = kwargs.pop('__deps_ran__', False)  # C++ already ran dep_solver
+            if _deps_ran and _dep_solver is not None:
+                # C++ dep engine already ran; skip Python dep_solver
+                pass
+            elif _cpp_bg is not None:
                 # C++ already ran deps; merge its bg tasks into _shim_bg_tasks
                 if _shim_bg_tasks is None:
                     _shim_bg_tasks = _cpp_bg
@@ -1448,6 +1388,8 @@ class FastAPI(AppBase):
             kwargs.pop('__path__', None)
             kwargs.pop('__auth_scheme__', None)
             kwargs.pop('__auth_credentials__', None)
+            kwargs.pop('__exit_stack__', None)
+            kwargs.pop('__deps_ran__', None)
             if _is_async:
                 result = await original_endpoint(**kwargs)
             else:
@@ -1739,9 +1681,18 @@ class FastAPI(AppBase):
                         exclude_unset=False, exclude_defaults=False, exclude_none=False,
                     )
                     _route_index = self._core_app.route_count() - 1
-                    dep = route.dependant
+                    # Collect union of field specs from all routes in group
+                    _group_specs: list = []
+                    _seen_spec_names: set = set()
+                    for _gsr in _path_group:
+                        for _spec in getattr(_gsr, '_batch_specs', []):
+                            _sname = _spec[3]  # field_name
+                            if _sname not in _seen_spec_names:
+                                _seen_spec_names.add(_sname)
+                                _group_specs.append(_spec)
+                    _group_field_specs = self._convert_batch_specs(_group_specs) if _group_specs else None
                     self._core_app.register_fast_spec(
-                        _route_index, None, None, None, False,
+                        _route_index, None, _group_field_specs, None, False,
                         None, None,
                     )
                 except Exception as _exc:
@@ -1826,6 +1777,12 @@ class FastAPI(AppBase):
                         else None
                     )
                     dep_solver = getattr(route, '_dep_solver', None)
+                    # For dep-solver routes, mark all field specs as not-required
+                    # so C++ does not return 422 for missing dep params.
+                    # The dep solver handles validation and raises HTTPExceptions.
+                    if dep_solver is not None and field_specs:
+                        for _fs in field_specs:
+                            _fs['required'] = False
                     _raw_pv = getattr(route, '_param_validator', None)
                     # For fast-path routes, build param_validator from _flat_dependant
                     if _raw_pv is None and getattr(route, '_fast_path_eligible', False):
@@ -1845,7 +1802,11 @@ class FastAPI(AppBase):
                         def _pv_with_override_check(kwargs_dict, _pv=_inner_pv, _app=_app_ref, _dep=_route_dep):
                             overrides = getattr(_app, 'dependency_overrides', None)
                             if not overrides:
-                                return _pv(kwargs_dict)
+                                # No overrides: run coercion but ignore 'missing' errors
+                                # (dep solver handles required validation)
+                                _vals, _errs, _consumed = _pv(kwargs_dict)
+                                _errs = [e for e in _errs if e.get('type') != 'missing']
+                                return (_vals, _errs, _consumed)
                             # Validate required params of override deps (including sub-deps)
                             # Also check query string for params not extracted by C++ FieldSpec
                             from fastapi.dependencies.utils import get_dependant
@@ -1876,6 +1837,9 @@ class FastAPI(AppBase):
                                     _collect_required(sub)
                             return ({}, errors)
                         param_validator = _pv_with_override_check
+                    elif dep_solver is not None:
+                        # Dep solver handles all validation; skip param_validator
+                        param_validator = None
                     else:
                         param_validator = _raw_pv
                     self._core_app.register_fast_spec(

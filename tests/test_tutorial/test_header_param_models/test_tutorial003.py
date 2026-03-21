@@ -92,7 +92,7 @@ def test_header_param_model_invalid(client: TestClient):
                     "type": "missing",
                     "loc": ["header", "save_data"],
                     "msg": "Field required",
-                    "input": {"host": "127.0.0.1:38113", "x_tag": []},
+                    "input": {"host": "testserver", "x_tag": []},
                 }
             ]
         }
