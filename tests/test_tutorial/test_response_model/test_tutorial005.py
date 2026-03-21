@@ -125,7 +125,6 @@ def test_openapi_schema(client: TestClient):
                             "price": {"title": "Price", "type": "number"},
                             "description": {
                                 "title": "Description",
-                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                             },
                             "tax": {"title": "Tax", "type": "number", "default": 10.5},

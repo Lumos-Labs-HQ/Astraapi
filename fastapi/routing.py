@@ -98,6 +98,10 @@ import itertools as _itertools
 import base64 as _base64
 
 _route_id_counter = _itertools.count(1)
+# Maps core_route_id -> APIRoute for scope["route"] injection
+_route_id_to_route: dict = {}
+# Maps id(endpoint) -> APIRoute for scope["route"] injection in C++ fast path
+_endpoint_id_to_route: dict = {}
 
 from fastapi.exceptions import HTTPException as _DepHTTPExc
 _DEP_HTTP_EXC_TYPES: tuple = (_DepHTTPExc,)
@@ -302,50 +306,12 @@ async def serialize_response(
     endpoint_ctx: Optional[EndpointContext] = None,
 ) -> Any:
     if field:
-        # Core fast-path: when the response is a simple dict/list of primitives
-        # and no filtering options are set, skip the validate+serialize double
-        # pass and return the content directly. The downstream encode_to_json_bytes
-        # will handle the actual JSON serialization in Core.
-        if (
-            include is None
-            and exclude is None
-            and not exclude_unset
-            and not exclude_defaults
-            and not exclude_none
-            and isinstance(response_content, (dict, list, str, int, float, bool))
-            and response_content is not None
-        ):
-            try:
-                # Validate only — if it passes, the content is already
-                # JSON-safe so we skip the serialize pass.
-                if is_coroutine:
-                    value, errors = field.validate(
-                        response_content, {}, loc=("response",)
-                    )
-                else:
-                    value, errors = await run_in_threadpool(
-                        field.validate,
-                        response_content,
-                        {},
-                        loc=("response",),
-                    )
-                if not errors:
-                    return value  # Skip field.serialize() — already JSON-safe
-                # errors found — fall through to standard path with cached result
-            except Exception:
-                # Validation itself failed — re-validate in standard path
-                value, errors = None, None
-
+        if is_coroutine:
+            value, errors = field.validate(response_content, {}, loc=("response",))
         else:
-            value, errors = None, None
-
-        if value is None and errors is None:
-            if is_coroutine:
-                value, errors = field.validate(response_content, {}, loc=("response",))
-            else:
-                value, errors = await run_in_threadpool(
-                    field.validate, response_content, {}, loc=("response",)
-                )
+            value, errors = await run_in_threadpool(
+                field.validate, response_content, {}, loc=("response",)
+            )
         if errors:
             ctx = endpoint_ctx or EndpointContext()
             raise ResponseValidationError(
@@ -1081,16 +1047,17 @@ def _flatten_deps(
             'required_query_params': required_query_params,
             'required_body_params': required_body_params,
             'security_scopes_param': sub_dep.security_scopes_param_name,
-            'oauth_scopes': list(sub_dep.own_oauth_scopes or []) + list(sub_dep.parent_oauth_scopes or []),
+            'oauth_scopes': list(sub_dep.parent_oauth_scopes or []) + list(sub_dep.own_oauth_scopes or []),
             'is_security': is_security,
             'security_type': security_type,
             'auto_error': auto_error,
             'security_cred_cls': security_cred_cls,
             'response_param_name': sub_dep.response_param_name,
+            'background_tasks_param_name': sub_dep.background_tasks_param_name,
         })
 
 
-def _make_lightweight_request(raw_headers, method, path, app=None):
+def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None, _shim_route=None):
     """Create a lightweight Starlette Request from raw headers for security deps.
 
     Security dependencies (HTTPBearer, HTTPBasic, etc.) access request.headers
@@ -1125,6 +1092,18 @@ def _make_lightweight_request(raw_headers, method, path, app=None):
     }
     if app is not None:
         scope["app"] = app
+    # Inject route for scope["route"] access in endpoints
+    _route = _shim_route
+    if _route is None and route_id is not None:
+        _route = _route_id_to_route.get(route_id)
+    if _route is None:
+        try:
+            from fastapi._cpp_server import _current_route as _cr
+            _route = _cr.get()
+        except Exception:
+            pass
+    if _route is not None:
+        scope["route"] = _route
     return Request(scope)
 
 
@@ -1144,6 +1123,15 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
     raw_path = kwargs_dict.pop('__path__', '/')
     auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
     auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
+    # Fallback to ContextVar when C++ dep engine already popped __raw_headers__
+    if raw_headers is None:
+        try:
+            from fastapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp
+            raw_headers = _crh.get()
+            if raw_method == 'GET': raw_method = _cm.get()
+            if raw_path == '/': raw_path = _cp.get()
+        except Exception:
+            pass
     request_obj = None
 
     for node in dep_nodes:
@@ -1259,6 +1247,14 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                 if sub_response is None:
                     sub_response = Response()
                 dep_kwargs[_resp_param] = sub_response
+
+            # Inject BackgroundTasks if dep declares background_tasks param
+            _bt_param = node.get('background_tasks_param_name')
+            if _bt_param:
+                from fastapi.background import BackgroundTasks as _BT
+                if '__bg_tasks__' not in kwargs_dict:
+                    kwargs_dict['__bg_tasks__'] = _BT()
+                dep_kwargs[_bt_param] = kwargs_dict['__bg_tasks__']
 
             # Inject SecurityScopes if dep declares security_scopes param
             _ss_param = node.get('security_scopes_param')
@@ -1299,6 +1295,15 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
     raw_path = kwargs_dict.pop('__path__', '/')
     auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
     auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
+    # Fallback to ContextVar when C++ dep engine already popped __raw_headers__
+    if raw_headers is None:
+        try:
+            from fastapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp
+            raw_headers = _crh.get()
+            if raw_method == 'GET': raw_method = _cm.get()
+            if raw_path == '/': raw_path = _cp.get()
+        except Exception:
+            pass
     request_obj = None
 
     for node in dep_nodes:
@@ -1414,6 +1419,14 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                 if sub_response is None:
                     sub_response = Response()
                 dep_kwargs[_resp_param] = sub_response
+
+            # Inject BackgroundTasks if dep declares background_tasks param
+            _bt_param = node.get('background_tasks_param_name')
+            if _bt_param:
+                from fastapi.background import BackgroundTasks as _BT
+                if '__bg_tasks__' not in kwargs_dict:
+                    kwargs_dict['__bg_tasks__'] = _BT()
+                dep_kwargs[_bt_param] = kwargs_dict['__bg_tasks__']
 
             # Inject SecurityScopes if dep declares security_scopes param
             _ss_param = node.get('security_scopes_param')
@@ -1459,6 +1472,15 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
     raw_path = kwargs_dict.pop('__path__', '/')
     auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
     auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
+    # Fallback to ContextVar when C++ dep engine already popped __raw_headers__
+    if raw_headers is None:
+        try:
+            from fastapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp
+            raw_headers = _crh.get()
+            if raw_method == 'GET': raw_method = _cm.get()
+            if raw_path == '/': raw_path = _cp.get()
+        except Exception:
+            pass
     request_obj = None
 
     for node in dep_nodes:
@@ -1571,6 +1593,14 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                 if sub_response is None:
                     sub_response = Response()
                 dep_kwargs[_resp_param] = sub_response
+
+            # Inject BackgroundTasks if dep declares background_tasks param
+            _bt_param = node.get('background_tasks_param_name')
+            if _bt_param:
+                from fastapi.background import BackgroundTasks as _BT
+                if '__bg_tasks__' not in kwargs_dict:
+                    kwargs_dict['__bg_tasks__'] = _BT()
+                dep_kwargs[_bt_param] = kwargs_dict['__bg_tasks__']
 
             # Inject SecurityScopes if dep declares security_scopes param
             _ss_param = node.get('security_scopes_param')
@@ -1719,7 +1749,7 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
             for pname in consumed:
                 kwargs_dict.pop(pname, None)
             injected['__exit_stack__'] = exit_stack
-            return (injected, errors, None, sub_response)
+            return (injected, errors, kwargs_dict.get('__bg_tasks__'), sub_response)
         return _solve_gen_async
 
     any_async = any(node['is_coro'] for node in dep_nodes)
@@ -1752,7 +1782,7 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
             injected = {k: v for k, v in resolved.items() if k in inj} if inj else {}
             for pname in consumed:
                 kwargs_dict.pop(pname, None)
-            return (injected, errors, None, sub_response)
+            return (injected, errors, kwargs_dict.get('__bg_tasks__'), sub_response)
         return _solve_async
     else:
         def _solve_sync(kwargs_dict):
@@ -1778,7 +1808,7 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
             injected = {k: v for k, v in resolved.items() if k in inj} if inj else {}
             for pname in consumed:
                 kwargs_dict.pop(pname, None)
-            return (injected, errors, None, sub_response)
+            return (injected, errors, kwargs_dict.get('__bg_tasks__'), sub_response)
         return _solve_sync
 
 class APIRoute(routing.Route):
@@ -1938,6 +1968,8 @@ class APIRoute(routing.Route):
                 route_id = next(_route_id_counter)
                 register_route_params(route_id, specs)
                 self._core_route_id = route_id
+                _route_id_to_route[route_id] = self
+                _endpoint_id_to_route[id(self.endpoint)] = self
         except Exception:
             self._core_route_id = None
         # Pre-compute batch specs for solve_dependencies (avoid per-request rebuild)
@@ -1978,6 +2010,12 @@ class APIRoute(routing.Route):
                     self._dep_solver = _make_dep_solver(self.dependant, self.dependency_overrides_provider)
                 except ValueError:
                     self._fast_path_eligible = False
+        elif self.dependant.dependencies:
+            # Non-fast-path routes with deps: build solver for shim to use
+            try:
+                self._dep_solver = _make_dep_solver(self.dependant, self.dependency_overrides_provider)
+            except Exception:
+                pass
             # Build param validator for routes with constrained/required params.
             # This is created regardless of whether there are deps.
             try:

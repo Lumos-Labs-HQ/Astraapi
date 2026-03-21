@@ -124,6 +124,15 @@ class AppBase:
         """Register a startup/shutdown event handler."""
         self.router.add_event_handler(event_type, func)
 
+    # -- ASGI interface -------------------------------------------------------
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        """ASGI interface — delegates to the router for Starlette TestClient compat."""
+        from contextlib import AsyncExitStack
+        if scope.get("type") == "http" and "fastapi_middleware_astack" not in scope:
+            scope["fastapi_middleware_astack"] = AsyncExitStack()
+        await self.router(scope, receive, send)
+
     # -- URL generation ------------------------------------------------------
 
     def url_path_for(self, name: str, /, **path_params: Any) -> Any:

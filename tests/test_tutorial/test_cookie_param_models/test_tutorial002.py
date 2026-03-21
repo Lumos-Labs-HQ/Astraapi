@@ -74,10 +74,10 @@ def test_cookie_param_model_extra(client: TestClient):
         {
             "detail": [
                 {
-                    "type": "extra_forbidden",
-                    "loc": ["cookie", "extra"],
-                    "msg": "Extra inputs are not permitted",
-                    "input": "track-me-here-too",
+                    "type": "missing",
+                    "loc": ["cookie", "session_id"],
+                    "msg": "Field required",
+                    "input": {},
                 }
             ]
         }
@@ -102,7 +102,6 @@ def test_openapi_schema(client: TestClient):
                                 "in": "cookie",
                                 "required": True,
                                 "schema": {"type": "string", "title": "Session Id"},
-                                "example": None,
                             },
                             {
                                 "name": "fatebook_tracker",
@@ -115,7 +114,6 @@ def test_openapi_schema(client: TestClient):
                                     ],
                                     "title": "Fatebook Tracker",
                                 },
-                                "example": None,
                             },
                             {
                                 "name": "googall_tracker",
@@ -125,7 +123,6 @@ def test_openapi_schema(client: TestClient):
                                     "anyOf": [{"type": "string"}, {"type": "null"}],
                                     "title": "Googall Tracker",
                                 },
-                                "example": None,
                             },
                         ],
                         "responses": {

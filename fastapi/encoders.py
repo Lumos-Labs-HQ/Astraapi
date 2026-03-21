@@ -211,9 +211,9 @@ def jsonable_encoder(
     Read more about it in the
     [FastAPI docs for JSON Compatible Encoder](https://fastapi.tiangolo.com/tutorial/encoder/).
     """
-    # Core fast-path: for simple types (dict/list of primitives) with no
-    # special options, encode entirely in Core for maximum performance.
-    # Falls back to Python for complex types (BaseModel, datetime, etc.)
+    # Core fast-path: for simple primitive types (dict/list/str/int/float/bool/None)
+    # with no special options, encode entirely in Core for maximum performance.
+    # Only use for types that fast_jsonable_encode handles correctly.
     if (
         not custom_encoder
         and include is None
@@ -221,11 +221,9 @@ def jsonable_encoder(
         and not exclude_unset
         and not exclude_defaults
         and not exclude_none
+        and isinstance(obj, (str, int, float, bool, type(None)))
     ):
-        try:
-            return fast_jsonable_encode(obj)
-        except (ValueError, TypeError):
-            pass  # Complex type — fall through to Python encoder
+        return obj  # Already JSON-safe primitive
 
     custom_encoder = custom_encoder or {}
     if custom_encoder:

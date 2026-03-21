@@ -330,15 +330,13 @@ def test_openapi_schema():
                             "name": {"type": "string", "title": "Name"},
                             "description": {
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                                "default": None,
                                 "title": "Description",
                             },
                             "sub": {
                                 "anyOf": [
                                     {"$ref": "#/components/schemas/SubItem-Input"},
                                     {"type": "null"},
-                                ],
-                                "default": None,
+                                ]
                             },
                         },
                         "type": "object",
@@ -350,15 +348,13 @@ def test_openapi_schema():
                             "name": {"type": "string", "title": "Name"},
                             "description": {
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                                "default": None,
                                 "title": "Description",
                             },
                             "sub": {
                                 "anyOf": [
                                     {"$ref": "#/components/schemas/SubItem-Output"},
                                     {"type": "null"},
-                                ],
-                                "default": None,
+                                ]
                             },
                         },
                         "type": "object",
@@ -370,7 +366,6 @@ def test_openapi_schema():
                             "subname": {"type": "string", "title": "Subname"},
                             "sub_description": {
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                                "default": None,
                                 "title": "Sub Description",
                             },
                             "tags": {
@@ -389,7 +384,6 @@ def test_openapi_schema():
                             "subname": {"type": "string", "title": "Subname"},
                             "sub_description": {
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
-                                "default": None,
                                 "title": "Sub Description",
                             },
                             "tags": {

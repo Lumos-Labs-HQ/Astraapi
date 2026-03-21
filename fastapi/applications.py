@@ -1173,6 +1173,51 @@ class FastAPI(AppBase):
         return result
 
     @staticmethod
+    def _make_response_model_shim(route: Any) -> Callable[..., Any]:
+        """Wrap a fast-path endpoint to apply response model serialization."""
+        original_endpoint = route.endpoint
+        response_field = route.response_field
+        response_model_include = route.response_model_include
+        response_model_exclude = route.response_model_exclude
+        response_model_by_alias = route.response_model_by_alias
+        response_model_exclude_unset = route.response_model_exclude_unset
+        response_model_exclude_defaults = route.response_model_exclude_defaults
+        response_model_exclude_none = route.response_model_exclude_none
+        _is_async = inspect.iscoroutinefunction(original_endpoint) or inspect.iscoroutinefunction(inspect.unwrap(original_endpoint))
+
+        async def _response_model_shim(**kwargs: Any) -> Any:
+            if _is_async:
+                raw = await original_endpoint(**kwargs)
+            else:
+                raw = original_endpoint(**kwargs)
+            from fastapi._response import Response as _Response
+            if isinstance(raw, _Response):
+                return raw
+            value, errors = response_field.validate(raw, {}, loc=("response",))
+            if errors:
+                from fastapi.exceptions import ResponseValidationError
+                exc = ResponseValidationError(errors=errors, body=raw)
+                # Store for re-raise in TestClient._check_exc
+                try:
+                    from fastapi._cpp_server import _set_last_server_exception
+                    _set_last_server_exception(exc)
+                except Exception:
+                    pass
+                raise exc
+            return response_field.serialize(
+                value,
+                include=response_model_include,
+                exclude=response_model_exclude,
+                by_alias=response_model_by_alias,
+                exclude_unset=response_model_exclude_unset,
+                exclude_defaults=response_model_exclude_defaults,
+                exclude_none=response_model_exclude_none,
+            )
+
+        _response_model_shim.__name__ = getattr(original_endpoint, "__name__", "_response_model_shim")
+        return _response_model_shim
+
+    @staticmethod
     def _make_response_class_shim(route: Any) -> Callable[..., Any]:
         """Create an async endpoint shim that wraps the result in the route's response_class.
 
@@ -1196,6 +1241,13 @@ class FastAPI(AppBase):
         )
 
         original_endpoint = route.endpoint
+        _response_field = getattr(route, "response_field", None)
+        _rm_include = getattr(route, "response_model_include", None)
+        _rm_exclude = getattr(route, "response_model_exclude", None)
+        _rm_by_alias = getattr(route, "response_model_by_alias", True)
+        _rm_exclude_unset = getattr(route, "response_model_exclude_unset", False)
+        _rm_exclude_defaults = getattr(route, "response_model_exclude_defaults", False)
+        _rm_exclude_none = getattr(route, "response_model_exclude_none", False)
         _is_async = inspect.iscoroutinefunction(original_endpoint)
 
         rc = route.response_class
@@ -1209,6 +1261,11 @@ class FastAPI(AppBase):
         # BackgroundTasks support: inject a fresh instance if the endpoint declares it,
         # then fire-and-forget the tasks after the response is returned to C++ for writing.
         _bg_param = getattr(getattr(route, 'dependant', None), 'background_tasks_param_name', None)
+        _dep_solver = getattr(route, '_dep_solver', None)
+
+        _req_param = getattr(getattr(route, 'dependant', None), 'request_param_name', None)
+        _http_conn_param = getattr(getattr(route, 'dependant', None), 'http_connection_param_name', None)
+        _resp_param_name = getattr(getattr(route, 'dependant', None), 'response_param_name', None)
 
         async def _response_shim(**kwargs: Any) -> Any:
             _bg = None
@@ -1216,6 +1273,75 @@ class FastAPI(AppBase):
                 from fastapi.background import BackgroundTasks as _BackgroundTasks
                 _bg = _BackgroundTasks()
                 kwargs[_bg_param] = _bg
+            # Inject Request/HTTPConnection if endpoint needs it
+            if _req_param or _http_conn_param:
+                from fastapi.routing import _make_lightweight_request
+                _req_obj = _make_lightweight_request(
+                    kwargs.pop('__raw_headers__', None),
+                    kwargs.pop('__method__', 'GET'),
+                    kwargs.pop('__path__', '/'),
+                    _shim_route=route,
+                )
+                if _req_param:
+                    kwargs[_req_param] = _req_obj
+                if _http_conn_param:
+                    kwargs[_http_conn_param] = _req_obj
+            else:
+                pass  # dep solver will pop __raw_headers__ etc. if needed
+            # Inject Response if endpoint needs it
+            _sub_resp = None
+            if _resp_param_name:
+                from fastapi._response import Response as _Resp
+                _sub_resp = _Resp()
+                kwargs[_resp_param_name] = _sub_resp
+            kwargs.pop('__auth_scheme__', None)
+            kwargs.pop('__auth_credentials__', None)
+            # Run dep solver for sub-deps (e.g. deps needing BackgroundTasks)
+            # Skip if C++ dep engine already ran deps (indicated by __bg_tasks__ in kwargs)
+            _shim_bg_tasks = _bg  # may be None if endpoint has no bg param
+            _cpp_bg = kwargs.pop('__bg_tasks__', None)  # C++ dep engine result
+            if _cpp_bg is not None:
+                # C++ already ran deps; merge its bg tasks into _shim_bg_tasks
+                if _shim_bg_tasks is None:
+                    _shim_bg_tasks = _cpp_bg
+                    if _bg_param:
+                        kwargs[_bg_param] = _shim_bg_tasks
+                else:
+                    _shim_bg_tasks.tasks.extend(_cpp_bg.tasks)
+            elif _dep_solver is not None:
+                import inspect as _inspect
+                _dep_coro = _dep_solver(kwargs)
+                _dep_result = (await _dep_coro) if _inspect.isawaitable(_dep_coro) else _dep_coro
+                if isinstance(_dep_result, tuple) and len(_dep_result) >= 2:
+                    _dep_injected, _dep_errors = _dep_result[0], _dep_result[1]
+                    if _dep_errors:
+                        from fastapi._response import JSONResponse as _JR
+                        return _JR({"detail": list(_dep_errors)}, status_code=422)
+                    if _dep_injected:
+                        kwargs.update(_dep_injected)
+                    kwargs.pop('__bg_tasks__', None)  # internal key, not an endpoint param
+                    # Merge bg_tasks from deps
+                    _dep_bg = _dep_result[2] if len(_dep_result) > 2 else None
+                    if _dep_bg is not None:
+                        if _shim_bg_tasks is None:
+                            _shim_bg_tasks = _dep_bg
+                            if _bg_param:
+                                kwargs[_bg_param] = _shim_bg_tasks
+                        else:
+                            _shim_bg_tasks.tasks.extend(_dep_bg.tasks)
+                    # Merge sub_response headers
+                    _dep_sub_resp = _dep_result[3] if len(_dep_result) > 3 else None
+                    if _dep_sub_resp is not None and _sub_resp is None:
+                        _sub_resp = _dep_sub_resp
+                    elif _dep_sub_resp is not None and _sub_resp is not None:
+                        for _dk, _dv in _dep_sub_resp.headers.items():
+                            _sub_resp.headers[_dk] = _dv
+            # Clean up any remaining C++ injected keys
+            kwargs.pop('__raw_headers__', None)
+            kwargs.pop('__method__', None)
+            kwargs.pop('__path__', None)
+            kwargs.pop('__auth_scheme__', None)
+            kwargs.pop('__auth_credentials__', None)
             if _is_async:
                 result = await original_endpoint(**kwargs)
             else:
@@ -1257,6 +1383,19 @@ class FastAPI(AppBase):
                 _final = result
 
             else:
+                # Apply response model filtering if set
+                if _response_field is not None:
+                    _val, _errs = _response_field.validate(result, {}, loc=("response",))
+                    if not _errs:
+                        result = _response_field.serialize(
+                            _val,
+                            include=_rm_include,
+                            exclude=_rm_exclude,
+                            by_alias=_rm_by_alias,
+                            exclude_unset=_rm_exclude_unset,
+                            exclude_defaults=_rm_exclude_defaults,
+                            exclude_none=_rm_exclude_none,
+                        )
                 # Not a Response — wrap using the route's response_class
                 if _is_redirect:
                     # Pass only the URL; let RedirectResponse use its own default status_code
@@ -1281,10 +1420,22 @@ class FastAPI(AppBase):
                 else:
                     _final = actual_rc(content=result, status_code=status_code)
 
+            # Apply response headers set by endpoint (response: Response param)
+            # Skip content-length/content-type to avoid overwriting the actual response body headers
+            if _sub_resp is not None and _final is not None:
+                _skip = {'content-length', 'content-type'}
+                for _hk, _hv in _sub_resp.headers.items():
+                    if _hk.lower() not in _skip:
+                        _final.headers[_hk] = _hv
+                _sub_sc = getattr(_sub_resp, 'status_code', None)
+                if _sub_sc is not None and _sub_sc != 200:
+                    _final.status_code = _sub_sc
+
             # Attach bg tasks to response for _handle_async_di to run
             # inside the exit_stack (before gen dep cleanup).
-            if _final is not None and _bg is not None and getattr(_bg, 'tasks', None):
-                _final.__cpp_bg_tasks__ = _bg
+            # Run bg tasks before returning so they complete before response is sent
+            if _shim_bg_tasks is not None and getattr(_shim_bg_tasks, 'tasks', None):
+                await _shim_bg_tasks()
 
             return _final
 
@@ -1397,6 +1548,13 @@ class FastAPI(AppBase):
                 # Wrap endpoint so result is a Response object for C++ raw_headers path.
                 _registered_endpoint = self._make_response_class_shim(route)
                 _is_coro = True  # shim is always async
+            elif getattr(route, 'response_field', None) is not None:
+                # Fast-path route with response_model: wrap to apply model filtering.
+                _registered_endpoint = self._make_response_model_shim(route)
+                _is_coro = True  # shim is always async
+                # Update dependant.call and endpoint so C++ fast path uses the shim
+                route.dependant.call = _registered_endpoint
+                endpoint = _registered_endpoint
 
             try:
                 self._core_app.add_route(
@@ -1557,8 +1715,9 @@ class FastAPI(AppBase):
                 logger.debug("C++ core route registration failed for %s: %s", route.path, exc)
 
         # Register WebSocket routes in C++ core for app.run() fast-path
+        from fastapi._routing_base import WebSocketRoute as _WebSocketRoute
         for route in self.routes:
-            if not isinstance(route, APIWebSocketRoute):
+            if not isinstance(route, (APIWebSocketRoute, _WebSocketRoute)):
                 continue
             try:
                 self._core_app.add_route(

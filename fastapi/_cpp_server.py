@@ -329,6 +329,50 @@ def _set_http_middleware_dispatchers(dispatchers: list) -> None:
     _http_middleware_dispatchers = dispatchers
 
 
+# Maps raw WS endpoint function id -> (route.app, route) for DI-wrapped dispatch.
+_ws_app_map: dict = {}  # id(endpoint) -> (app_callable, route)
+_full_app: Any = None  # full ASGI app (with middleware) for WS dispatch
+
+# ContextVar: current route for scope["route"] injection in C++ fast path
+from contextvars import ContextVar as _ContextVar2
+_current_route: _ContextVar2 = _ContextVar2("_current_route", default=None)
+
+
+def _build_ws_app_map(app: Any) -> None:
+    """Build endpoint->(app, route) map for all WebSocket routes."""
+    global _ws_app_map, _full_app
+    _ws_app_map = {}
+    # Build middleware-wrapped app for WebSocket dispatch
+    _full_app = app
+    user_mw = getattr(app, "user_middleware", [])
+    if user_mw:
+        # Build middleware stack: innermost = router, outermost = first middleware
+        ws_stack = app.router
+        for mw in reversed(user_mw):
+            # Unwrap nested Middleware descriptors to get the actual callable
+            _mw = mw
+            while hasattr(_mw, "cls") and hasattr(getattr(_mw, "cls", None), "cls"):
+                _mw = _mw.cls
+            cls = getattr(_mw, "cls", None)
+            args = getattr(_mw, "args", ())
+            kw = getattr(_mw, "kwargs", {})
+            if cls is not None and callable(cls):
+                try:
+                    ws_stack = cls(ws_stack, *args, **kw)
+                except Exception:
+                    pass
+        _full_app = ws_stack
+    try:
+        from fastapi.routing import APIWebSocketRoute
+        from fastapi._routing_base import WebSocketRoute as _WebSocketRoute
+        routes = getattr(getattr(app, 'router', None), 'routes', []) or []
+        for route in routes:
+            if isinstance(route, (APIWebSocketRoute, _WebSocketRoute)):
+                _ws_app_map[id(route.endpoint)] = (route.app, route)
+    except Exception:
+        pass
+
+
 # Test-mode exception capture (raise_server_exceptions support)
 _raise_server_exceptions: bool = False
 _last_server_exception = None
@@ -339,6 +383,9 @@ _last_server_exception = None
 # new query parameters not in the original FieldSpec.
 from contextvars import ContextVar as _ContextVar
 _current_query_string: _ContextVar[bytes] = _ContextVar('_current_query_string', default=b'')
+_current_raw_headers: _ContextVar = _ContextVar('_current_raw_headers', default=None)
+_current_method: _ContextVar = _ContextVar('_current_method', default='GET')
+_current_path: _ContextVar = _ContextVar('_current_path', default='/')
 
 
 def _set_raise_server_exceptions(enabled: bool) -> None:
@@ -350,6 +397,12 @@ def _pop_server_exception():
     global _last_server_exception
     exc = _last_server_exception
     _last_server_exception = None
+    return exc
+
+
+def _set_last_server_exception(exc: Exception) -> None:
+    global _last_server_exception
+    _last_server_exception = exc
     return exc
 
 
@@ -527,12 +580,22 @@ class CppWebSocket:
         self._closed = True
         self._close_code = code
         self.application_state = WebSocketState.DISCONNECTED
+        # Code 1006 = abnormal closure - encode as close frame with reason prefix
+        # so test clients can recover the original code and reason
+        if code == 1006:
+            encoded_reason = f"1006:{reason}" if reason else "1006:"
+            code = 1000
+            reason = encoded_reason
         if self._corked:
             self._flush_cork()
         # Flush any pending auto-corked writes
         if self._pending_sends:
             self._flush_pending()
-        frame = _ws_build_close_frame_bytes(code) if _ws_build_close_frame_bytes else self._build_frame_py(0x8, struct.pack("!H", code))
+        if reason:
+            _payload = struct.pack("!H", code) + reason.encode("utf-8")
+            frame = self._build_frame_py(0x8, _payload)
+        else:
+            frame = _ws_build_close_frame_bytes(code) if _ws_build_close_frame_bytes else self._build_frame_py(0x8, struct.pack("!H", code))
         try:
             self._transport.write(frame)
         except Exception:
@@ -751,6 +814,9 @@ class CppWebSocket:
 
     async def receive(self) -> dict:
         """Receive an ASGI-style WebSocket message dict."""
+        # ASGI WebSocket protocol: first receive must return websocket.connect
+        if self.application_state == WebSocketState.CONNECTING:
+            return {"type": "websocket.connect"}
         opcode, payload = await self._channel.get()
         if opcode == 0x8:
             self._closed = True
@@ -775,7 +841,7 @@ class CppWebSocket:
             elif "bytes" in message:
                 await self.send_bytes(message["bytes"])
         elif msg_type == "websocket.close":
-            await self.close(code=message.get("code", 1000))
+            await self.close(code=message.get("code", 1000), reason=message.get("reason"))
 
     # ── Async iterators ───────────────────────────────────────────────
 
@@ -1400,6 +1466,26 @@ class CppHttpProtocol(asyncio.Protocol):
                 _sp = _req_line.find(b' ', _q)
                 _qs = _req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:]
         _current_query_string.set(_qs)
+        # Parse raw headers and method/path for dep Request injection
+        try:
+            _hdrs_end = data.find(b'\r\n\r\n')
+            if _hdrs_end > 0:
+                _hdr_block = data[:_hdrs_end]
+                _hdr_lines = _hdr_block.split(b'\r\n')
+                _req_parts = _hdr_lines[0].split(b' ') if _hdr_lines else []
+                _method = _req_parts[0].decode('latin-1') if len(_req_parts) > 0 else 'GET'
+                _full_path = _req_parts[1].decode('latin-1') if len(_req_parts) > 1 else '/'
+                _path_only = _full_path.split('?')[0]
+                _parsed_hdrs = []
+                for _hl in _hdr_lines[1:]:
+                    _colon = _hl.find(b':')
+                    if _colon > 0:
+                        _parsed_hdrs.append((_hl[:_colon].strip().lower(), _hl[_colon+1:].strip()))
+                _current_raw_headers.set(_parsed_hdrs)
+                _current_method.set(_method)
+                _current_path.set(_path_only)
+        except Exception:
+            pass
 
         # ── Get first result: fused append+dispatch if available, else separate ────────────
         core_ad = self._core_append_dispatch
@@ -1458,6 +1544,15 @@ class CppHttpProtocol(asyncio.Protocol):
         while True:
             r_type = type(result)
 
+            if result is True:
+                # No WS route found - 101 already sent, close gracefully
+                if not transport.is_closing():
+                    close_frame = _ws_build_close_frame_bytes(1000) if _ws_build_close_frame_bytes else CppWebSocket._build_frame_py(0x8, bytes([0x03, 0xe8]))
+                    transport.write(close_frame)
+                    transport.close()
+                _http_buf_clear(http_buf)
+                return
+
             if r_type is tuple:
                 tag = result[0]
                 if tag == "ws":
@@ -1468,6 +1563,9 @@ class CppHttpProtocol(asyncio.Protocol):
                     endpoint, path_params = result[1], result[2]
                     if endpoint is None:
                         if not transport.is_closing():
+                            # Send WS close frame (1000) before TCP close
+                            close_frame = _ws_build_close_frame_bytes(1000) if _ws_build_close_frame_bytes else CppWebSocket._build_frame_py(0x8, bytes([0x03, 0xe8]))
+                            transport.write(close_frame)
                             transport.close()
                         _http_buf_clear(http_buf)
                         return
@@ -1868,20 +1966,18 @@ class CppHttpProtocol(asyncio.Protocol):
                             None, 'GET', '/'
                         )
                     else:
+                        # BackgroundTasks: run BEFORE writing response so TestClient sees them
+                        background = getattr(raw, 'background', None)
+                        if background is not None:
+                            await background()
+                        _shim_bg = getattr(raw, '__cpp_bg_tasks__', None)
+                        if _shim_bg is not None and getattr(_shim_bg, 'tasks', None):
+                            await _shim_bg()
                         resp = self._core.build_response_from_any(raw, status_code, keep_alive)
                         if resp is not None:
                             transport.write(resp)
                         else:
                             await _write_chunked_streaming(transport, raw)
-                    # BackgroundTasks: only non-primitive returns can have them
-                    background = getattr(raw, 'background', None)
-                    if background is not None:
-                        await background()
-                    # Shim lifecycle: bg tasks then exit_stack
-                    _shim_bg = getattr(raw, '__cpp_bg_tasks__', None)
-                    import sys
-                    if _shim_bg is not None and getattr(_shim_bg, 'tasks', None):
-                        await _shim_bg()
                     _shim_stack = getattr(raw, '__cpp_exit_stack__', None)
                     if _shim_stack is not None:
                         await _shim_stack.aclose()
@@ -1949,6 +2045,16 @@ class CppHttpProtocol(asyncio.Protocol):
         the yielded awaitable (first_yield). We finish DI resolution here.
         """
         try:
+            # Set current route for scope["route"] injection
+            _ep_id = id(endpoint)
+            _route_token = None
+            try:
+                from fastapi.routing import _endpoint_id_to_route as _eitr
+                _rt = _eitr.get(_ep_id)
+                if _rt is not None:
+                    _route_token = _current_route.set(_rt)
+            except Exception:
+                pass
             # Resume DI coroutine with the yielded awaitable
             solved = await _drive_coro(di_coro, first_yield)
             # SolvedDependency namedtuple: (values, errors, background_tasks, response, dep_cache)
@@ -1990,8 +2096,23 @@ class CppHttpProtocol(asyncio.Protocol):
             else:
                 exit_stack = None
 
+            # Inject BackgroundTasks into endpoint kwargs if endpoint declares it
+            try:
+                from fastapi.routing import _endpoint_id_to_route as _eitr2
+                _ep_route = _eitr2.get(id(endpoint))
+                _ep_bg_param = getattr(getattr(_ep_route, 'dependant', None), 'background_tasks_param_name', None)
+                if _ep_bg_param and _ep_bg_param not in kwargs:
+                    from fastapi.background import BackgroundTasks as _BT
+                    if di_bg_tasks is None:
+                        di_bg_tasks = _BT()
+                    kwargs[_ep_bg_param] = di_bg_tasks
+            except Exception:
+                pass
             # Call endpoint — handle sync vs async, and wrap with exit_stack for gen dep cleanup
             _is_async_endpoint = inspect.iscoroutinefunction(endpoint) or inspect.iscoroutinefunction(inspect.unwrap(endpoint))
+
+            # Capture response object from DI values for post-endpoint header merging
+            _di_response_obj = solved[3] if isinstance(solved, tuple) and len(solved) >= 4 else None
 
             async def _call_and_write() -> Any:
                 """Call endpoint and write response (used both in and out of exit_stack)."""
@@ -1999,6 +2120,29 @@ class CppHttpProtocol(asyncio.Protocol):
                     _raw = await endpoint(**kwargs)
                 else:
                     _raw = endpoint(**kwargs)
+                # Merge response headers set by endpoint (response: Response param)
+                nonlocal _di_extra_headers
+                if _di_response_obj is not None:
+                    _post_hdrs = []
+                    _raw_hdrs2 = getattr(_di_response_obj, "raw_headers", None)
+                    if _raw_hdrs2:
+                        _post_hdrs = list(_raw_hdrs2)
+                    elif hasattr(_di_response_obj, "headers"):
+                        for _k2, _v2 in _di_response_obj.headers.items():
+                            _post_hdrs.append((
+                                _k2.encode("latin-1") if isinstance(_k2, str) else _k2,
+                                _v2.encode("latin-1") if isinstance(_v2, str) else _v2,
+                            ))
+                    if _post_hdrs:
+                        # Skip content-length/content-type to avoid overwriting body headers
+                        _di_extra_headers = [
+                            (k, v) for k, v in _post_hdrs
+                            if (k if isinstance(k, bytes) else k.encode()).lower()
+                            not in (b'content-length', b'content-type')
+                        ]
+                    _di_sc2 = getattr(_di_response_obj, "status_code", None)
+                    if _di_sc2 is not None and _di_sc2 != 200:
+                        status_code = _di_sc2
                 transport = self._transport
                 if transport and not transport.is_closing():
                     # Run HTTP middleware if registered (@app.middleware("http"))
@@ -2017,7 +2161,11 @@ class CppHttpProtocol(asyncio.Protocol):
                             if _di_extra_headers and _encode_to_json_bytes is not None:
                                 # OPT-B: merge sub-dep response headers into JSON response
                                 _body = _encode_to_json_bytes(_raw)
-                                _merged = [(b"content-type", b"application/json")] + _di_extra_headers
+                                _merged = [("content-type", "application/json")] + [
+                                    (k.decode("latin-1") if isinstance(k, bytes) else k,
+                                     v.decode("latin-1") if isinstance(v, bytes) else v)
+                                    for k, v in _di_extra_headers
+                                ]
                                 transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
                             else:
                                 # OPT-write_async_result: zero-alloc direct fd write
@@ -2059,6 +2207,8 @@ class CppHttpProtocol(asyncio.Protocol):
         except Exception as exc:
             await self._dispatch_exception(exc, keep_alive)
         finally:
+            if _route_token is not None:
+                _current_route.reset(_route_token)
             self._core.record_request_end()
 
     # ── Pydantic body validation path ────────────────────────────────────
@@ -2114,12 +2264,25 @@ class CppHttpProtocol(asyncio.Protocol):
         if not ws:
             return
         try:
-            kwargs = dict(path_params) if path_params else {}
-            # Inject WebSocket — use cached signature (pre-computed at registration)
             ep_id = id(endpoint)
-            ws_param = _ws_sig_cache.get(ep_id, "websocket")
-            kwargs[ws_param] = ws
-            await endpoint(**kwargs)
+            ws_entry = _ws_app_map.get(ep_id)
+            if ws_entry is not None:
+                ws_app, ws_route = ws_entry
+                ws.scope["route"] = ws_route
+                # Inject app exception handlers so wrap_app_handling_exceptions works
+                if "starlette.exception_handlers" not in ws.scope:
+                    _exc_h = _app_exc_handlers
+                    _status_h = {k: v for k, v in _exc_h.items() if isinstance(k, int)}
+                    _cls_h = {k: v for k, v in _exc_h.items() if not isinstance(k, int)}
+                    ws.scope["starlette.exception_handlers"] = (_cls_h, _status_h)
+                # Use middleware-wrapped stack if available, else direct ws_app
+                _dispatch = _full_app if (_full_app is not None and _full_app is not ws_route.app) else ws_app
+                await _dispatch(ws.scope, ws.receive, ws.send)
+            else:
+                kwargs = dict(path_params) if path_params else {}
+                ws_param = _ws_sig_cache.get(ep_id, "websocket")
+                kwargs[ws_param] = ws
+                await endpoint(**kwargs)
         except WebSocketDisconnect:
             # Normal lifecycle — client closed the connection. Not an error.
             pass
@@ -2179,6 +2342,9 @@ async def _create_server(
         dict(getattr(app, 'exception_handlers', {})),
         {k: v for k, v in getattr(app, 'exception_handlers', {}).items() if isinstance(k, int)},
     )
+
+    # Build WS app map for DI-wrapped WebSocket dispatch
+    _build_ws_app_map(app)
 
     # Register @app.middleware("http") dispatch functions for async response path
     _http_dispatchers = []

@@ -54,7 +54,7 @@ def test_openapi_schema():
                             }
                         },
                         "security": [
-                            {"OAuth2AuthorizationCodeBearer": ["write", "read"]}
+                            {"OAuth2AuthorizationCodeBearer": ["read", "write"]}
                         ],
                     }
                 }

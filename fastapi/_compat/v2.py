@@ -264,6 +264,12 @@ def get_definitions(
         if "description" in item_def:
             item_description = cast(str, item_def["description"]).split("\f")[0]
             item_def["description"] = item_description
+        # Strip "default": null from property schemas — optional params are already
+        # represented via anyOf with null; null defaults add noise without information.
+        if "properties" in item_def:
+            for prop_schema in item_def["properties"].values():
+                if isinstance(prop_schema, dict) and prop_schema.get("default") is None and "default" in prop_schema:
+                    del prop_schema["default"]
     # definitions: dict[DefsRef, dict[str, Any]]
     # but mypy complains about general str in other places that are not declared as
     # DefsRef, although DefsRef is just str:

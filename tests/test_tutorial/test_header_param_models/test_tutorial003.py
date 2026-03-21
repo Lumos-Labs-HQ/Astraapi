@@ -92,7 +92,7 @@ def test_header_param_model_invalid(client: TestClient):
                     "type": "missing",
                     "loc": ["header", "save_data"],
                     "msg": "Field required",
-                    "input": {"host": "127.0.0.1:44389", "x_tag": []},
+                    "input": {"host": "127.0.0.1:38113", "x_tag": []},
                 }
             ]
         }
@@ -132,16 +132,12 @@ def test_openapi_schema(client: TestClient):
                                 "name": "host",
                                 "in": "header",
                                 "required": True,
-                                "schema": {"type": "string", "title": "Host"},
-                                "example": None,
-                            },
+                                "schema": {"type": "string", "title": "Host"}},
                             {
                                 "name": "save_data",
                                 "in": "header",
                                 "required": True,
-                                "schema": {"type": "boolean", "title": "Save Data"},
-                                "example": None,
-                            },
+                                "schema": {"type": "boolean", "title": "Save Data"}},
                             {
                                 "name": "if_modified_since",
                                 "in": "header",
@@ -149,9 +145,7 @@ def test_openapi_schema(client: TestClient):
                                 "schema": {
                                     "anyOf": [{"type": "string"}, {"type": "null"}],
                                     "title": "If Modified Since",
-                                },
-                                "example": None,
-                            },
+                                }},
                             {
                                 "name": "traceparent",
                                 "in": "header",
@@ -159,9 +153,7 @@ def test_openapi_schema(client: TestClient):
                                 "schema": {
                                     "anyOf": [{"type": "string"}, {"type": "null"}],
                                     "title": "Traceparent",
-                                },
-                                "example": None,
-                            },
+                                }},
                             {
                                 "name": "x_tag",
                                 "in": "header",
@@ -171,9 +163,7 @@ def test_openapi_schema(client: TestClient):
                                     "items": {"type": "string"},
                                     "default": [],
                                     "title": "X Tag",
-                                },
-                                "example": None,
-                            },
+                                }},
                         ],
                         "responses": {
                             "200": {

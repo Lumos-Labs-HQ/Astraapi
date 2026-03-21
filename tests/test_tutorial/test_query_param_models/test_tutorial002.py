@@ -142,7 +142,6 @@ def test_openapi_schema(client: TestClient):
                                     "default": 100,
                                     "title": "Limit",
                                 },
-                                "example": None,
                             },
                             {
                                 "name": "offset",
@@ -154,7 +153,6 @@ def test_openapi_schema(client: TestClient):
                                     "default": 0,
                                     "title": "Offset",
                                 },
-                                "example": None,
                             },
                             {
                                 "name": "order_by",
@@ -166,7 +164,6 @@ def test_openapi_schema(client: TestClient):
                                     "default": "created_at",
                                     "title": "Order By",
                                 },
-                                "example": None,
                             },
                             {
                                 "name": "tags",
@@ -178,7 +175,6 @@ def test_openapi_schema(client: TestClient):
                                     "default": [],
                                     "title": "Tags",
                                 },
-                                "example": None,
                             },
                         ],
                         "responses": {

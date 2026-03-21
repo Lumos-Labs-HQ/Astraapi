@@ -100,7 +100,7 @@ class WebSocket(HTTPConnection):
 
     async def close(self, code: int = 1000, reason: Optional[str] = None) -> None:
         """Close the WebSocket connection from the server side."""
-        if self.application_state == WebSocketState.CONNECTED:
+        if self.application_state in (WebSocketState.CONNECTING, WebSocketState.CONNECTED):
             close_message: dict[str, Any] = {
                 "type": "websocket.close",
                 "code": code,

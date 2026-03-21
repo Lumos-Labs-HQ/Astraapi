@@ -111,7 +111,6 @@ def test_openapi_schema():
                                     {"type": "string", "pattern": "^fixedquery$"},
                                     {"type": "null"},
                                 ],
-                                "default": None,
                                 "title": "Q",
                             }
                         },

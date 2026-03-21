@@ -283,7 +283,7 @@ def test_openapi_schema(mod: ModuleType):
                         },
                         "summary": "Read Own Items",
                         "operationId": "read_own_items_users_me_items__get",
-                        "security": [{"OAuth2PasswordBearer": ["me", "items"]}],
+                        "security": [{"OAuth2PasswordBearer": ["items", "me"]}],
                     }
                 },
                 "/status/": {
@@ -310,17 +310,14 @@ def test_openapi_schema(mod: ModuleType):
                             "username": {"title": "Username", "type": "string"},
                             "email": {
                                 "title": "Email",
-                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                             },
                             "full_name": {
                                 "title": "Full Name",
-                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                             },
                             "disabled": {
                                 "title": "Disabled",
-                                "default": None,
                                 "anyOf": [{"type": "boolean"}, {"type": "null"}],
                             },
                         },
@@ -341,7 +338,6 @@ def test_openapi_schema(mod: ModuleType):
                         "properties": {
                             "grant_type": {
                                 "title": "Grant Type",
-                                "default": None,
                                 "anyOf": [
                                     {"pattern": "^password$", "type": "string"},
                                     {"type": "null"},
@@ -360,12 +356,10 @@ def test_openapi_schema(mod: ModuleType):
                             },
                             "client_id": {
                                 "title": "Client Id",
-                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                             },
                             "client_secret": {
                                 "title": "Client Secret",
-                                "default": None,
                                 "anyOf": [{"type": "string"}, {"type": "null"}],
                                 "format": "password",
                             },

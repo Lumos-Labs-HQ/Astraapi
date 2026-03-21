@@ -32,6 +32,7 @@ class WebSocketTestSession:
         self._recv_q: list[Any] = []
         self._lock = threading.Lock()
         self._error: BaseException | None = None
+        self._peeked: Any = None
 
     def __enter__(self) -> "WebSocketTestSession":
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -39,6 +40,26 @@ class WebSocketTestSession:
         if not self._ready.wait(timeout=10.0):
             raise RuntimeError("WebSocket connection timed out")
         if self._error:
+            try:
+                import websockets.exceptions as _wse
+                from fastapi._websocket import WebSocketDisconnect
+                if isinstance(self._error, (_wse.ConnectionClosedOK, _wse.ConnectionClosedError)):
+                    rcvd = getattr(self._error, "rcvd", None)
+                    if rcvd is not None:
+                        code = getattr(rcvd, "code", 1000)
+                        reason = getattr(rcvd, "reason", "") or ""
+                        # Decode encoded close codes (e.g. "1006:reason")
+                        if reason.startswith("1006:"):
+                            code = 1006
+                            reason = reason[5:]
+                    else:
+                        # No close frame = abnormal closure (1006)
+                        proto = getattr(self._error, "protocol", None)
+                        code = getattr(proto, "close_code", 1006) if proto else 1006
+                        reason = ""
+                    raise WebSocketDisconnect(code=code, reason=reason)
+            except ImportError:
+                pass
             raise self._error
         return self
 
@@ -59,7 +80,17 @@ class WebSocketTestSession:
                 self._ready.set()
                 return
         try:
-            self._ws = _ws_client.connect(self._url)
+            self._ws = _ws_client.connect(self._url, compression=None)
+            # Peek: detect immediate server close (e.g. no route found)
+            try:
+                msg = self._ws.recv(timeout=5.0)
+                self._peeked = msg  # buffer for first receive_text/bytes
+            except TimeoutError:
+                pass  # alive, no immediate message
+            except Exception as exc:
+                self._error = exc
+                self._ready.set()
+                return
             self._ready.set()
             # Keep thread alive until close() is called
             self._closed.wait()
@@ -98,7 +129,10 @@ class WebSocketTestSession:
     def receive_text(self) -> str:
         if self._ws is None:
             raise RuntimeError("WebSocket not connected")
-        msg = self._ws.recv()
+        if self._peeked is not None:
+            msg, self._peeked = self._peeked, None
+        else:
+            msg = self._ws.recv()
         if isinstance(msg, bytes):
             return msg.decode("utf-8")
         return msg
@@ -106,7 +140,10 @@ class WebSocketTestSession:
     def receive_bytes(self) -> bytes:
         if self._ws is None:
             raise RuntimeError("WebSocket not connected")
-        msg = self._ws.recv()
+        if self._peeked is not None:
+            msg, self._peeked = self._peeked, None
+        else:
+            msg = self._ws.recv()
         if isinstance(msg, str):
             return msg.encode("utf-8")
         return msg
@@ -166,7 +203,14 @@ class TestClient:
         # Populated with starlette-compatible default so tests expecting
         # 'User-Agent: testclient' pass even without explicit headers.
         self.headers: Any = httpx.Headers({"user-agent": "testclient"})
+        self.cookies: Any = httpx.Cookies()
         self._raise_server_exceptions = raise_server_exceptions
+
+    @property
+    def base_url(self) -> str:
+        """Return the base URL of the test server."""
+        self._ensure_started()
+        return self._base_url or "http://testserver"
 
     def _ensure_started(self) -> None:
         """Start the server on first use (lazy init — no FDs opened at construction)."""
@@ -292,9 +336,17 @@ class TestClient:
         from fastapi._cpp_server import _set_raise_server_exceptions
         _set_raise_server_exceptions(self._raise_server_exceptions)
 
+    def _apply_cookies(self) -> None:
+        """Sync instance cookies to the underlying httpx client."""
+        if self._client is not None and self.cookies:
+            for name, value in self.cookies.items():
+                self._client.cookies.set(name, value)
+
+
     def get(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
+        self._apply_cookies()
         resp = self._client.get(url, **kwargs)
         self._check_exc()
         return resp
@@ -302,6 +354,7 @@ class TestClient:
     def post(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
+        self._apply_cookies()
         resp = self._client.post(url, **kwargs)
         self._check_exc()
         return resp
@@ -309,6 +362,7 @@ class TestClient:
     def put(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
+        self._apply_cookies()
         resp = self._client.put(url, **kwargs)
         self._check_exc()
         return resp
@@ -316,6 +370,7 @@ class TestClient:
     def patch(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
+        self._apply_cookies()
         resp = self._client.patch(url, **kwargs)
         self._check_exc()
         return resp
@@ -323,6 +378,7 @@ class TestClient:
     def delete(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
+        self._apply_cookies()
         resp = self._client.delete(url, **kwargs)
         self._check_exc()
         return resp
@@ -344,6 +400,7 @@ class TestClient:
     def request(self, method: str, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
+        self._apply_cookies()
         resp = self._client.request(method, url, **kwargs)
         self._check_exc()
         return resp
