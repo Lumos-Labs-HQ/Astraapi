@@ -1167,6 +1167,7 @@ class FastAPI(AppBase):
             else:
                 header_key = ""
             is_sequence = spec[4] if len(spec) > 4 else False
+            seq_underscore_only = spec[9] if len(spec) > 9 else False
             result.append({
                 "field_name": field_name,
                 "alias": alias,
@@ -1177,6 +1178,7 @@ class FastAPI(AppBase):
                 "default_value": default_value,
                 "convert_underscores": convert_underscores,
                 "is_sequence": is_sequence,
+                "seq_underscore_only": seq_underscore_only,
             })
         return result
 
@@ -1240,21 +1242,59 @@ class FastAPI(AppBase):
         if _validator is None:
             return original_endpoint
 
+        _exc_handlers = getattr(route, '_app_exception_handlers', None)
+
         async def _param_shim(**kwargs: Any) -> Any:
             _result = _validator(kwargs)
             _values, _errors = _result[0], _result[1]
             _consumed = _result[2] if len(_result) > 2 else set()
             if _errors:
                 from fastapi.exceptions import RequestValidationError
-                raise RequestValidationError(_errors)
+                # Extract body from kwargs for exc.body
+                _body = None
+                try:
+                    _flat2 = getattr(route, '_flat_dependant', None) or route.dependant
+                    _bp = _flat2.body_params
+                    if _bp:
+                        _bname = _bp[0].name
+                        _body = kwargs.get(_bname)
+                        if _body is None and len(_bp) > 1:
+                            _body = {p.name: kwargs.get(p.name) for p in _bp if p.name in kwargs}
+                except Exception:
+                    pass
+                _rve = RequestValidationError(_errors, body=_body)
+                if _exc_handlers:
+                    for _exc_cls, _exc_handler in _exc_handlers.items():
+                        if isinstance(_rve, _exc_cls):
+                            from fastapi.routing import _make_lightweight_request as _mlr
+                            _req = _mlr(None, 'GET', '/', route)
+                            import inspect as _insp
+                            _hr = _exc_handler(_req, _rve)
+                            if _insp.isawaitable(_hr):
+                                _hr = await _hr
+                            return _hr
+                raise _rve
             # Remove raw individual fields consumed by model assembly
             for _k in _consumed:
                 kwargs.pop(_k, None)
             # Update with validated/coerced values
             kwargs.update(_values)
-            if _is_async:
-                return await original_endpoint(**kwargs)
-            return original_endpoint(**kwargs)
+            try:
+                if _is_async:
+                    return await original_endpoint(**kwargs)
+                return original_endpoint(**kwargs)
+            except Exception as _exc:
+                if _exc_handlers:
+                    for _exc_cls, _exc_handler in _exc_handlers.items():
+                        if isinstance(_exc, _exc_cls):
+                            from fastapi.routing import _make_lightweight_request as _mlr
+                            _req = _mlr(None, 'GET', '/', route)
+                            import inspect as _insp
+                            _hr = _exc_handler(_req, _exc)
+                            if _insp.isawaitable(_hr):
+                                _hr = await _hr
+                            return _hr
+                raise
 
         _param_shim.__name__ = getattr(original_endpoint, '__name__', '_param_shim')
         return _param_shim
@@ -1318,12 +1358,11 @@ class FastAPI(AppBase):
             # Inject Request/HTTPConnection if endpoint needs it
             if _req_param or _http_conn_param:
                 from fastapi.routing import _make_lightweight_request
-                _req_obj = _make_lightweight_request(
-                    kwargs.pop('__raw_headers__', None),
-                    kwargs.pop('__method__', 'GET'),
-                    kwargs.pop('__path__', '/'),
-                    _shim_route=route,
-                )
+                from fastapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp
+                _rh = kwargs.pop('__raw_headers__', None) or _crh.get()
+                _meth = kwargs.pop('__method__', None) or _cm.get() or 'GET'
+                _pth = kwargs.pop('__path__', None) or _cp.get() or '/'
+                _req_obj = _make_lightweight_request(_rh, _meth, _pth, _shim_route=route)
                 if _req_param:
                     kwargs[_req_param] = _req_obj
                 if _http_conn_param:
@@ -1344,8 +1383,14 @@ class FastAPI(AppBase):
             _cpp_bg = kwargs.pop('__bg_tasks__', None)  # C++ dep engine result
             _deps_ran = kwargs.pop('__deps_ran__', False)  # C++ already ran dep_solver
             if _deps_ran and _dep_solver is not None:
-                # C++ dep engine already ran; skip Python dep_solver
-                pass
+                # C++ dep engine already ran; merge bg_tasks if present
+                _cpp_bg2 = _cpp_bg  # already popped above
+                if _cpp_bg2 is not None:
+                    if _shim_bg_tasks is None:
+                        _shim_bg_tasks = _cpp_bg2
+                        if _bg_param: kwargs[_bg_param] = _shim_bg_tasks
+                    else:
+                        _shim_bg_tasks.tasks.extend(_cpp_bg2.tasks)
             elif _cpp_bg is not None:
                 # C++ already ran deps; merge its bg tasks into _shim_bg_tasks
                 if _shim_bg_tasks is None:
@@ -1356,6 +1401,9 @@ class FastAPI(AppBase):
                     _shim_bg_tasks.tasks.extend(_cpp_bg.tasks)
             elif _dep_solver is not None:
                 import inspect as _inspect
+                # Share endpoint's BackgroundTasks with deps
+                if _shim_bg_tasks is not None and '__bg_tasks__' not in kwargs:
+                    kwargs['__bg_tasks__'] = _shim_bg_tasks
                 _dep_coro = _dep_solver(kwargs)
                 _dep_result = (await _dep_coro) if _inspect.isawaitable(_dep_coro) else _dep_coro
                 if isinstance(_dep_result, tuple) and len(_dep_result) >= 2:
@@ -1390,10 +1438,27 @@ class FastAPI(AppBase):
             kwargs.pop('__auth_credentials__', None)
             kwargs.pop('__exit_stack__', None)
             kwargs.pop('__deps_ran__', None)
-            if _is_async:
-                result = await original_endpoint(**kwargs)
-            else:
-                result = original_endpoint(**kwargs)
+            _exc_handlers_shim = getattr(route, '_app_exception_handlers', None)
+
+            async def _call_with_exc_handling():
+                try:
+                    if _is_async:
+                        return await original_endpoint(**kwargs)
+                    return original_endpoint(**kwargs)
+                except Exception as _exc:
+                    if _exc_handlers_shim:
+                        for _exc_cls, _exc_handler in _exc_handlers_shim.items():
+                            if isinstance(_exc, _exc_cls):
+                                from fastapi.routing import _make_lightweight_request as _mlr
+                                _req = _mlr(None, 'GET', '/', route)
+                                import inspect as _insp
+                                _hr = _exc_handler(_req, _exc)
+                                if _insp.isawaitable(_hr):
+                                    _hr = await _hr
+                                return _hr
+                    raise
+
+            result = await _call_with_exc_handling()
 
             # If already a Response object, handle based on type
             _final: Any = None
@@ -1507,16 +1572,30 @@ class FastAPI(AppBase):
 
         original_endpoint = route.endpoint
 
-        # Collect File/UploadFile params: name -> True if UploadFile, False if bytes
-        file_param_names: dict[str, bool] = {}
+        # Collect File/UploadFile params: name -> (is_upload, is_list)
+        file_param_names: dict[str, tuple[bool, bool]] = {}
         for bp in route.dependant.body_params:
             fi = getattr(bp, 'field_info', None)
             if fi is not None and isinstance(fi, _FileParam):
                 ann = getattr(bp, 'type_', None) or getattr(bp, 'annotation', None)
-                is_upload = ann is not None and (
-                    ann is _UploadFile or (isinstance(ann, type) and issubclass(ann, _UploadFile))
-                )
-                file_param_names[bp.name] = is_upload
+                is_upload = False
+                is_list = False
+                if ann is not None:
+                    import typing as _typing
+                    origin = getattr(ann, '__origin__', None)
+                    args = getattr(ann, '__args__', None) or ()
+                    def _is_upload_type(t):
+                        return t is _UploadFile or (isinstance(t, type) and issubclass(t, _UploadFile))
+                    if origin is list:
+                        is_list = True
+                        if any(_is_upload_type(a) for a in args):
+                            is_upload = True
+                    elif _is_upload_type(ann):
+                        is_upload = True
+                    elif origin is _typing.Union and any(_is_upload_type(a) for a in args):
+                        # Union[UploadFile, None] etc.
+                        is_upload = True
+                file_param_names[bp.name] = (is_upload, is_list)
 
         if not file_param_names:
             # No file params — original endpoint is fine as-is
@@ -1524,18 +1603,61 @@ class FastAPI(AppBase):
 
         _is_async = inspect.iscoroutinefunction(original_endpoint)
 
+        # Collect required form params for 422 validation
+        _required_form_params = [f.name for f in route.dependant.body_params if f.required]
+        # Collect optional form params with their defaults
+        _optional_form_defaults = {f.name: f.field_info.default for f in route.dependant.body_params
+                                    if not f.required and hasattr(f.field_info, 'default')}
+
         async def _form_shim(**kwargs: Any) -> Any:
+            # Validate required form params
+            _missing = [p for p in _required_form_params if kwargs.get(p) is None]
+            if _missing:
+                from fastapi.exceptions import RequestValidationError as _RVE
+                _errs = [{'type': 'missing', 'loc': ('body', p), 'msg': 'Field required', 'input': None} for p in _missing]
+                raise _RVE(_errs)
+            # Inject defaults for optional params not in kwargs
+            for _pn, _pdef in _optional_form_defaults.items():
+                if _pn not in kwargs:
+                    kwargs[_pn] = _pdef
             created_files: list[Any] = []
-            for name, is_upload in file_param_names.items():
+            for name, (is_upload, is_list) in file_param_names.items():
                 raw = kwargs.get(name)
-                # C++ passes a dict: {name, filename, data, content_type}
+                # C++ passes UploadFile, list of UploadFile, or dict
                 if isinstance(raw, _UploadFile):
-                    # C++ already created UploadFile
-                    if not is_upload:
-                        # bytes param: extract raw bytes
+                    if is_list:
+                        # Wrap single UploadFile in list
+                        if not is_upload:
+                            raw.file.seek(0)
+                            kwargs[name] = [raw.file.read()]
+                        else:
+                            kwargs[name] = [raw]
+                    elif not is_upload:
                         raw.file.seek(0)
                         kwargs[name] = raw.file.read()
                     # else: already UploadFile, leave as-is
+                elif isinstance(raw, list):
+                    converted = []
+                    for item in raw:
+                        if isinstance(item, _UploadFile):
+                            if not is_upload:
+                                item.file.seek(0)
+                                converted.append(item.file.read())
+                            else:
+                                converted.append(item)
+                        elif isinstance(item, dict) and 'data' in item:
+                            d = item.get('data') or b''
+                            if is_upload:
+                                uf = _UploadFile(filename=item.get('filename') or '', file=io.BytesIO(d),
+                                                 content_type=item.get('content_type') or 'application/octet-stream',
+                                                 headers=_Headers(raw=[]), size=len(d))
+                                converted.append(uf)
+                                created_files.append(uf)
+                            else:
+                                converted.append(d)
+                        else:
+                            converted.append(item)
+                    kwargs[name] = converted
                 elif isinstance(raw, dict) and 'data' in raw:
                     data: bytes = raw.get('data') or b''
                     if is_upload:
@@ -1546,10 +1668,13 @@ class FastAPI(AppBase):
                             headers=_Headers(raw=[]),
                             size=len(data),
                         )
-                        kwargs[name] = uf
+                        if is_list:
+                            kwargs[name] = [uf]
+                        else:
+                            kwargs[name] = uf
                         created_files.append(uf)
                     else:
-                        kwargs[name] = data  # bytes param
+                        kwargs[name] = [data] if is_list else data
             try:
                 if _is_async:
                     return await original_endpoint(**kwargs)
@@ -1702,14 +1827,34 @@ class FastAPI(AppBase):
             # For form routes: wrap endpoint so C++ raw file dicts become UploadFile
             _registered_endpoint = endpoint
             if _is_form:
-                _registered_endpoint = self._make_form_endpoint_shim(route)
-                # The shim is async, but if no file params the original endpoint
-                # is returned unchanged — use its actual coroutine status.
-                _is_coro = inspect.iscoroutinefunction(_registered_endpoint)
+                _has_dep_solver_form = getattr(route, '_dep_solver', None) is not None
+                if _has_dep_solver_form:
+                    # Form route with dep_solver: use response_class_shim which handles deps
+                    try:
+                        from fastapi.exception_handlers import http_exception_handler as _dh, request_validation_exception_handler as _dvh
+                        _default_exc_handlers = {_dh, _dvh}
+                    except ImportError:
+                        _default_exc_handlers = set()
+                    _type_exc_handlers = {k: v for k, v in self.exception_handlers.items() if isinstance(k, type) and v not in _default_exc_handlers}
+                    if _type_exc_handlers:
+                        route._app_exception_handlers = _type_exc_handlers
+                    _registered_endpoint = self._make_response_class_shim(route)
+                    _is_coro = True
+                else:
+                    _registered_endpoint = self._make_form_endpoint_shim(route)
+                    # The shim is async, but if no file params the original endpoint
+                    # is returned unchanged — use its actual coroutine status.
+                    _is_coro = inspect.iscoroutinefunction(_registered_endpoint)
             elif not getattr(route, '_fast_path_eligible', False):
                 # Non-fast-path, non-form routes (e.g. response_class=HTMLResponse).
                 # Wrap endpoint so result is a Response object for C++ raw_headers path.
+                # Attach app-level exception handlers (type-keyed) to route for shim
+                _type_exc_handlers = {k: v for k, v in self.exception_handlers.items() if isinstance(k, type)}
+                if _type_exc_handlers:
+                    route._app_exception_handlers = _type_exc_handlers
                 _registered_endpoint = self._make_response_class_shim(route)
+                route.dependant.call = _registered_endpoint
+                endpoint = _registered_endpoint
                 _is_coro = True  # shim is always async
             elif getattr(route, 'response_field', None) is not None:
                 # Fast-path route with response_model: wrap to apply model filtering.
@@ -1724,9 +1869,25 @@ class FastAPI(AppBase):
                 # Otherwise use _param_validation_shim (lighter weight).
                 _has_dep_solver = getattr(route, '_dep_solver', None) is not None
                 if _has_dep_solver:
+                    try:
+                        from fastapi.exception_handlers import http_exception_handler as _dh, request_validation_exception_handler as _dvh
+                        _default_exc_handlers = {_dh, _dvh}
+                    except ImportError:
+                        _default_exc_handlers = set()
+                    _type_exc_handlers = {k: v for k, v in self.exception_handlers.items() if isinstance(k, type) and v not in _default_exc_handlers}
+                    if _type_exc_handlers:
+                        route._app_exception_handlers = _type_exc_handlers
                     _registered_endpoint = self._make_response_class_shim(route)
                     _is_coro = True
                 else:
+                    try:
+                        from fastapi.exception_handlers import http_exception_handler as _dh, request_validation_exception_handler as _dvh
+                        _default_exc_handlers = {_dh, _dvh}
+                    except ImportError:
+                        _default_exc_handlers = set()
+                    _type_exc_handlers = {k: v for k, v in self.exception_handlers.items() if isinstance(k, type) and v not in _default_exc_handlers}
+                    if _type_exc_handlers:
+                        route._app_exception_handlers = _type_exc_handlers
                     _pv_shim = self._make_param_validation_shim(route)
                     if _pv_shim is not endpoint:
                         _registered_endpoint = _pv_shim
@@ -1842,6 +2003,16 @@ class FastAPI(AppBase):
                         param_validator = None
                     else:
                         param_validator = _raw_pv
+                    # If custom RequestValidationError handler exists, skip C++ param_validator
+                    # so the shim can catch validation errors and call the custom handler
+                    if param_validator is not None:
+                        try:
+                            from fastapi.exception_handlers import request_validation_exception_handler as _def_rv
+                        except ImportError:
+                            _def_rv = None
+                        _custom_rv = self.exception_handlers.get(RequestValidationError)
+                        if _custom_rv is not None and _custom_rv is not _def_rv:
+                            param_validator = None
                     self._core_app.register_fast_spec(
                         route_index,
                         body_param_name,

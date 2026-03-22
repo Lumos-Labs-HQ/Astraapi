@@ -549,6 +549,10 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
         self->counters.active_requests = 0;
         self->counters.total_errors = 0;
         self->openapi_json_resp = nullptr;
+        self->openapi_json_content = nullptr;
+        self->docs_html_content = nullptr;
+        self->redoc_html_content = nullptr;
+        self->oauth2_redirect_html_content = nullptr;
         self->docs_html_resp = nullptr;
         self->redoc_html_resp = nullptr;
         self->oauth2_redirect_html_resp = nullptr;
@@ -608,7 +612,12 @@ static void CoreApp_dealloc(CoreAppObject* self) {
     self->cors_config.~atomic();
     self->trusted_host_config.~atomic();
     self->exception_handlers.~unordered_map();
+    Py_XDECREF(self->type_exception_handlers);
     Py_XDECREF(self->openapi_json_resp);
+    Py_XDECREF(self->openapi_json_content);
+    Py_XDECREF(self->docs_html_content);
+    Py_XDECREF(self->redoc_html_content);
+    Py_XDECREF(self->oauth2_redirect_html_content);
     Py_XDECREF(self->docs_html_resp);
     Py_XDECREF(self->redoc_html_resp);
     Py_XDECREF(self->oauth2_redirect_html_resp);
@@ -701,17 +710,13 @@ static const char SWAGGER_UI_HTML[] = R"(<!DOCTYPE html>
 <script>
 window.onload = function() {
 const ui = SwaggerUIBundle({
-url: "%s",
-dom_id: '#swagger-ui',
+"url": "%s",
+"dom_id": "#swagger-ui",
 presets: [
 SwaggerUIBundle.presets.apis,
-SwaggerUIStandalonePreset
+SwaggerUIBundle.SwaggerUIStandalonePreset
 ],
-layout: "StandaloneLayout",
-deepLinking: true,
-showExtensions: true,
-showCommonExtensions: true,
-oauth2RedirectUrl: window.location.origin + '%s',
+%s"oauth2RedirectUrl": window.location.origin + '%s',
 })
 window.ui = ui
 }
@@ -801,6 +806,17 @@ static const char OAUTH2_REDIRECT_HTML[] = R"oauth2(<!doctype html>
     }
 </script>)oauth2";
 
+static PyObject* CoreApp_set_urls(CoreAppObject* self, PyObject* args) {
+    // set_urls(openapi_url, docs_url, redoc_url, oauth2_redirect_url)
+    const char *openapi_url = nullptr, *docs_url = nullptr, *redoc_url = nullptr, *oauth2_url = nullptr;
+    if (!PyArg_ParseTuple(args, "zzzz", &openapi_url, &docs_url, &redoc_url, &oauth2_url)) return nullptr;
+    if (openapi_url) self->openapi_url = openapi_url;
+    if (docs_url) self->docs_url = docs_url;
+    if (redoc_url) self->redoc_url = redoc_url;
+    if (oauth2_url) self->oauth2_redirect_url = oauth2_url;
+    Py_RETURN_NONE;
+}
+
 static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) {
     // arg = OpenAPI schema as JSON string (Python str)
     if (!PyUnicode_Check(arg)) {
@@ -816,26 +832,32 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
     Py_XDECREF(self->openapi_json_resp);
     self->openapi_json_resp = build_static_response(
         200, "application/json", json_data, (size_t)json_len);
+    // Store content for middleware
+    Py_XDECREF(self->openapi_json_content);
+    self->openapi_json_content = PyUnicode_FromStringAndSize(json_data, json_len);
 
     // Build Swagger UI HTML with substituted title, openapi_url, and oauth2_redirect_url
     {
         const std::string title = "FastAPI - Swagger UI";
         const std::string& openapi_url = self->openapi_url;
         const std::string& oauth2_url = self->oauth2_redirect_url;
-        // SWAGGER_UI_HTML has 3 %s placeholders: title, openapi_url, oauth2_redirect_url
+        // SWAGGER_UI_HTML has 4 %s placeholders: title, openapi_url, extra_params, oauth2_redirect_url
+        const std::string& extra_params = self->swagger_ui_extra_params;
         std::string html;
         html.reserve(4096);
         int written = snprintf(nullptr, 0, SWAGGER_UI_HTML,
-            title.c_str(), openapi_url.c_str(), oauth2_url.c_str());
+            title.c_str(), openapi_url.c_str(), extra_params.c_str(), oauth2_url.c_str());
         if (written > 0) {
             html.resize((size_t)written + 1);
             snprintf(html.data(), html.size(), SWAGGER_UI_HTML,
-                title.c_str(), openapi_url.c_str(), oauth2_url.c_str());
+                title.c_str(), openapi_url.c_str(), extra_params.c_str(), oauth2_url.c_str());
             html.resize((size_t)written);
         }
         Py_XDECREF(self->docs_html_resp);
         self->docs_html_resp = build_static_response(
             200, "text/html; charset=utf-8", html.c_str(), html.size());
+        Py_XDECREF(self->docs_html_content);
+        self->docs_html_content = PyUnicode_FromStringAndSize(html.c_str(), (Py_ssize_t)html.size());
     }
 
     // Build ReDoc HTML with substituted title and openapi_url
@@ -853,6 +875,8 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
         Py_XDECREF(self->redoc_html_resp);
         self->redoc_html_resp = build_static_response(
             200, "text/html; charset=utf-8", html.c_str(), html.size());
+        Py_XDECREF(self->redoc_html_content);
+        self->redoc_html_content = PyUnicode_FromStringAndSize(html.c_str(), (Py_ssize_t)html.size());
     }
 
     // Build cached /docs/oauth2-redirect response
@@ -860,7 +884,40 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
     self->oauth2_redirect_html_resp = build_static_response(
         200, "text/html; charset=utf-8",
         OAUTH2_REDIRECT_HTML, sizeof(OAUTH2_REDIRECT_HTML) - 1);
+    Py_XDECREF(self->oauth2_redirect_html_content);
+    self->oauth2_redirect_html_content = PyUnicode_FromStringAndSize(
+        OAUTH2_REDIRECT_HTML, (Py_ssize_t)(sizeof(OAUTH2_REDIRECT_HTML) - 1));
 
+    Py_RETURN_NONE;
+}
+
+static PyObject* CoreApp_set_swagger_ui_parameters(CoreAppObject* self, PyObject* arg) {
+    // arg = JSON string of extra SwaggerUIBundle parameters
+    if (!PyUnicode_Check(arg)) { PyErr_SetString(PyExc_TypeError, "expected str"); return nullptr; }
+    const char* params = PyUnicode_AsUTF8(arg);
+    if (!params) return nullptr;
+    self->swagger_ui_extra_params = params;
+    // Rebuild docs HTML if already built
+    if (self->docs_html_resp) {
+        const std::string title = "FastAPI - Swagger UI";
+        const std::string& openapi_url = self->openapi_url;
+        const std::string& oauth2_url = self->oauth2_redirect_url;
+        const std::string& extra_params = self->swagger_ui_extra_params;
+        std::string html;
+        html.reserve(4096);
+        int written = snprintf(nullptr, 0, SWAGGER_UI_HTML,
+            title.c_str(), openapi_url.c_str(), extra_params.c_str(), oauth2_url.c_str());
+        if (written > 0) {
+            html.resize((size_t)written + 1);
+            snprintf(html.data(), html.size(), SWAGGER_UI_HTML,
+                title.c_str(), openapi_url.c_str(), extra_params.c_str(), oauth2_url.c_str());
+            html.resize((size_t)written);
+        }
+        Py_XDECREF(self->docs_html_resp);
+        self->docs_html_resp = build_static_response(200, "text/html; charset=utf-8", html.c_str(), html.size());
+        Py_XDECREF(self->docs_html_content);
+        self->docs_html_content = PyUnicode_FromStringAndSize(html.c_str(), (Py_ssize_t)html.size());
+    }
     Py_RETURN_NONE;
 }
 
@@ -1254,6 +1311,41 @@ static inline PyObject* make_consumed_obj(CoreAppObject* self, size_t consumed, 
     return t;
 }
 
+// HELPER: Build "mw" tuple for static routes when HTTP middleware is active
+static inline PyObject* make_mw_tuple(CoreAppObject* self, const ParsedHttpRequest& req,
+                                       PyObject* content_obj, int status_code) {
+    static PyObject* s_mw_tag = nullptr;
+    if (!s_mw_tag) s_mw_tag = PyUnicode_InternFromString("mw");
+    Py_INCREF(s_mw_tag);
+    Py_INCREF(content_obj);
+    PyObject* ka = req.keep_alive ? Py_True : Py_False; Py_INCREF(ka);
+    PyRef hdrs_list(PyList_New(req.header_count));
+    if (hdrs_list) {
+        for (int i = 0; i < req.header_count; i++) {
+            const auto& hdr = req.headers[i];
+            PyRef nb(PyBytes_FromStringAndSize(hdr.name.data, (Py_ssize_t)hdr.name.len));
+            PyRef vb(PyBytes_FromStringAndSize(hdr.value.data, (Py_ssize_t)hdr.value.len));
+            if (nb && vb) { PyRef p(PyTuple_Pack(2, nb.get(), vb.get())); if (p) PyList_SET_ITEM(hdrs_list.get(), i, p.release()); else { Py_INCREF(Py_None); PyList_SET_ITEM(hdrs_list.get(), i, Py_None); } }
+            else { Py_INCREF(Py_None); PyList_SET_ITEM(hdrs_list.get(), i, Py_None); }
+        }
+    }
+    bool mc = false;
+    PyObject* method_str = get_cached_method(req.method.data, req.method.len, mc);
+    PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
+    PyRef mw_info(PyTuple_Pack(7, s_mw_tag, content_obj, get_cached_status(status_code), ka,
+        hdrs_list ? hdrs_list.get() : Py_None,
+        method_str ? method_str : Py_None,
+        path_str ? path_str.get() : Py_None));
+    if (!mc && method_str) Py_DECREF(method_str);
+    Py_DECREF(ka);
+    Py_DECREF(content_obj);
+    if (mw_info) {
+        --self->counters.active_requests;
+        return make_consumed_obj(self, req.total_consumed, mw_info.release());
+    }
+    return nullptr;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPER: Build error response tuple for HTTPException
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1375,6 +1467,8 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
             fs.required = req ? PyObject_IsTrue(req) : false;
             fs.convert_underscores = cu ? PyObject_IsTrue(cu) : true;
             fs.is_sequence = isseq ? PyObject_IsTrue(isseq) : false;
+            PyObject* suo = PyDict_GetItemString(spec_dict, "seq_underscore_only");
+            fs.seq_underscore_only = suo ? PyObject_IsTrue(suo) : false;
             if (def && def != Py_None) {
                 Py_INCREF(def);
                 fs.default_value = def;  // strong ref — DECREF'd in CoreApp_dealloc
@@ -1662,6 +1756,30 @@ static PyObject* CoreApp_add_exception_handler(CoreAppObject* self, PyObject* ar
     Py_RETURN_NONE;
 }
 
+static PyObject* CoreApp_set_type_exception_handlers(CoreAppObject* self, PyObject* args) {
+    PyObject* handlers_dict;
+    if (!PyArg_ParseTuple(args, "O", &handlers_dict)) return nullptr;
+    if (!PyDict_Check(handlers_dict)) { PyErr_SetString(PyExc_TypeError, "expected dict"); return nullptr; }
+    Py_XDECREF(self->type_exception_handlers);
+    Py_INCREF(handlers_dict);
+    self->type_exception_handlers = handlers_dict;
+    Py_RETURN_NONE;
+}
+
+static PyObject* CoreApp_set_https_redirect(CoreAppObject* self, PyObject* args) {
+    int val = 0;
+    if (!PyArg_ParseTuple(args, "p", &val)) return nullptr;
+    self->https_redirect_enabled = (bool)val;
+    Py_RETURN_NONE;
+}
+
+static PyObject* CoreApp_set_has_http_middleware(CoreAppObject* self, PyObject* args) {
+    int val;
+    if (!PyArg_ParseTuple(args, "p", &val)) return nullptr;
+    self->has_http_middleware = (bool)val;
+    Py_RETURN_NONE;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // HTTP Response Builder — build raw HTTP/1.1 response as one byte buffer
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1812,7 +1930,8 @@ static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
 
 // Build a full CORS preflight (OPTIONS) response
 static PyObject* build_cors_preflight_response(
-    const CorsConfig* cors, const char* origin, size_t origin_len, bool keep_alive)
+    const CorsConfig* cors, const char* origin, size_t origin_len, bool keep_alive,
+    const char* req_headers = nullptr, size_t req_headers_len = 0)
 {
     if (contains_crlf(origin, origin_len)) Py_RETURN_NONE;
 
@@ -1824,7 +1943,7 @@ static PyObject* build_cors_preflight_response(
     estimate += origin_len;
     buf.reserve(estimate);
 
-    static const char STATUS[] = "HTTP/1.1 204 No Content\r\naccess-control-allow-origin: ";
+    static const char STATUS[] = "HTTP/1.1 200 OK\r\naccess-control-allow-origin: ";
     buf_append(buf, STATUS, sizeof(STATUS) - 1);
 
     // Origin
@@ -1848,14 +1967,20 @@ static PyObject* build_cors_preflight_response(
         }
     }
 
-    // Allow-Headers
+    // Allow-Headers: echo requested headers if allow_headers=["*"]
     if (!cors->allow_headers.empty()) {
         static const char ACAH[] = "\r\naccess-control-allow-headers: ";
         buf_append(buf, ACAH, sizeof(ACAH) - 1);
-        for (size_t i = 0; i < cors->allow_headers.size(); i++) {
-            if (i > 0) { buf.push_back(','); buf.push_back(' '); }
-            const auto& h = cors->allow_headers[i];
-            buf_append(buf, h.data(), h.size());
+        bool is_wildcard = cors->allow_headers.size() == 1 && cors->allow_headers[0] == "*";
+        if (is_wildcard && req_headers && req_headers_len > 0) {
+            // Echo back the requested headers
+            buf_append(buf, req_headers, req_headers_len);
+        } else {
+            for (size_t i = 0; i < cors->allow_headers.size(); i++) {
+                if (i > 0) { buf.push_back(','); buf.push_back(' '); }
+                const auto& h = cors->allow_headers[i];
+                buf_append(buf, h.data(), h.size());
+            }
         }
     }
 
@@ -1876,13 +2001,13 @@ static PyObject* build_cors_preflight_response(
     static const char VARY[] = "\r\nvary: Origin";
     buf_append(buf, VARY, sizeof(VARY) - 1);
 
-    // Content-Length: 0 + Connection
-    static const char CL0_KA[] = "\r\ncontent-length: 0\r\nconnection: keep-alive\r\n\r\n";
-    static const char CL0_CLOSE[] = "\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+    // Content-Length: 2 (body "OK") + Connection
+    static const char CL2_KA[] = "\r\ncontent-length: 2\r\ncontent-type: text/plain\r\nconnection: keep-alive\r\n\r\nOK";
+    static const char CL2_CLOSE[] = "\r\ncontent-length: 2\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\nOK";
     if (keep_alive) {
-        buf_append(buf, CL0_KA, sizeof(CL0_KA) - 1);
+        buf_append(buf, CL2_KA, sizeof(CL2_KA) - 1);
     } else {
-        buf_append(buf, CL0_CLOSE, sizeof(CL0_CLOSE) - 1);
+        buf_append(buf, CL2_CLOSE, sizeof(CL2_CLOSE) - 1);
     }
 
     PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
@@ -1901,7 +2026,20 @@ static bool check_trusted_host_inline(const TrustedHostConfig* th, const char* h
     if (colon != std::string_view::npos) {
         host_sv = host_sv.substr(0, colon);
     }
-    return th->allowed_hosts_set.count(host_sv) > 0;  // transparent hash — zero alloc
+    // Exact match
+    if (th->allowed_hosts_set.count(host_sv) > 0) return true;
+    // Wildcard match: check if any "*.suffix" entry matches
+    for (const auto& allowed : th->allowed_hosts) {
+        if (allowed.size() > 2 && allowed[0] == '*' && allowed[1] == '.') {
+            std::string_view suffix(allowed.c_str() + 1, allowed.size() - 1); // ".example.com"
+            if (host_sv.size() > suffix.size() &&
+                host_sv.substr(host_sv.size() - suffix.size()) == suffix) return true;
+            // Also allow bare domain (e.g. "example.com" matches "*.example.com")
+            std::string_view bare(allowed.c_str() + 2, allowed.size() - 2); // "example.com"
+            if (host_sv == bare) return true;
+        }
+    }
+    return false;
 }
 
 // ── Inline compression (no Python overhead — raw zlib/brotli) ────────────────
@@ -2831,47 +2969,95 @@ static PyObject* dispatch_one_request(
         }
     }
 
+    // ── HTTPS redirect ──
+    if (UNLIKELY(self->https_redirect_enabled)) {
+        // Check if request is already HTTPS (via X-Forwarded-Proto or connection type)
+        bool is_https = false;
+        for (int i = 0; i < req.header_count; i++) {
+            const auto& hdr = req.headers[i];
+            if (hdr.name.len == 17 && memcmp(hdr.name.data, "x-forwarded-proto", 17) == 0) {
+                is_https = (hdr.value.len >= 5 && memcmp(hdr.value.data, "https", 5) == 0);
+                break;
+            }
+        }
+        if (!is_https) {
+            // Build redirect URL: https://{host}{path}{?query}
+            std::string redirect_url;
+            redirect_url.reserve(256);
+            redirect_url += "https://";
+            if (!host_sv.empty()) redirect_url.append(host_sv.data, host_sv.len);
+            redirect_url.append(req.path.data, req.path.len);
+            if (req.query_string.len > 0) {
+                redirect_url += '?';
+                redirect_url.append(req.query_string.data, req.query_string.len);
+            }
+            // Build 307 redirect response
+            std::string resp_str;
+            resp_str.reserve(512);
+            resp_str += "HTTP/1.1 307 Temporary Redirect\r\nLocation: ";
+            resp_str += redirect_url;
+            resp_str += "\r\nContent-Length: 0\r\n";
+            if (req.keep_alive) resp_str += "Connection: keep-alive\r\n";
+            else resp_str += "Connection: close\r\n";
+            resp_str += "\r\n";
+            PyRef resp_bytes(PyBytes_FromStringAndSize(resp_str.c_str(), (Py_ssize_t)resp_str.size()));
+            if (resp_bytes) write_response_direct(sock_fd, transport, resp_bytes.get());
+            --self->counters.active_requests;
+            return make_consumed_true(self, req.total_consumed);
+        }
+    }
+
     // ── CORS preflight (OPTIONS with Origin) ────────────────────────────
     const CorsConfig* cors_ptr = self->cors_enabled ? self->cors_ptr_cached : nullptr;
     bool has_cors = cors_ptr && !origin_sv.empty() && cors_origin_allowed(cors_ptr, origin_sv.data, origin_sv.len);
 
     if (UNLIKELY(has_cors && req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0)) {
         // Full CORS preflight response — entirely in C++, no route needed
+        // Extract Access-Control-Request-Headers for echoing
+        const char* acrh_data = nullptr; size_t acrh_len = 0;
+        for (int i = 0; i < req.header_count; i++) {
+            const auto& hdr = req.headers[i];
+            if (hdr.name.len == 30 && hdr.name.iequals("access-control-request-headers", 30)) {
+                acrh_data = hdr.value.data; acrh_len = hdr.value.len; break;
+            }
+        }
         --self->counters.active_requests;
-        PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive));
+        PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive, acrh_data, acrh_len));
         if (resp) write_response_direct(sock_fd, transport, resp.get());
         return make_consumed_true(self, req.total_consumed);
     }
 
     // ── Serve /openapi.json, /docs, /redoc (pre-built responses) ──────
-    // First-byte dispatch: skip 3 comparisons for 97%+ of requests
     if (req.path.len > 1) {
-        char second = req.path.data[1];
-        if (second == 'o' && self->openapi_json_resp) {
-            std::string_view path_sv(req.path.data, req.path.len);
-            if (path_sv == self->openapi_url) {
-                --self->counters.active_requests;
-                write_response_direct(sock_fd, transport, self->openapi_json_resp);
-                return make_consumed_true(self, req.total_consumed);
+        std::string_view path_sv(req.path.data, req.path.len);
+        if (self->openapi_json_resp && path_sv == self->openapi_url) {
+            if (self->has_http_middleware) {
+                if (self->openapi_json_content) return make_mw_tuple(self, req, self->openapi_json_content, 200);
             }
-        } else if (second == 'd' && self->docs_html_resp) {
-            std::string_view path_sv(req.path.data, req.path.len);
-            if (path_sv == self->docs_url) {
-                --self->counters.active_requests;
-                write_response_direct(sock_fd, transport, self->docs_html_resp);
-                return make_consumed_true(self, req.total_consumed);
-            } else if (self->oauth2_redirect_html_resp && path_sv == self->oauth2_redirect_url) {
-                --self->counters.active_requests;
-                write_response_direct(sock_fd, transport, self->oauth2_redirect_html_resp);
-                return make_consumed_true(self, req.total_consumed);
+            --self->counters.active_requests;
+            write_response_direct(sock_fd, transport, self->openapi_json_resp);
+            return make_consumed_true(self, req.total_consumed);
+        } else if (self->docs_html_resp && path_sv == self->docs_url) {
+            if (self->has_http_middleware) {
+                if (self->docs_html_content) return make_mw_tuple(self, req, self->docs_html_content, 200);
             }
-        } else if (second == 'r' && self->redoc_html_resp) {
-            std::string_view path_sv(req.path.data, req.path.len);
-            if (path_sv == self->redoc_url) {
-                --self->counters.active_requests;
-                write_response_direct(sock_fd, transport, self->redoc_html_resp);
-                return make_consumed_true(self, req.total_consumed);
+            --self->counters.active_requests;
+            write_response_direct(sock_fd, transport, self->docs_html_resp);
+            return make_consumed_true(self, req.total_consumed);
+        } else if (self->oauth2_redirect_html_resp && path_sv == self->oauth2_redirect_url) {
+            if (self->has_http_middleware) {
+                if (self->oauth2_redirect_html_content) return make_mw_tuple(self, req, self->oauth2_redirect_html_content, 200);
             }
+            --self->counters.active_requests;
+            write_response_direct(sock_fd, transport, self->oauth2_redirect_html_resp);
+            return make_consumed_true(self, req.total_consumed);
+        } else if (self->redoc_html_resp && path_sv == self->redoc_url) {
+            if (self->has_http_middleware) {
+                if (self->redoc_html_content) return make_mw_tuple(self, req, self->redoc_html_content, 200);
+            }
+            --self->counters.active_requests;
+            write_response_direct(sock_fd, transport, self->redoc_html_resp);
+            return make_consumed_true(self, req.total_consumed);
         }
     }
 
@@ -3325,18 +3511,21 @@ static PyObject* dispatch_one_request(
                 auto hit = spec.header_map.find(normalized);
                 if (hit != spec.header_map.end()) {
                     const auto& fs = spec.header_specs[hit->second];
-                    // convert_underscores=False: only match if header has no '-'
-                    if (!fs.convert_underscores) {
-                        bool has_dash = false;
-                        for (size_t j = 0; j < hdr.name.len; j++) {
-                            if (hdr.name.data[j] == '-') { has_dash = true; break; }
-                        }
-                        if (has_dash) goto skip_header_match;
-                    }
                     {
+                        // Check if header has dashes (needed for convert_underscores and seq_underscore_only)
+                        bool hdr_has_dash = false;
+                        if (!fs.convert_underscores || fs.seq_underscore_only) {
+                            for (size_t j = 0; j < hdr.name.len; j++) {
+                                if (hdr.name.data[j] == '-') { hdr_has_dash = true; break; }
+                            }
+                        }
+                        // convert_underscores=False + scalar: skip dash headers
+                        if (!fs.convert_underscores && hdr_has_dash && !fs.is_sequence) continue;
                         PyRef py_val(PyUnicode_FromStringAndSize(hdr.value.data, hdr.value.len));
                         if (py_val) {
-                            if (fs.is_sequence) {
+                            // seq_underscore_only: only collect into list if header has underscores
+                            bool do_collect = fs.is_sequence && !(fs.seq_underscore_only && hdr_has_dash);
+                            if (do_collect) {
                                 // Collect multiple values into a list
                                 PyObject* existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
                                 if (existing && PyList_Check(existing)) {
@@ -3354,7 +3543,6 @@ static PyObject* dispatch_one_request(
                             }
                         }
                     }
-                    skip_header_match:;
                 }
             }
         }
@@ -3588,34 +3776,47 @@ static PyObject* dispatch_one_request(
                                             } else { PyErr_Clear(); }
                                         }
                                         if (upload_file_obj) {
-                                            PyDict_SetItem(form_dict.get(), name_obj, upload_file_obj);
-                                            // Only inject raw values into kwargs for embedded params.
-                                            // For single-model form params, kwargs gets the validated model.
-                                            if (embed_body_local) {
-                                                PyDict_SetItem(kwargs.get(), name_obj, upload_file_obj);
+                                            // Handle multi-value: collect into list if key exists
+                                            PyObject* existing_fd = PyDict_GetItem(form_dict.get(), name_obj);
+                                            if (existing_fd == nullptr) {
+                                                PyDict_SetItem(form_dict.get(), name_obj, upload_file_obj);
+                                                if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, upload_file_obj);
+                                            } else if (PyList_Check(existing_fd)) {
+                                                PyList_Append(existing_fd, upload_file_obj);
+                                                if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, existing_fd);
+                                            } else {
+                                                PyRef lst(PyList_New(0));
+                                                if (lst) { PyList_Append(lst.get(), existing_fd); PyList_Append(lst.get(), upload_file_obj);
+                                                    PyDict_SetItem(form_dict.get(), name_obj, lst.get());
+                                                    if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, lst.get()); }
                                             }
                                             Py_DECREF(upload_file_obj);
                                         } else {
-                                            // Fallback: store raw part dict (may fail validation but won't crash)
                                             PyDict_SetItem(form_dict.get(), name_obj, part);
                                         }
                                     } else if (data_obj) {
-                                        // Simple form field — decode bytes to string
+                                        // Simple form field
+                                        PyRef str_val;
                                         if (PyBytes_Check(data_obj)) {
                                             char* d; Py_ssize_t dlen;
                                             PyBytes_AsStringAndSize(data_obj, &d, &dlen);
-                                            PyRef str_val(PyUnicode_FromStringAndSize(d, dlen));
-                                            if (str_val) {
-                                                PyDict_SetItem(form_dict.get(), name_obj, str_val.get());
-                                                // Only inject into kwargs for embedded params
-                                                if (embed_body_local) {
-                                                    PyDict_SetItem(kwargs.get(), name_obj, str_val.get());
-                                                }
-                                            }
+                                            str_val = PyRef(PyUnicode_FromStringAndSize(d, dlen));
                                         } else {
-                                            PyDict_SetItem(form_dict.get(), name_obj, data_obj);
-                                            if (embed_body_local) {
-                                                PyDict_SetItem(kwargs.get(), name_obj, data_obj);
+                                            str_val = PyRef(data_obj); Py_INCREF(data_obj);
+                                        }
+                                        if (str_val) {
+                                            PyObject* existing_fd2 = PyDict_GetItem(form_dict.get(), name_obj);
+                                            if (existing_fd2 == nullptr) {
+                                                PyDict_SetItem(form_dict.get(), name_obj, str_val.get());
+                                                if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, str_val.get());
+                                            } else if (PyList_Check(existing_fd2)) {
+                                                PyList_Append(existing_fd2, str_val.get());
+                                                if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, existing_fd2);
+                                            } else {
+                                                PyRef lst(PyList_New(0));
+                                                if (lst) { PyList_Append(lst.get(), existing_fd2); PyList_Append(lst.get(), str_val.get());
+                                                    PyDict_SetItem(form_dict.get(), name_obj, lst.get());
+                                                    if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, lst.get()); }
                                             }
                                         }
                                     }
@@ -3630,6 +3831,76 @@ static PyObject* dispatch_one_request(
             }
         } else if (spec.has_body_params) {
             // ── JSON body parsing (yyjson — GIL-released raw parse) ──────
+            // Validate content-type: must be application/json (or absent/empty)
+            // Check content-type: allow application/json and application/*+json
+            bool ct_is_json = false;
+            if (content_type_sv.empty()) {
+                ct_is_json = true;  // No content-type: assume JSON
+            } else if (ci_contains(content_type_sv.data, content_type_sv.len, "application/json", 16)) {
+                ct_is_json = true;
+            } else {
+                // Check for application/*+json (e.g. application/geo+json)
+                // but NOT application/*+json-* (e.g. application/geo+json-seq)
+                const char* pj = nullptr;
+                for (size_t ci = 0; ci + 5 <= content_type_sv.len; ci++) {
+                    if (content_type_sv.data[ci] == '+' || content_type_sv.data[ci] == '+') {
+                        if (ci + 5 <= content_type_sv.len) {
+                            char lc[5]; for (int li=0;li<5;li++) lc[li]=tolower((unsigned char)content_type_sv.data[ci+li]);
+                            if (memcmp(lc, "+json", 5) == 0) {
+                                // Check what follows +json
+                                size_t after = ci + 5;
+                                // Skip to end or semicolon (params)
+                                while (after < content_type_sv.len && content_type_sv.data[after] != ';' && content_type_sv.data[after] != ' ') after++;
+                                // If nothing follows +json (or only whitespace/params), it is valid
+                                if (after == ci + 5) { ct_is_json = true; }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (!ct_is_json) {
+                // Non-JSON content type for JSON body endpoint: return 422
+                PyRef body_str(PyUnicode_FromStringAndSize(req.body.data, (Py_ssize_t)req.body.len));
+                PyRef err_list(PyList_New(1));
+                if (err_list && body_str) {
+                    PyRef err_dict(PyDict_New());
+                    if (err_dict) {
+                        static PyObject* s_ct_type_key = nullptr; if (!s_ct_type_key) s_ct_type_key = PyUnicode_InternFromString("type");
+                        static PyObject* s_ct_loc_key = nullptr; if (!s_ct_loc_key) s_ct_loc_key = PyUnicode_InternFromString("loc");
+                        static PyObject* s_ct_msg_key = nullptr; if (!s_ct_msg_key) s_ct_msg_key = PyUnicode_InternFromString("msg");
+                        static PyObject* s_ct_input_key = nullptr; if (!s_ct_input_key) s_ct_input_key = PyUnicode_InternFromString("input");
+                        static PyObject* s_ct_mat_val = nullptr; if (!s_ct_mat_val) s_ct_mat_val = PyUnicode_InternFromString("model_attributes_type");
+                        static PyObject* s_ct_mat_msg = nullptr; if (!s_ct_mat_msg) s_ct_mat_msg = PyUnicode_InternFromString("Input should be a valid dictionary or object to extract fields from");
+                        static PyObject* s_ct_body_str = nullptr; if (!s_ct_body_str) s_ct_body_str = PyUnicode_InternFromString("body");
+                        PyRef loc(PyTuple_Pack(1, s_ct_body_str));
+                        if (loc) {
+                            PyDict_SetItem(err_dict.get(), s_ct_type_key, s_ct_mat_val);
+                            PyDict_SetItem(err_dict.get(), s_ct_loc_key, loc.get());
+                            PyDict_SetItem(err_dict.get(), s_ct_msg_key, s_ct_mat_msg);
+                            PyDict_SetItem(err_dict.get(), s_ct_input_key, body_str.get());
+                            PyList_SET_ITEM(err_list.get(), 0, err_dict.release());
+                            PyRef outer(PyDict_New());
+                            if (outer) {
+                                if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+                                PyDict_SetItem(outer.get(), s_detail_key_global, err_list.get());
+                                PyRef err_json(serialize_to_json_pybytes(outer.get()));
+                                if (err_json) {
+                                    char* ej; Py_ssize_t ej_len;
+                                    PyBytes_AsStringAndSize(err_json.get(), &ej, &ej_len);
+                                    build_and_write_http_response(sock_fd, transport, 422, ej, (size_t)ej_len, req.keep_alive,
+                                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                }
+                            }
+                        }
+                    }
+                }
+                Py_DECREF(endpoint_local);
+                Py_XDECREF(body_params_local);
+                --self->counters.active_requests;
+                ++self->counters.total_errors;
+                return make_consumed_true(self, req.total_consumed);
+            }
             yyjson_doc* doc = nullptr;
             Py_BEGIN_ALLOW_THREADS
             doc = yyjson_parse_raw(req.body.data, req.body.len);
@@ -3677,6 +3948,25 @@ static PyObject* dispatch_one_request(
         if (form_data_inst) {
             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
             json_body_obj = form_data_inst.release();
+        }
+    }
+
+    // For dep routes with form body: inject form fields into kwargs so dep_solver can access them
+    if (is_form_local && spec.has_dependencies && json_body_obj != Py_None && kwargs) {
+        PyObject* form_src = json_body_obj;
+        PyRef raw_dict_attr(PyObject_GetAttrString(form_src, "_dict"));
+        if (!raw_dict_attr) { PyErr_Clear(); }
+        PyObject* form_dict_to_merge = (raw_dict_attr && PyDict_Check(raw_dict_attr.get()))
+            ? raw_dict_attr.get()
+            : (PyDict_Check(form_src) ? form_src : nullptr);
+        if (form_dict_to_merge) {
+            PyObject *fk, *fv;
+            Py_ssize_t fpos = 0;
+            while (PyDict_Next(form_dict_to_merge, &fpos, &fk, &fv)) {
+                if (!PyDict_Contains(kwargs.get(), fk)) {
+                    PyDict_SetItem(kwargs.get(), fk, fv);
+                }
+            }
         }
     }
 
@@ -3737,6 +4027,24 @@ static PyObject* dispatch_one_request(
                     (Py_ssize_t)(authorization_sv.len - cred_start)));
                 if (scheme) PyDict_SetItem(kwargs.get(), s_as_key, scheme.get());
                 if (creds) PyDict_SetItem(kwargs.get(), s_ac_key, creds.get());
+            }
+        }
+
+        // Inject raw body bytes for dep_solver (needed for form deps like OAuth2PasswordRequestForm)
+        if (req.body.len > 0) {
+            static PyObject* s_body_key2 = nullptr;
+            if (!s_body_key2) s_body_key2 = PyUnicode_InternFromString("__body__");
+            if (!PyDict_Contains(kwargs.get(), s_body_key2)) {
+                PyRef body_bytes(PyBytes_FromStringAndSize(req.body.data, (Py_ssize_t)req.body.len));
+                if (body_bytes) PyDict_SetItem(kwargs.get(), s_body_key2, body_bytes.get());
+            }
+        }
+        if (content_type_sv.len > 0) {
+            static PyObject* s_ct_key2 = nullptr;
+            if (!s_ct_key2) s_ct_key2 = PyUnicode_InternFromString("__content_type__");
+            if (!PyDict_Contains(kwargs.get(), s_ct_key2)) {
+                PyRef ct_str(PyUnicode_FromStringAndSize(content_type_sv.data, (Py_ssize_t)content_type_sv.len));
+                if (ct_str) PyDict_SetItem(kwargs.get(), s_ct_key2, ct_str.get());
             }
         }
 
@@ -3840,6 +4148,15 @@ static PyObject* dispatch_one_request(
                     static PyObject* s_deps_ran_key = nullptr;
                     if (!s_deps_ran_key) s_deps_ran_key = PyUnicode_InternFromString("__deps_ran__");
                     PyDict_SetItem(kwargs.get(), s_deps_ran_key, Py_True);
+                    // Extract bg_tasks (index 2) from dep result and inject into kwargs
+                    if (PyTuple_GET_SIZE(dep_raw) > 2) {
+                        PyObject* dep_bg = PyTuple_GET_ITEM(dep_raw, 2);
+                        if (dep_bg && dep_bg != Py_None) {
+                            static PyObject* s_bg_key = nullptr;
+                            if (!s_bg_key) s_bg_key = PyUnicode_InternFromString("__bg_tasks__");
+                            PyDict_SetItem(kwargs.get(), s_bg_key, dep_bg);
+                        }
+                    }
 
                     // If there are validation errors, return 422 with full error detail
                     if (dep_errors && PyList_Check(dep_errors) && PyList_GET_SIZE(dep_errors) > 0) {
@@ -4023,6 +4340,53 @@ static PyObject* dispatch_one_request(
                                     }
                                 }
                             }
+                            // Check for custom RequestValidationError handler
+                            if (self->type_exception_handlers && PyDict_Size(self->type_exception_handlers) > 0) {
+                                PyObject* mv_handler = nullptr;
+                                { PyObject *th_key, *th_val; Py_ssize_t th_pos = 0;
+                                  while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
+                                      PyRef cn(PyObject_GetAttrString(th_key, "__name__"));
+                                      if (cn && PyUnicode_Check(cn.get())) {
+                                          const char* cns = PyUnicode_AsUTF8(cn.get());
+                                          if (cns && strcmp(cns, "RequestValidationError") == 0) { mv_handler = th_val; break; }
+                                      } else PyErr_Clear();
+                                  }
+                                }
+                                if (mv_handler) {
+                                    static PyObject* s_mv_rve_cls = nullptr;
+                                    if (!s_mv_rve_cls) { PyRef em(PyImport_ImportModule("fastapi.exceptions")); if (em) s_mv_rve_cls = PyObject_GetAttrString(em.get(), "RequestValidationError"); }
+                                    if (s_mv_rve_cls) {
+                                        static PyObject* s_mv_body_kw = nullptr;
+                                        if (!s_mv_body_kw) s_mv_body_kw = PyUnicode_InternFromString("body");
+                                        PyRef mv_kw(PyDict_New()); if (mv_kw) PyDict_SetItem(mv_kw.get(), s_mv_body_kw, json_body_obj);
+                                        PyRef mv_args(PyTuple_Pack(1, error_list.get()));
+                                        PyRef mv_rve(mv_args && mv_kw ? PyObject_Call(s_mv_rve_cls, mv_args.get(), mv_kw.get()) : nullptr);
+                                        if (mv_rve) {
+                                            PyRef mv_raw(PyObject_CallFunctionObjArgs(mv_handler, Py_None, mv_rve.get(), nullptr));
+                                            PyRef mv_result;
+                                            if (mv_raw && PyCoro_CheckExact(mv_raw.get())) {
+                                                PyObject* cr = nullptr; PySendResult sr = PyIter_Send(mv_raw.get(), Py_None, &cr);
+                                                if (sr == PYGEN_RETURN && cr) mv_result = PyRef(cr); else if (cr) Py_DECREF(cr);
+                                                if (sr != PYGEN_RETURN) PyErr_Clear();
+                                            } else if (mv_raw) mv_result = std::move(mv_raw);
+                                            if (mv_result) {
+                                                int hsc = 422; PyRef sc_a(PyObject_GetAttrString(mv_result.get(), "status_code"));
+                                                if (sc_a) { hsc = (int)PyLong_AsLong(sc_a.get()); if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = 422; } }
+                                                PyRef body_b(PyObject_GetAttrString(mv_result.get(), "body"));
+                                                if (body_b && PyBytes_Check(body_b.get())) {
+                                                    char* hb; Py_ssize_t hbl; PyBytes_AsStringAndSize(body_b.get(), &hb, &hbl);
+                                                    build_and_write_http_response(sock_fd, transport, hsc, hb, (size_t)hbl, req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                                } else PyErr_Clear();
+                                            } else PyErr_Clear();
+                                        }
+                                    }
+                                    Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                                    if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                                    Py_DECREF(endpoint_local); Py_DECREF(body_params_local);
+                                    --self->counters.active_requests; ++self->counters.total_errors;
+                                    return make_consumed_true(self, req.total_consumed);
+                                }
+                            }
                             PyRef err_dict(PyDict_New());
                             if (err_dict) {
                                 if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
@@ -4089,7 +4453,79 @@ static PyObject* dispatch_one_request(
                             PyObject* body_errors = PyTuple_GET_ITEM(validation_result, 1);  // borrowed
 
                             if (body_errors && PyList_Check(body_errors) && PyList_GET_SIZE(body_errors) > 0) {
-                                // ── Validation error → 422 with detailed error list ──
+                                // Validation error
+                                // If custom RequestValidationError handler exists, raise it
+                                if (self->type_exception_handlers && PyDict_Size(self->type_exception_handlers) > 0) {
+                                    // Find handler for RequestValidationError by iterating
+                                    PyObject* handler = nullptr;
+                                    {
+                                        PyObject *th_key, *th_val; Py_ssize_t th_pos = 0;
+                                        while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
+                                            // Check if body_errors list items are instances of th_key
+                                            // We check by class name for simplicity
+                                            PyRef cls_name(PyObject_GetAttrString(th_key, "__name__"));
+                                            if (cls_name && PyUnicode_Check(cls_name.get())) {
+                                                const char* cn = PyUnicode_AsUTF8(cls_name.get());
+                                                if (cn && (strcmp(cn, "RequestValidationError") == 0 ||
+                                                           strcmp(cn, "ValidationException") == 0 ||
+                                                           strcmp(cn, "Exception") == 0)) {
+                                                    handler = th_val;
+                                                    break;
+                                                }
+                                            } else { PyErr_Clear(); }
+                                        }
+                                    }
+                                    if (handler) {
+                                        // Create RequestValidationError to pass to handler
+                                        static PyObject* s_rve_cls2 = nullptr;
+                                        if (!s_rve_cls2) {
+                                            PyRef exc_mod(PyImport_ImportModule("fastapi.exceptions"));
+                                            if (exc_mod) s_rve_cls2 = PyObject_GetAttrString(exc_mod.get(), "RequestValidationError");
+                                        }
+                                        if (s_rve_cls2) {
+                                            // Call RequestValidationError(errors, body=json_body_obj)
+                                            static PyObject* s_rve_body_kw = nullptr;
+                                            if (!s_rve_body_kw) s_rve_body_kw = PyUnicode_InternFromString("body");
+                                            PyRef rve_kw(PyDict_New());
+                                            if (rve_kw) PyDict_SetItem(rve_kw.get(), s_rve_body_kw, json_body_obj);
+                                            PyRef rve_args(PyTuple_Pack(1, body_errors));
+                                            PyRef rve(rve_args && rve_kw ? PyObject_Call(s_rve_cls2, rve_args.get(), rve_kw.get()) : nullptr);
+                                            if (rve) {
+                                                PyRef th_raw(PyObject_CallFunctionObjArgs(handler, Py_None, rve.get(), nullptr));
+                                                // Drive coroutine if async handler
+                                                PyRef th_result;
+                                                if (th_raw && PyCoro_CheckExact(th_raw.get())) {
+                                                    PyObject* coro_result = nullptr;
+                                                    PySendResult sr = PyIter_Send(th_raw.get(), Py_None, &coro_result);
+                                                    if (sr == PYGEN_RETURN && coro_result) th_result = PyRef(coro_result);
+                                                    else if (coro_result) Py_DECREF(coro_result);
+                                                    if (sr != PYGEN_RETURN) PyErr_Clear();
+                                                } else if (th_raw) {
+                                                    th_result = std::move(th_raw);
+                                                }
+                                                if (th_result) {
+                                                    int hsc = 422;
+                                                    PyRef sc_attr(PyObject_GetAttrString(th_result.get(), "status_code"));
+                                                    if (sc_attr) { hsc = (int)PyLong_AsLong(sc_attr.get()); if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = 422; } }
+                                                    PyRef body_b(PyObject_GetAttrString(th_result.get(), "body"));
+                                                    if (body_b && PyBytes_Check(body_b.get())) {
+                                                        char* hbody; Py_ssize_t hbody_len;
+                                                        PyBytes_AsStringAndSize(body_b.get(), &hbody, &hbody_len);
+                                                        build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len, req.keep_alive,
+                                                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                                    } else { PyErr_Clear(); }
+                                                } else { PyErr_Clear(); }
+                                            }
+                                        }
+                                        Py_DECREF(validation_result);
+                                        if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                                        Py_DECREF(endpoint_local);
+                                        Py_DECREF(body_params_local);
+                                        --self->counters.active_requests;
+                                        ++self->counters.total_errors;
+                                        return make_consumed_true(self, req.total_consumed);
+                                        } // if (s_rve_cls2)
+                                    } // if (handler)
                                 // Build {"detail": errors_list} and serialize as JSON
                                 PyRef err_dict(PyDict_New());
                                 if (err_dict) {
@@ -4187,6 +4623,36 @@ body_done:
             // ── Exception handler dispatch ──────────────────────────────
             PyObject *exc_type, *exc_val, *exc_tb;
             PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
+            // Check type-keyed exception handlers (user-registered, first match wins)
+            if (self->type_exception_handlers && PyDict_Size(self->type_exception_handlers) > 0) {
+                PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
+                PyObject *th_key, *th_val;
+                Py_ssize_t th_pos = 0;
+                while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
+                    int is_inst = PyObject_IsInstance(exc_val, th_key);
+                    if (is_inst > 0) {
+                        PyRef th_result(PyObject_CallFunctionObjArgs(th_val, Py_None, exc_val, nullptr));
+                        Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                        if (th_result) {
+                            int hsc = 200;
+                            PyRef sc_attr(PyObject_GetAttrString(th_result.get(), "status_code"));
+                            if (sc_attr) { hsc = (int)PyLong_AsLong(sc_attr.get()); if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = 200; } }
+                            PyRef body_b(PyObject_GetAttrString(th_result.get(), "body"));
+                            if (body_b && PyBytes_Check(body_b.get())) {
+                                char* hbody; Py_ssize_t hbody_len;
+                                PyBytes_AsStringAndSize(body_b.get(), &hbody, &hbody_len);
+                                build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len, req.keep_alive,
+                                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                            } else { PyErr_Clear(); }
+                        } else { PyErr_Clear(); }
+                        fire_post_response_hook(self, req.method.data, req.method.len,
+                                                req.path.data, req.path.len, 200, request_start_time);
+                        --self->counters.active_requests;
+                        if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                        return make_consumed_true(self, req.total_consumed);
+                    } else if (is_inst < 0) { PyErr_Clear(); }
+                }
+            }
             if (is_http_exception(exc_type)) {
                 PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
                 PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
@@ -4305,6 +4771,41 @@ body_done:
         }
 
         // Endpoint completed immediately — serialize + build HTTP response + write
+        // If HTTP middleware is registered, return result to Python for middleware processing
+        if (self->has_http_middleware && raw_result != nullptr) {
+            PyObject* ka = req.keep_alive ? Py_True : Py_False;
+            Py_INCREF(ka);
+            static PyObject* s_mw_tag = nullptr;
+            if (!s_mw_tag) s_mw_tag = PyUnicode_InternFromString("mw");
+            Py_INCREF(s_mw_tag);
+            // Build headers list for middleware Request
+            PyRef hdrs_list(PyList_New(req.header_count));
+            if (hdrs_list) {
+                for (int i = 0; i < req.header_count; i++) {
+                    const auto& hdr = req.headers[i];
+                    PyRef nb(PyBytes_FromStringAndSize(hdr.name.data, (Py_ssize_t)hdr.name.len));
+                    PyRef vb(PyBytes_FromStringAndSize(hdr.value.data, (Py_ssize_t)hdr.value.len));
+                    if (nb && vb) { PyRef p(PyTuple_Pack(2, nb.get(), vb.get())); if (p) PyList_SET_ITEM(hdrs_list.get(), i, p.release()); else { Py_INCREF(Py_None); PyList_SET_ITEM(hdrs_list.get(), i, Py_None); } }
+                    else { Py_INCREF(Py_None); PyList_SET_ITEM(hdrs_list.get(), i, Py_None); }
+                }
+            }
+            bool mc = false;
+            PyObject* method_str = get_cached_method(req.method.data, req.method.len, mc);
+            PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
+            PyRef qs_bytes(PyBytes_FromStringAndSize(req.query_string.data, (Py_ssize_t)req.query_string.len));
+            PyRef mw_info(PyTuple_Pack(7, s_mw_tag, raw_result, get_cached_status(status_code_local), ka,
+                hdrs_list ? hdrs_list.get() : Py_None,
+                method_str ? method_str : Py_None,
+                path_str ? path_str.get() : Py_None));
+            if (!mc && method_str) Py_DECREF(method_str);
+            Py_DECREF(ka);
+            Py_DECREF(raw_result);
+            if (mw_info) {
+                if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                Py_XDECREF(body_params_local);
+                return make_consumed_obj(self, req.total_consumed, mw_info.release());
+            }
+        }
         if (LIKELY(PyDict_Check(raw_result) || PyList_Check(raw_result) ||
             PyUnicode_Check(raw_result) || PyLong_Check(raw_result) ||
             PyFloat_Check(raw_result) || PyBool_Check(raw_result) ||
@@ -4537,6 +5038,40 @@ body_done:
         }
 
         // ── Fallback: serialize as string ───────────────────────────────
+        // Try dataclass/Pydantic model: call dataclasses.asdict or model_dump
+        {
+            static PyObject* s_asdict = nullptr;
+            if (!s_asdict) {
+                PyRef dc_mod(PyImport_ImportModule("dataclasses"));
+                if (dc_mod) s_asdict = PyObject_GetAttrString(dc_mod.get(), "asdict");
+            }
+            static PyObject* s_is_dc = nullptr;
+            if (!s_is_dc) {
+                PyRef dc_mod(PyImport_ImportModule("dataclasses"));
+                if (dc_mod) s_is_dc = PyObject_GetAttrString(dc_mod.get(), "is_dataclass");
+            }
+            if (s_is_dc && s_asdict) {
+                PyRef is_dc_result(PyObject_CallOneArg(s_is_dc, raw_result));
+                if (is_dc_result && PyObject_IsTrue(is_dc_result.get())) {
+                    PyRef dc_dict(PyObject_CallOneArg(s_asdict, raw_result));
+                    if (dc_dict && PyDict_Check(dc_dict.get())) {
+                        Py_DECREF(raw_result);
+                        raw_result = dc_dict.release();
+                        PyRef err_json(serialize_to_json_pybytes(raw_result));
+                        Py_DECREF(raw_result);
+                        if (err_json) {
+                            char* ej; Py_ssize_t ejl;
+                            PyBytes_AsStringAndSize(err_json.get(), &ej, &ejl);
+                            build_and_write_http_response(sock_fd, transport, status_code_local, ej, (size_t)ejl, req.keep_alive,
+                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                        }
+                        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, status_code_local, request_start_time);
+                        --self->counters.active_requests;
+                        return make_consumed_true(self, req.total_consumed);
+                    }
+                } else if (!is_dc_result) PyErr_Clear();
+            }
+        }
         PyRef str_repr(PyObject_Str(raw_result));
         Py_DECREF(raw_result);
         if (str_repr) {
@@ -5497,13 +6032,6 @@ static PyObject* CoreApp_parse_and_route(
                 auto hit = spec.header_map.find(normalized);
                 if (hit != spec.header_map.end()) {
                     const auto& fs = spec.header_specs[hit->second];
-                    if (!fs.convert_underscores) {
-                        bool has_dash = false;
-                        for (size_t j = 0; j < hdr.name.len; j++) {
-                            if (hdr.name.data[j] == '-') { has_dash = true; break; }
-                        }
-                        if (has_dash) goto skip_header_match2;
-                    }
                     {
                         PyRef py_val(PyUnicode_FromStringAndSize(hdr.value.data, hdr.value.len));
                         if (py_val) {
@@ -5524,7 +6052,6 @@ static PyObject* CoreApp_parse_and_route(
                             }
                         }
                     }
-                    skip_header_match2:;
                 }
             }
         }
@@ -5842,6 +6369,9 @@ static PyMethodDef CoreApp_methods[] = {
     {"check_trusted_host", (PyCFunction)CoreApp_check_trusted_host, METH_O, nullptr},
     {"get_route_info", (PyCFunction)CoreApp_get_route_info, METH_O, nullptr},
     {"add_exception_handler", (PyCFunction)CoreApp_add_exception_handler, METH_VARARGS, nullptr},
+    {"set_type_exception_handlers", (PyCFunction)CoreApp_set_type_exception_handlers, METH_VARARGS, nullptr},
+    {"set_has_http_middleware", (PyCFunction)CoreApp_set_has_http_middleware, METH_VARARGS, nullptr},
+    {"set_https_redirect", (PyCFunction)CoreApp_set_https_redirect, METH_VARARGS, nullptr},
     // C++ HTTP server path — bypass ASGI entirely
     {"handle_http", (PyCFunction)(void(*)(void))CoreApp_handle_http, METH_FASTCALL, nullptr},
     {"handle_http_batch", (PyCFunction)(void(*)(void))CoreApp_handle_http_batch, METH_FASTCALL, nullptr},
@@ -5858,6 +6388,8 @@ static PyMethodDef CoreApp_methods[] = {
     {"parse_and_route", (PyCFunction)(void(*)(void))CoreApp_parse_and_route, METH_FASTCALL, nullptr},
     {"freeze_routes", (PyCFunction)CoreApp_freeze_routes, METH_NOARGS, nullptr},
     {"set_openapi_schema", (PyCFunction)CoreApp_set_openapi_schema, METH_O, nullptr},
+    {"set_urls", (PyCFunction)CoreApp_set_urls, METH_VARARGS, nullptr},
+    {"set_swagger_ui_parameters", (PyCFunction)CoreApp_set_swagger_ui_parameters, METH_O, nullptr},
     // C++ native middleware support
     {"configure_rate_limit", (PyCFunction)CoreApp_configure_rate_limit, METH_VARARGS, nullptr},
     {"set_client_ip", (PyCFunction)CoreApp_set_client_ip, METH_O, nullptr},

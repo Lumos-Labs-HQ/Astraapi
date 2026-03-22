@@ -207,7 +207,22 @@ class TestClient:
         # Mutable headers dict — tests can call client.headers.clear() etc.
         # Populated with starlette-compatible default so tests expecting
         # 'User-Agent: testclient' pass even without explicit headers.
-        self.headers: Any = httpx.Headers({"user-agent": "testclient"})
+        self._init_base_url = base_url
+        _default_headers = {"user-agent": "testclient"}
+        # Extract host from base_url for Host header
+        try:
+            import urllib.parse as _up
+            _parsed = _up.urlparse(base_url)
+            if _parsed.hostname:
+                _host = _parsed.hostname
+                if _parsed.port and _parsed.port not in (80, 443):
+                    _host = f"{_host}:{_parsed.port}"
+                _default_headers["host"] = _host
+            if _parsed.scheme == "https":
+                _default_headers["x-forwarded-proto"] = "https"
+        except Exception:
+            pass
+        self.headers: Any = httpx.Headers(_default_headers)
         self.cookies: Any = httpx.Cookies()
         self._raise_server_exceptions = raise_server_exceptions
 

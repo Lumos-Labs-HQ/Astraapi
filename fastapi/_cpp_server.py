@@ -1624,6 +1624,23 @@ class CppHttpProtocol(asyncio.Protocol):
                         pt.add(task)
                         task.add_done_callback(self._pending_tasks_discard)
 
+                elif tag == "mw":
+                    raw_resp = result[1]
+                    status_code = int(result[2])
+                    keep_alive = bool(result[3])
+                    _mw_hdrs = result[4] if len(result) > 4 else None
+                    _mw_method = result[5] if len(result) > 5 else 'GET'
+                    _mw_path = result[6] if len(result) > 6 else '/'
+                    task = create_task(
+                        self._handle_middleware_result(raw_resp, int(status_code), bool(keep_alive), _mw_hdrs, _mw_method, _mw_path))
+                    if not task.done():
+                        pt = self._pending_tasks
+                        if pt is None:
+                            pt = self._pending_tasks = set()
+                            self._pending_tasks_discard = pt.discard
+                        pt.add(task)
+                        task.add_done_callback(self._pending_tasks_discard)
+
                 elif tag == "stream":
                     _, raw_resp, status_code, keep_alive = result
                     task = create_task(
@@ -2212,6 +2229,41 @@ class CppHttpProtocol(asyncio.Protocol):
                 _current_route.reset(_route_token)
             self._core.record_request_end()
 
+    # ── HTTP middleware result path ──
+
+    async def _handle_middleware_result(self, raw: Any, status_code: int, keep_alive: bool,
+                                        raw_headers: Any = None, method: str = 'GET', path: str = '/') -> None:
+        """Apply HTTP middleware to a sync fast-path result."""
+        try:
+            if isinstance(raw, str) and not (hasattr(raw, 'body') or hasattr(raw, 'media_type')):
+                from fastapi.responses import HTMLResponse, Response as _R
+                _p = path or '/'
+                if _p.endswith('.json'):
+                    raw = _R(content=raw.encode('utf-8'), status_code=status_code, media_type='application/json')
+                else:
+                    raw = HTMLResponse(content=raw, status_code=status_code)
+            if _http_middleware_dispatchers:
+                await _run_http_middleware(
+                    raw, _http_middleware_dispatchers,
+                    raw_headers or [], status_code, keep_alive,
+                    self._transport, self._core, self._sock_fd,
+                    None, method or 'GET', path or '/'
+                )
+            else:
+                transport = self._transport
+                if transport and not transport.is_closing():
+                    _raw_type = type(raw)
+                    if _raw_type is dict or _raw_type is list:
+                        _resp = self._core.build_response(raw, status_code, keep_alive)
+                        if _resp: transport.write(_resp)
+                    else:
+                        resp = self._core.build_response_from_any(raw, status_code, keep_alive)
+                        if resp: transport.write(resp)
+        except Exception as exc:
+            await self._dispatch_exception(exc, keep_alive)
+        finally:
+            self._core.record_request_end()
+
     # ── Pydantic body validation path ────────────────────────────────────
 
     async def _handle_pydantic(self, ir: Any) -> None:
@@ -2339,10 +2391,26 @@ async def _create_server(
         app._sync_routes_to_core()
 
     # OPT-A: Register app exception handlers for async dispatch paths
+    _exc_handlers_all = dict(getattr(app, 'exception_handlers', {}))
     _set_app_exception_handlers(
-        dict(getattr(app, 'exception_handlers', {})),
-        {k: v for k, v in getattr(app, 'exception_handlers', {}).items() if isinstance(k, int)},
+        _exc_handlers_all,
+        {k: v for k, v in _exc_handlers_all.items() if isinstance(k, int)},
     )
+    # Register type-keyed handlers in C++ core for sync fast-path dispatch
+    # Exclude default FastAPI handlers (http_exception_handler, request_validation_exception_handler)
+    # so user-registered handlers take priority
+    try:
+        from fastapi.exception_handlers import (
+            http_exception_handler as _default_http_handler,
+            request_validation_exception_handler as _default_rv_handler,
+        )
+        _default_handlers = {_default_http_handler, _default_rv_handler}
+    except ImportError:
+        _default_handlers = set()
+    _type_handlers = {k: v for k, v in _exc_handlers_all.items()
+                      if isinstance(k, type) and v not in _default_handlers}
+    if _type_handlers and hasattr(core_app, 'set_type_exception_handlers'):
+        core_app.set_type_exception_handlers(_type_handlers)
 
     # Build WS app map for DI-wrapped WebSocket dispatch
     _build_ws_app_map(app)
@@ -2358,6 +2426,32 @@ async def _create_server(
             if _dispatch is not None:
                 _http_dispatchers.append(_dispatch)
     _set_http_middleware_dispatchers(_http_dispatchers)
+    if hasattr(core_app, 'set_has_http_middleware'):
+        core_app.set_has_http_middleware(bool(_http_dispatchers))
+
+    # Sync HTTPSRedirect config to C++ core
+    if hasattr(core_app, "set_https_redirect"):
+        for _mw in getattr(app, "user_middleware", []):
+            _cls = getattr(_mw, "cls", None) or (_mw[0] if isinstance(_mw, (list, tuple)) else None)
+            if _cls and getattr(_cls, "__name__", "") == "HTTPSRedirectMiddleware":
+                try:
+                    core_app.set_https_redirect(True)
+                except Exception:
+                    pass
+                break
+
+    # Sync TrustedHost config to C++ core
+    if hasattr(core_app, "configure_trusted_hosts"):
+        for _mw in getattr(app, "user_middleware", []):
+            _cls = getattr(_mw, "cls", None) or (_mw[0] if isinstance(_mw, (list, tuple)) else None)
+            if _cls and getattr(_cls, "__name__", "") == "TrustedHostMiddleware":
+                _kw = getattr(_mw, "kwargs", {}) or {}
+                _hosts = _kw.get("allowed_hosts", ["*"])
+                try:
+                    core_app.configure_trusted_hosts(list(_hosts))
+                except Exception:
+                    pass
+                break
 
     # Sync CORS config to C++ core
     if hasattr(core_app, "configure_cors"):
@@ -2388,6 +2482,38 @@ async def _create_server(
     _prewarm_buffer_pool(4)   # Pre-allocate thread-local response buffers
     if hasattr(core_app, 'warmup'):
         core_app.warmup()     # Exercise parse→route→serialize→build to warm icache
+
+    # Configure Swagger UI parameters
+    if hasattr(core_app, "set_swagger_ui_parameters"):
+        import json as _json
+        # Default params merged with custom params
+        _default_sui = {
+            "layout": "BaseLayout",
+            "deepLinking": True,
+            "showExtensions": True,
+            "showCommonExtensions": True,
+        }
+        _custom_sui = getattr(app, "swagger_ui_parameters", None) or {}
+        _merged = {**_default_sui, **_custom_sui}
+        _js_parts = []
+        for _k, _v in _merged.items():
+            _js_parts.append('"' + str(_k) + '": ' + _json.dumps(_v) + ',')
+        _extra = '\n'.join(_js_parts) + '\n' if _js_parts else ''
+        try:
+            core_app.set_swagger_ui_parameters(_extra)
+        except Exception:
+            pass
+
+    # Configure custom URLs (openapi_url, docs_url, redoc_url)
+    if hasattr(core_app, "set_urls"):
+        _openapi_url = getattr(app, "openapi_url", "/openapi.json") or "/openapi.json"
+        _docs_url = getattr(app, "docs_url", "/docs") or ""
+        _redoc_url = getattr(app, "redoc_url", "/redoc") or ""
+        _oauth2_url = getattr(app, "swagger_ui_oauth2_redirect_url", "/docs/oauth2-redirect") or "/docs/oauth2-redirect"
+        try:
+            core_app.set_urls(_openapi_url, _docs_url, _redoc_url, _oauth2_url)
+        except Exception:
+            pass
 
     # Cache OpenAPI schema
     if app.openapi_url and hasattr(core_app, "set_openapi_schema") and hasattr(app, "openapi"):

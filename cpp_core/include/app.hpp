@@ -73,6 +73,7 @@ struct FieldSpec {
     bool required;
     bool convert_underscores;  // for header params: if false, don't match '-' as '_'
     bool is_sequence;          // for list-typed params: collect multiple values into list
+    bool seq_underscore_only;  // for model-based header params: only collect into list if header has underscores
     PyObject* default_value;   // strong ref or NULL (INCREF'd in register_fast_spec)
     PyObject* py_field_name;   // pre-interned PyUnicode (strong ref)
 };
@@ -174,6 +175,9 @@ typedef struct {
     bool trusted_host_enabled = false;                  // Cached bool — skip atomic load per request
     const TrustedHostConfig* th_ptr_cached = nullptr;   // Raw pointer — set once
     std::unordered_map<uint16_t, PyObject*> exception_handlers;
+    PyObject* type_exception_handlers = nullptr;  // Python dict: {ExcType: handler}
+    bool has_http_middleware = false;  // True when @app.middleware("http") is registered
+    bool https_redirect_enabled = false; // True when HTTPSRedirectMiddleware is active
     std::atomic<uint64_t> route_counter{0};
 
     // ── Hot counters (no alignas — Python tp_alloc doesn't guarantee alignment) ────────
@@ -191,7 +195,13 @@ typedef struct {
     PyObject* docs_html_resp;       // strong ref: pre-built HTTP response bytes for /docs
     PyObject* redoc_html_resp;      // strong ref: pre-built HTTP response bytes for /redoc
     PyObject* oauth2_redirect_html_resp;  // strong ref: pre-built HTTP response bytes for /docs/oauth2-redirect
+    // Content objects for middleware (so middleware can inspect/modify response body)
+    PyObject* openapi_json_content; // strong ref: Python str of JSON content
+    PyObject* docs_html_content;    // strong ref: Python str of HTML content
+    PyObject* redoc_html_content;   // strong ref: Python str of HTML content
+    PyObject* oauth2_redirect_html_content; // strong ref: Python str of HTML content
     std::string openapi_url;        // "/openapi.json" (default)
+    std::string swagger_ui_extra_params; // extra JS params for SwaggerUIBundle
     std::string docs_url;           // "/docs" (default)
     std::string redoc_url;          // "/redoc" (default)
     std::string oauth2_redirect_url;  // "/docs/oauth2-redirect" (default)

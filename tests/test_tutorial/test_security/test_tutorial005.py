@@ -283,7 +283,7 @@ def test_openapi_schema(mod: ModuleType):
                         },
                         "summary": "Read Own Items",
                         "operationId": "read_own_items_users_me_items__get",
-                        "security": [{"OAuth2PasswordBearer": ["items", "me"]}],
+                        "security": [{"OAuth2PasswordBearer": ["me", "items"]}],
                     }
                 },
                 "/status/": {

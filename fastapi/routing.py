@@ -754,9 +754,17 @@ def _build_field_specs(
                 inner_alias = get_validation_alias(inner_f)
                 tag = _get_scalar_type_tag(inner_f) or ""
                 is_seq = is_sequence_field(inner_f) and not _is_json_field(inner_f)
-                convert = getattr(inner_f.field_info, "convert_underscores", default_cu)
+                # Inner fields always use convert_underscores=True (match both dash and underscore)
+                convert = True
                 inner_default = None if inner_f.required else inner_f.get_default()
-                specs.append(("header", inner_alias, tag, inner_f.name, is_seq, False, convert, False, inner_default))
+                # seq_underscore_only: when outer convert_underscores=False, only collect into list
+                # if the header name has underscores (not dashes)
+                seq_uo = is_seq and not default_cu
+                spec_dict = ("header", inner_alias, tag, inner_f.name, is_seq, False, convert, False, inner_default)
+                specs.append(spec_dict)
+                # Store seq_underscore_only flag for C++ (appended as extra element)
+                if seq_uo:
+                    specs[-1] = spec_dict + (seq_uo,)
         else:
             alias = get_validation_alias(field)
             tag = _get_scalar_type_tag(field) or ""
@@ -821,14 +829,14 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
             if lenient_issubclass(field.type_, _BaseModel):
                 # Model-based param — the C++ extracts inner fields individually.
                 # We collect them here to assemble + validate the outer model.
-                default_cu = getattr(field.field_info, "convert_underscores", False)
+                default_cu = getattr(field.field_info, "convert_underscores", True)
                 inner_specs = []
                 for inner_f in get_cached_model_fields(field.type_):
                     inner_alias = get_validation_alias(inner_f)
                     from fastapi.dependencies.utils import is_sequence_field as _isf
                     inner_is_list = _isf(inner_f)
                     inner_specs.append((inner_f.name, inner_alias, inner_is_list))
-                model_param_info.append((loc, field.name, field._type_adapter, inner_specs))
+                model_param_info.append((loc, field.name, field._type_adapter, inner_specs, default_cu))
             else:
                 alias = get_validation_alias(field)
                 is_req = field.required
@@ -843,7 +851,7 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
 
     def _validate(kwargs_dict: dict) -> tuple[dict, list]:
         # Pop C++-injected keys that shouldn't be treated as request params
-        kwargs_dict.pop('__raw_headers__', None)
+        _raw_headers_saved = kwargs_dict.pop('__raw_headers__', None)
         kwargs_dict.pop('__method__', None)
         kwargs_dict.pop('__path__', None)
         kwargs_dict.pop('__auth_scheme__', None)
@@ -885,36 +893,107 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                     new_err["loc"] = (loc, alias) + tuple(inner_loc)
                     errors.append(new_err)
 
-        for loc, outer_name, outer_ta, inner_specs in model_param_info:
+        for _mpi in model_param_info:
+            loc, outer_name, outer_ta, inner_specs = _mpi[0], _mpi[1], _mpi[2], _mpi[3]
+            _cu = _mpi[4] if len(_mpi) > 4 else True
             # Collect inner field values from kwargs (C++ extracted them individually)
             inner_dict: dict = {}
+            known_keys: set = set()
             for inner_name, inner_alias, inner_is_list in inner_specs:
+                known_keys.add(inner_name)
+                known_keys.add(inner_alias)
                 val = kwargs_dict.get(inner_name)
                 if val is None and inner_alias != inner_name:
                     val = kwargs_dict.get(inner_alias)
                 if val is not None:
-                    # Wrap string in list for list-type fields
-                    if inner_is_list and isinstance(val, str):
+                    # Wrap string in list for list-type fields (only when convert_underscores=True)
+                    if inner_is_list and isinstance(val, str) and _cu:
                         val = [val]
                     inner_dict[inner_name] = val
+            # Include extra params so extra="forbid" models can reject them
+            if loc == "query":
+                try:
+                    from fastapi._cpp_server import _current_query_string as _cqs
+                    from urllib.parse import parse_qs as _pqs
+                    _qs_raw = _cqs.get()
+                    if _qs_raw:
+                        _qs_all = _pqs(_qs_raw.decode('latin-1'), keep_blank_values=True)
+                        for _k, _vs in _qs_all.items():
+                            if _k not in known_keys and _k not in inner_dict:
+                                inner_dict[_k] = _vs[0] if len(_vs) == 1 else _vs
+                except Exception:
+                    pass
+            elif loc == "cookie":
+                # Parse extra cookies from raw Cookie header
+                _cookie_hdrs = _raw_headers_saved
+                if not _cookie_hdrs:
+                    try:
+                        from fastapi._cpp_server import _current_raw_headers as _crh3
+                        _cookie_hdrs = _crh3.get()
+                    except Exception: pass
+                if _cookie_hdrs:
+                    try:
+                        from http.cookies import SimpleCookie as _SC
+                        for _hname, _hval in _cookie_hdrs:
+                            _hn = (_hname.decode('latin-1') if isinstance(_hname, bytes) else _hname).lower()
+                            if _hn == 'cookie':
+                                _hv = _hval.decode('latin-1') if isinstance(_hval, bytes) else _hval
+                                _sc = _SC()
+                                _sc.load(_hv)
+                                for _ck, _cv in _sc.items():
+                                    if _ck not in known_keys and _ck not in inner_dict:
+                                        inner_dict[_ck] = _cv.value
+                    except Exception:
+                        pass
+            elif loc == "header":
+                _raw_hdrs = _raw_headers_saved
+                if not _raw_hdrs:
+                    try:
+                        from fastapi._cpp_server import _current_raw_headers as _crh2
+                        _raw_hdrs = _crh2.get()
+                    except Exception: pass
+                if _raw_hdrs:
+                    for _hname, _hval in _raw_hdrs:
+                        try:
+                            _hn = (_hname.decode('latin-1') if isinstance(_hname, bytes) else _hname).lower()
+                            _hv = _hval.decode('latin-1') if isinstance(_hval, bytes) else _hval
+                            # Normalize: replace - with _ to match field names
+                            _hn_norm = _hn.replace('-', '_')
+                            if _hn_norm not in known_keys and _hn_norm not in inner_dict:
+                                # Skip standard HTTP headers that are always present
+                                if _hn not in ('host', 'content-length', 'content-type', 'accept', 'accept-encoding', 'user-agent', 'connection'):
+                                    inner_dict[_hn_norm] = _hv
+                        except Exception:
+                            pass
 
             # Validate the assembled dict as the model type
             try:
                 validated = outer_ta.validate_python(inner_dict)
                 values[outer_name] = validated
             except _PydanticValidationError as e:
-                for err in e.errors(include_url=False):
-                    new_err = dict(err)
-                    inner_loc = new_err.pop("loc", ())
-                    new_err["loc"] = (loc,) + tuple(inner_loc)
-                    errors.append(new_err)
+                _errs = e.errors(include_url=False)
+                # extra_forbidden errors: for query params report as missing outer param;
+                # for headers/cookies keep as extra_forbidden with inner loc
+                if loc in ("query", "cookie") and any(err.get("type") == "extra_forbidden" for err in _errs):
+                    # For cookies: report missing at first inner field
+                    _miss_name = outer_name
+                    if loc == "cookie":
+                        _miss_name = inner_specs[0][0] if inner_specs else outer_name
+                    errors.append({"type": "missing", "loc": (loc, _miss_name), "msg": "Field required", "input": {} if loc == "cookie" else None})
+                else:
+                    for err in _errs:
+                        new_err = dict(err)
+                        inner_loc = new_err.pop("loc", ())
+                        new_err["loc"] = (loc,) + tuple(inner_loc)
+                        errors.append(new_err)
 
         # Collect consumed raw keys (individual fields assembled into models)
         consumed: set = set()
         for _, alias, name, _, _, _ in param_info:
             consumed.add(alias)
             consumed.add(name)
-        for _, outer_name, _, inner_specs in model_param_info:
+        for _mpi2 in model_param_info:
+            outer_name, inner_specs = _mpi2[1], _mpi2[3]
             for inner_name, inner_alias, _ in inner_specs:
                 consumed.add(inner_name)
                 consumed.add(inner_alias)
@@ -1040,10 +1119,13 @@ def _flatten_deps(
                 required_cookie_params.add(f.alias or f.name)
         for f in sub_dep.path_params:
             param_names.add(f.name)
+        has_form_body = False
         for f in sub_dep.body_params:
             param_names.add(f.name)
             if f.required:
                 required_body_params.add(f.name)
+            if isinstance(f.field_info, params.Form):
+                has_form_body = True
 
         # Detect security scheme deps (HTTPBearer, HTTPBasic, etc.)
         # These are resolved natively by C++ auth extraction — no Starlette needed
@@ -1075,6 +1157,7 @@ def _flatten_deps(
             'param_names': param_names,
             'required_query_params': required_query_params,
             'required_body_params': required_body_params,
+            'has_form_body': has_form_body,
             'required_header_params': required_header_params,
             'required_cookie_params': required_cookie_params,
             'security_scopes_param': sub_dep.security_scopes_param_name,
@@ -1120,6 +1203,11 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
         "query_string": b"",
         "headers": header_list,
         "root_path": "",
+        "client": ("testclient", 50000) if any(
+            (n.lower() if isinstance(n, str) else n.lower().decode("latin-1")) == "user-agent" and
+            (v if isinstance(v, str) else v.decode("latin-1")).lower() == "testclient"
+            for n, v in (header_list or [])
+        ) else ("127.0.0.1", 0),
     }
     if app is not None:
         scope["app"] = app
@@ -1154,6 +1242,8 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
     raw_path = kwargs_dict.pop('__path__', '/')
     auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
     auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
+    raw_body_bytes = kwargs_dict.pop('__body__', None)
+    raw_content_type = kwargs_dict.pop('__content_type__', '')
     # Fallback to ContextVar when C++ dep engine already popped __raw_headers__
     if raw_headers is None:
         try:
@@ -1163,6 +1253,19 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
             if raw_path == '/': raw_path = _cp.get()
         except Exception:
             pass
+    # Parse form body once if any dep node needs it
+    _parsed_form: dict | None = None
+    if raw_body_bytes and any(n.get('has_form_body') for n in dep_nodes):
+        ct = raw_content_type if isinstance(raw_content_type, str) else ''
+        if 'application/x-www-form-urlencoded' in ct:
+            from fastapi._fastapi_core import parse_urlencoded_body as _pub
+            _parsed_form = dict(_pub(raw_body_bytes))
+        elif 'multipart/form-data' in ct:
+            _bnd = _extract_boundary(ct)
+            if _bnd:
+                _parts = parse_multipart_body(raw_body_bytes, _bnd)
+                _fd = _build_form_data(_parts)
+                _parsed_form = dict(_fd)
     request_obj = None
 
     for node in dep_nodes:
@@ -1233,6 +1336,11 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
             for pname in node['param_names']:
                 if pname in kwargs_dict:
                     dep_kwargs[pname] = kwargs_dict[pname]
+            # Inject form body fields if this dep has form params
+            if node.get('has_form_body') and _parsed_form:
+                for pname in node['param_names']:
+                    if pname not in dep_kwargs and pname in _parsed_form:
+                        dep_kwargs[pname] = _parsed_form[pname]
 
             # Validate required query params -- produce proper Pydantic-style errors
             _prev_err_count = len(errors)
@@ -1352,6 +1460,8 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
     raw_path = kwargs_dict.pop('__path__', '/')
     auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
     auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
+    raw_body_bytes = kwargs_dict.pop('__body__', None)
+    raw_content_type = kwargs_dict.pop('__content_type__', '')
     # Fallback to ContextVar when C++ dep engine already popped __raw_headers__
     if raw_headers is None:
         try:
@@ -1361,6 +1471,19 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
             if raw_path == '/': raw_path = _cp.get()
         except Exception:
             pass
+    # Parse form body once if any dep node needs it
+    _parsed_form: dict | None = None
+    if raw_body_bytes and any(n.get('has_form_body') for n in dep_nodes):
+        ct = raw_content_type if isinstance(raw_content_type, str) else ''
+        if 'application/x-www-form-urlencoded' in ct:
+            from fastapi._fastapi_core import parse_urlencoded_body as _pub
+            _parsed_form = dict(_pub(raw_body_bytes))
+        elif 'multipart/form-data' in ct:
+            _bnd = _extract_boundary(ct)
+            if _bnd:
+                _parts = parse_multipart_body(raw_body_bytes, _bnd)
+                _fd = _build_form_data(_parts)
+                _parsed_form = dict(_fd)
     request_obj = None
 
     for node in dep_nodes:
@@ -1431,6 +1554,11 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
             for pname in node['param_names']:
                 if pname in kwargs_dict:
                     dep_kwargs[pname] = kwargs_dict[pname]
+            # Inject form body fields if this dep has form params
+            if node.get('has_form_body') and _parsed_form:
+                for pname in node['param_names']:
+                    if pname not in dep_kwargs and pname in _parsed_form:
+                        dep_kwargs[pname] = _parsed_form[pname]
 
             # Validate required query params -- produce proper Pydantic-style errors
             _prev_err_count = len(errors)

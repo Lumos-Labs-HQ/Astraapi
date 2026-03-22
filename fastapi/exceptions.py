@@ -11,7 +11,12 @@ class EndpointContext(TypedDict, total=False):
     line: int
 
 
-class HTTPException(Exception):
+try:
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+except ImportError:
+    _StarletteHTTPException = Exception
+
+class HTTPException(_StarletteHTTPException):
     """
     An HTTP exception you can raise in your own code to show errors to the client.
 
@@ -80,7 +85,7 @@ class HTTPException(Exception):
         self.status_code = status_code
         self.detail = detail
         self.headers = headers
-        super().__init__(detail)
+        Exception.__init__(self, detail)
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(status_code={self.status_code!r}, detail={self.detail!r})"
