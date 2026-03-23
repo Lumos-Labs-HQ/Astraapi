@@ -120,6 +120,38 @@ static PyObject* s_attr_raw_headers2 = nullptr;      // "raw_headers"
 static PyObject* s_attr_background = nullptr;        // "background"
 static PyObject* s_attr_headers = nullptr;           // "headers"
 
+// Promoted from function-local statics (eliminates per-call lazy-init branch)
+static PyObject* s_ct_type_key = nullptr;    // "type"
+static PyObject* s_ct_loc_key = nullptr;     // "loc"
+static PyObject* s_ct_msg_key = nullptr;     // "msg"
+static PyObject* s_ct_input_key = nullptr;   // "input"
+static PyObject* s_ct_mat_val = nullptr;     // "model_attributes_type"
+static PyObject* s_ct_mat_msg = nullptr;     // "Input should be a valid..."
+static PyObject* s_ct_body_str = nullptr;    // "body" (JSON error path)
+static PyObject* s_body_key = nullptr;       // "__body__"
+static PyObject* s_ct_key = nullptr;         // "__content_type__"
+static PyObject* s_body_key2 = nullptr;      // body key2
+static PyObject* s_ct_key2 = nullptr;        // content-type key2
+static PyObject* s_async_di_tag = nullptr;   // "async_di"
+static PyObject* s_deps_ran_key = nullptr;   // "__deps_ran__"
+static PyObject* s_bg_key = nullptr;         // "__bg_tasks__"
+static PyObject* s_serialize = nullptr;      // "serialize_python"
+static PyObject* s_mw_tag = nullptr;         // "mw"
+static PyObject* s_mdj = nullptr;            // "model_dump_json"
+static PyObject* s_by_alias_kw = nullptr;    // "by_alias"
+static PyObject* s_asdict = nullptr;         // "_asdict"
+static PyObject* s_is_dc = nullptr;          // dataclass check
+static PyObject* s_errors_str2 = nullptr;    // "errors"
+static PyObject* s_url_key = nullptr;        // "url"
+static PyObject* s_det_key = nullptr;        // "detail"
+static PyObject* s_kw_filename = nullptr;    // "filename"
+static PyObject* s_kw_file = nullptr;        // "file"
+static PyObject* s_kw_ct = nullptr;          // "content_type"
+static PyObject* s_mv_rve_cls = nullptr;     // RequestValidationError class
+static PyObject* s_mv_body_kw = nullptr;     // "body" kw for RVE
+static PyObject* s_rve_cls2 = nullptr;       // RequestValidationError class2
+static PyObject* s_rve_body_kw = nullptr;    // "body" kw for RVE2
+
 // Cached HTTP method strings — only 7 possible values, avoids per-request allocation
 static PyObject* s_method_GET = nullptr;
 static PyObject* s_method_POST = nullptr;
@@ -182,6 +214,16 @@ void cleanup_cached_refs() {
     Py_CLEAR(s_method_PATCH);
     Py_CLEAR(s_method_HEAD);
     Py_CLEAR(s_method_OPTIONS);
+    Py_CLEAR(s_ct_type_key); Py_CLEAR(s_ct_loc_key); Py_CLEAR(s_ct_msg_key);
+    Py_CLEAR(s_ct_input_key); Py_CLEAR(s_ct_mat_val); Py_CLEAR(s_ct_mat_msg);
+    Py_CLEAR(s_ct_body_str); Py_CLEAR(s_body_key); Py_CLEAR(s_ct_key);
+    Py_CLEAR(s_body_key2); Py_CLEAR(s_ct_key2); Py_CLEAR(s_async_di_tag);
+    Py_CLEAR(s_deps_ran_key); Py_CLEAR(s_bg_key); Py_CLEAR(s_serialize);
+    Py_CLEAR(s_mw_tag); Py_CLEAR(s_mdj); Py_CLEAR(s_by_alias_kw);
+    Py_CLEAR(s_asdict); Py_CLEAR(s_is_dc); Py_CLEAR(s_errors_str2);
+    Py_CLEAR(s_url_key); Py_CLEAR(s_det_key); Py_CLEAR(s_kw_filename);
+    Py_CLEAR(s_kw_file); Py_CLEAR(s_kw_ct); Py_CLEAR(s_mv_rve_cls);
+    Py_CLEAR(s_mv_body_kw); Py_CLEAR(s_rve_cls2); Py_CLEAR(s_rve_body_kw);
 }
 
 // ── Eager initialization — called at server startup to eliminate first-request overhead ──
@@ -278,6 +320,29 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
             Py_DECREF(zero);
         }
     }
+
+    // Initialize promoted function-local statics
+    if (!s_ct_type_key) s_ct_type_key = PyUnicode_InternFromString("type");
+    if (!s_ct_loc_key) s_ct_loc_key = PyUnicode_InternFromString("loc");
+    if (!s_ct_msg_key) s_ct_msg_key = PyUnicode_InternFromString("msg");
+    if (!s_ct_input_key) s_ct_input_key = PyUnicode_InternFromString("input");
+    if (!s_ct_mat_val) s_ct_mat_val = PyUnicode_InternFromString("model_attributes_type");
+    if (!s_ct_mat_msg) s_ct_mat_msg = PyUnicode_InternFromString("Input should be a valid dictionary or object to extract fields from");
+    if (!s_ct_body_str) s_ct_body_str = PyUnicode_InternFromString("body");
+    if (!s_async_di_tag) s_async_di_tag = PyUnicode_InternFromString("async_di");
+    if (!s_deps_ran_key) s_deps_ran_key = PyUnicode_InternFromString("__deps_ran__");
+    if (!s_bg_key) s_bg_key = PyUnicode_InternFromString("__bg_tasks__");
+    if (!s_serialize) s_serialize = PyUnicode_InternFromString("serialize_python");
+    if (!s_mw_tag) s_mw_tag = PyUnicode_InternFromString("mw");
+    if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
+    if (!s_by_alias_kw) s_by_alias_kw = PyUnicode_InternFromString("by_alias");
+    if (!s_errors_str2) s_errors_str2 = PyUnicode_InternFromString("errors");
+    if (!s_det_key) s_det_key = PyUnicode_InternFromString("detail");
+    if (!s_kw_filename) s_kw_filename = PyUnicode_InternFromString("filename");
+    if (!s_kw_file) s_kw_file = PyUnicode_InternFromString("file");
+    if (!s_kw_ct) s_kw_ct = PyUnicode_InternFromString("content_type");
+    if (!s_mv_body_kw) s_mv_body_kw = PyUnicode_InternFromString("body");
+    if (!s_rve_body_kw) s_rve_body_kw = PyUnicode_InternFromString("body");
 
     PyErr_Clear();
     Py_RETURN_NONE;
@@ -3166,9 +3231,9 @@ static PyObject* dispatch_one_request(
     // Skip lock when routes are frozen (after startup) — atomic check first.
     // Auto-freeze on first request if not already frozen to eliminate lock contention.
     bool rt_frozen = self->routes_frozen.load(std::memory_order_acquire);
-    std::shared_lock lock(self->routes_mutex, std::defer_lock);
+    std::shared_lock<std::shared_mutex> lock(self->routes_mutex, std::defer_lock);
     if (!rt_frozen) {
-        // Try to auto-freeze: first request triggers freeze
+        // First request: acquire write lock and freeze
         std::unique_lock wlock(self->routes_mutex);
         if (!self->routes_frozen.load(std::memory_order_relaxed)) {
             self->routes_frozen.store(true, std::memory_order_release);
@@ -3384,7 +3449,6 @@ static PyObject* dispatch_one_request(
         if (req.body.len > 0) {
             PyRef body_bytes(PyBytes_FromStringAndSize(req.body.data, (Py_ssize_t)req.body.len));
             if (body_bytes) {
-                static PyObject* s_body_key = nullptr;
                 if (!s_body_key) s_body_key = PyUnicode_InternFromString("__body__");
                 PyDict_SetItem(kwargs.get(), s_body_key, body_bytes.get());
             }
@@ -3395,7 +3459,6 @@ static PyObject* dispatch_one_request(
                 strncasecmp(req.headers[hi].name.data, "content-type", 12) == 0) {
                 PyRef ct(PyUnicode_FromStringAndSize(req.headers[hi].value.data, (Py_ssize_t)req.headers[hi].value.len));
                 if (ct) {
-                    static PyObject* s_ct_key = nullptr;
                     if (!s_ct_key) s_ct_key = PyUnicode_InternFromString("__content_type__");
                     PyDict_SetItem(kwargs.get(), s_ct_key, ct.get());
                 }
@@ -3777,9 +3840,6 @@ static PyObject* dispatch_one_request(
                                                         // UploadFile(filename=..., file=..., content_type=...)
                                                         PyRef kw(PyDict_New());
                                                         if (kw) {
-                                                            static PyObject* s_kw_filename = nullptr;
-                                                            static PyObject* s_kw_file = nullptr;
-                                                            static PyObject* s_kw_ct = nullptr;
                                                             if (!s_kw_filename) s_kw_filename = PyUnicode_InternFromString("filename");
                                                             if (!s_kw_file) s_kw_file = PyUnicode_InternFromString("file");
                                                             if (!s_kw_ct) s_kw_ct = PyUnicode_InternFromString("content_type");
@@ -3887,13 +3947,13 @@ static PyObject* dispatch_one_request(
                 if (err_list && body_str) {
                     PyRef err_dict(PyDict_New());
                     if (err_dict) {
-                        static PyObject* s_ct_type_key = nullptr; if (!s_ct_type_key) s_ct_type_key = PyUnicode_InternFromString("type");
-                        static PyObject* s_ct_loc_key = nullptr; if (!s_ct_loc_key) s_ct_loc_key = PyUnicode_InternFromString("loc");
-                        static PyObject* s_ct_msg_key = nullptr; if (!s_ct_msg_key) s_ct_msg_key = PyUnicode_InternFromString("msg");
-                        static PyObject* s_ct_input_key = nullptr; if (!s_ct_input_key) s_ct_input_key = PyUnicode_InternFromString("input");
-                        static PyObject* s_ct_mat_val = nullptr; if (!s_ct_mat_val) s_ct_mat_val = PyUnicode_InternFromString("model_attributes_type");
-                        static PyObject* s_ct_mat_msg = nullptr; if (!s_ct_mat_msg) s_ct_mat_msg = PyUnicode_InternFromString("Input should be a valid dictionary or object to extract fields from");
-                        static PyObject* s_ct_body_str = nullptr; if (!s_ct_body_str) s_ct_body_str = PyUnicode_InternFromString("body");
+                        if (!s_ct_type_key) s_ct_type_key = PyUnicode_InternFromString("type");
+                        if (!s_ct_loc_key) s_ct_loc_key = PyUnicode_InternFromString("loc");
+                        if (!s_ct_msg_key) s_ct_msg_key = PyUnicode_InternFromString("msg");
+                        if (!s_ct_input_key) s_ct_input_key = PyUnicode_InternFromString("input");
+                        if (!s_ct_mat_val) s_ct_mat_val = PyUnicode_InternFromString("model_attributes_type");
+                        if (!s_ct_mat_msg) s_ct_mat_msg = PyUnicode_InternFromString("Input should be a valid dictionary or object to extract fields from");
+                        if (!s_ct_body_str) s_ct_body_str = PyUnicode_InternFromString("body");
                         PyRef loc(PyTuple_Pack(1, s_ct_body_str));
                         if (loc) {
                             PyDict_SetItem(err_dict.get(), s_ct_type_key, s_ct_mat_val);
@@ -3928,17 +3988,22 @@ static PyObject* dispatch_one_request(
             // Check if json.loads is patched (e.g. in tests); if so, call it
             {
                 static PyObject* _orig_json_loads = nullptr;
+                static PyObject* _json_module_dict = nullptr;
                 if (!_orig_json_loads) {
                     PyRef jm(PyImport_ImportModule("json"));
-                    if (jm) _orig_json_loads = PyObject_GetAttrString(jm.get(), "loads");
+                    if (jm) {
+                        _json_module_dict = PyModule_GetDict(jm.get());
+                        Py_XINCREF(_json_module_dict);
+                        _orig_json_loads = PyDict_GetItemString(_json_module_dict, "loads");
+                        Py_XINCREF(_orig_json_loads);
+                    }
                 }
-                PyRef jm2(PyImport_ImportModule("json"));
-                PyRef cur_loads(jm2 ? PyObject_GetAttrString(jm2.get(), "loads") : nullptr);
-                if (cur_loads && _orig_json_loads && cur_loads.get() != _orig_json_loads) {
+                PyObject* cur_loads_raw = _json_module_dict ? PyDict_GetItemString(_json_module_dict, "loads") : nullptr;
+                if (cur_loads_raw && _orig_json_loads && cur_loads_raw != _orig_json_loads) {
                     // json.loads is patched -- call it
                     PyRef body_str(PyUnicode_DecodeUTF8(req.body.data, (Py_ssize_t)req.body.len, "replace"));
                     if (body_str) {
-                        py_json_result = PyObject_CallOneArg(cur_loads.get(), body_str.get());
+                        py_json_result = PyObject_CallOneArg(cur_loads_raw, body_str.get());
                         if (!py_json_result) {
                             // json.loads raised -- propagate as 400
                             goto handle_json_loads_exception;
@@ -4010,13 +4075,6 @@ static PyObject* dispatch_one_request(
                                 }
                             }
                         }
-                    }
-                }
-                // Strip position info from Python json error (e.g. ": line 1 column 2 (char 1)")
-                if (!py_err_msg.empty()) {
-                    auto colon_pos = py_err_msg.find(": line ");
-                    if (colon_pos != std::string::npos) {
-                        py_err_msg = py_err_msg.substr(0, colon_pos);
                     }
                 }
                 // Strip position info from Python json error (e.g. ": line 1 column 2 (char 1)")
@@ -4188,7 +4246,6 @@ static PyObject* dispatch_one_request(
 
         // Inject raw body bytes for dep_solver (needed for form deps like OAuth2PasswordRequestForm)
         if (req.body.len > 0) {
-            static PyObject* s_body_key2 = nullptr;
             if (!s_body_key2) s_body_key2 = PyUnicode_InternFromString("__body__");
             if (!PyDict_Contains(kwargs.get(), s_body_key2)) {
                 PyRef body_bytes(PyBytes_FromStringAndSize(req.body.data, (Py_ssize_t)req.body.len));
@@ -4196,7 +4253,6 @@ static PyObject* dispatch_one_request(
             }
         }
         if (content_type_sv.len > 0) {
-            static PyObject* s_ct_key2 = nullptr;
             if (!s_ct_key2) s_ct_key2 = PyUnicode_InternFromString("__content_type__");
             if (!PyDict_Contains(kwargs.get(), s_ct_key2)) {
                 PyRef ct_str(PyUnicode_FromStringAndSize(content_type_sv.data, (Py_ssize_t)content_type_sv.len));
@@ -4237,7 +4293,6 @@ static PyObject* dispatch_one_request(
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     Py_XDECREF(body_params_local);
 
-                    static PyObject* s_async_di_tag = nullptr;
                     if (!s_async_di_tag) s_async_di_tag = PyUnicode_InternFromString("async_di");
                     Py_INCREF(s_async_di_tag);
 
@@ -4301,14 +4356,12 @@ static PyObject* dispatch_one_request(
                         PyDict_Update(kwargs.get(), dep_values);
                     }
                     // Sentinel so _response_shim skips re-running dep_solver
-                    static PyObject* s_deps_ran_key = nullptr;
                     if (!s_deps_ran_key) s_deps_ran_key = PyUnicode_InternFromString("__deps_ran__");
                     PyDict_SetItem(kwargs.get(), s_deps_ran_key, Py_True);
                     // Extract bg_tasks (index 2) from dep result and inject into kwargs
                     if (PyTuple_GET_SIZE(dep_raw) > 2) {
                         PyObject* dep_bg = PyTuple_GET_ITEM(dep_raw, 2);
                         if (dep_bg && dep_bg != Py_None) {
-                            static PyObject* s_bg_key = nullptr;
                             if (!s_bg_key) s_bg_key = PyUnicode_InternFromString("__bg_tasks__");
                             PyDict_SetItem(kwargs.get(), s_bg_key, dep_bg);
                         }
@@ -4509,10 +4562,8 @@ static PyObject* dispatch_one_request(
                                   }
                                 }
                                 if (mv_handler) {
-                                    static PyObject* s_mv_rve_cls = nullptr;
                                     if (!s_mv_rve_cls) { PyRef em(PyImport_ImportModule("fastapi.exceptions")); if (em) s_mv_rve_cls = PyObject_GetAttrString(em.get(), "RequestValidationError"); }
                                     if (s_mv_rve_cls) {
-                                        static PyObject* s_mv_body_kw = nullptr;
                                         if (!s_mv_body_kw) s_mv_body_kw = PyUnicode_InternFromString("body");
                                         PyRef mv_kw(PyDict_New()); if (mv_kw) PyDict_SetItem(mv_kw.get(), s_mv_body_kw, json_body_obj);
                                         PyRef mv_args(PyTuple_Pack(1, error_list.get()));
@@ -4633,14 +4684,12 @@ static PyObject* dispatch_one_request(
                                     }
                                     if (handler) {
                                         // Create RequestValidationError to pass to handler
-                                        static PyObject* s_rve_cls2 = nullptr;
                                         if (!s_rve_cls2) {
                                             PyRef exc_mod(PyImport_ImportModule("fastapi.exceptions"));
                                             if (exc_mod) s_rve_cls2 = PyObject_GetAttrString(exc_mod.get(), "RequestValidationError");
                                         }
                                         if (s_rve_cls2) {
                                             // Call RequestValidationError(errors, body=json_body_obj)
-                                            static PyObject* s_rve_body_kw = nullptr;
                                             if (!s_rve_body_kw) s_rve_body_kw = PyUnicode_InternFromString("body");
                                             PyRef rve_kw(PyDict_New());
                                             if (rve_kw) PyDict_SetItem(rve_kw.get(), s_rve_body_kw, json_body_obj);
@@ -4899,7 +4948,6 @@ body_done:
         // If route has a response_model, validate + serialize through Pydantic
         if (response_model_local && response_model_local != Py_None) {
             // s_validate_str pre-cached at startup; s_serialize stays lazy (rare path)
-            static PyObject* s_serialize = nullptr;
             if (!s_serialize) s_serialize = PyUnicode_InternFromString("serialize_python");
 
             // field.validate_python(raw_result) → validated model
@@ -4931,7 +4979,6 @@ body_done:
         if (self->has_http_middleware && raw_result != nullptr) {
             PyObject* ka = req.keep_alive ? Py_True : Py_False;
             Py_INCREF(ka);
-            static PyObject* s_mw_tag = nullptr;
             if (!s_mw_tag) s_mw_tag = PyUnicode_InternFromString("mw");
             Py_INCREF(s_mw_tag);
             // Build headers list for middleware Request
@@ -5155,8 +5202,6 @@ body_done:
         // Fixes endpoints that return Pydantic models without response_model_field.
         // by_alias=True matches FastAPI's jsonable_encoder default behavior.
         {
-            static PyObject* s_mdj = nullptr;
-            static PyObject* s_by_alias_kw = nullptr;
             if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
             if (!s_by_alias_kw) s_by_alias_kw = PyUnicode_InternFromString("by_alias");
             if (PyObject_HasAttr(raw_result, s_mdj)) {
@@ -5196,12 +5241,10 @@ body_done:
         // ── Fallback: serialize as string ───────────────────────────────
         // Try dataclass/Pydantic model: call dataclasses.asdict or model_dump
         {
-            static PyObject* s_asdict = nullptr;
             if (!s_asdict) {
                 PyRef dc_mod(PyImport_ImportModule("dataclasses"));
                 if (dc_mod) s_asdict = PyObject_GetAttrString(dc_mod.get(), "asdict");
             }
-            static PyObject* s_is_dc = nullptr;
             if (!s_is_dc) {
                 PyRef dc_mod(PyImport_ImportModule("dataclasses"));
                 if (dc_mod) s_is_dc = PyObject_GetAttrString(dc_mod.get(), "is_dataclass");
@@ -5320,7 +5363,6 @@ body_done:
             }
         } else if (is_validation_exception(exc_type)) {
             PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
-            static PyObject* s_errors_str2 = nullptr;
             if (!s_errors_str2) s_errors_str2 = PyUnicode_InternFromString("errors");
             PyRef em(exc_val ? PyObject_GetAttr(exc_val, s_errors_str2) : nullptr);
             PyRef el_raw(em ? PyObject_CallNoArgs(em.get()) : nullptr);
@@ -5328,7 +5370,6 @@ body_done:
             // Strip "url" key from each error dict (pydantic v2 adds it)
             PyRef el(nullptr);
             if (el_raw && PyList_Check(el_raw.get())) {
-                static PyObject* s_url_key = nullptr;
                 if (!s_url_key) s_url_key = PyUnicode_InternFromString("url");
                 Py_ssize_t nerr = PyList_GET_SIZE(el_raw.get());
                 PyRef filtered(PyList_New(nerr));
@@ -5351,7 +5392,6 @@ body_done:
                 el = std::move(el_raw);
             }
             Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-            static PyObject* s_det_key = nullptr;
             if (!s_det_key) s_det_key = PyUnicode_InternFromString("detail");
             PyRef dd(PyDict_New());
             if (dd && el) PyDict_SetItem(dd.get(), s_det_key, el.get());
@@ -5897,8 +5937,6 @@ static PyObject* CoreApp_build_response_from_any(
     // Faster than model_dump(mode='json') + yyjson re-serialization.
     // by_alias=True matches FastAPI's jsonable_encoder default behavior.
     {
-        static PyObject* s_mdj = nullptr;
-        static PyObject* s_by_alias_kw = nullptr;
         if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
         if (!s_by_alias_kw) s_by_alias_kw = PyUnicode_InternFromString("by_alias");
         if (PyObject_HasAttr(raw, s_mdj)) {

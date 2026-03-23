@@ -29,6 +29,19 @@ from collections import deque
 from typing import Any
 
 from fastapi._websocket import WebSocketDisconnect, WebSocketState
+# Hoisted hot-path imports (avoid per-request module dict lookups)
+try:
+    from fastapi.routing import _endpoint_id_to_route as _endpoint_id_to_route_map
+    from fastapi.background import BackgroundTasks as _BackgroundTasks
+    from fastapi.exceptions import HTTPException as _HTTPException, RequestValidationError as _RequestValidationError
+    from fastapi._concurrency import is_async_callable as _is_async_callable, run_in_threadpool as _run_in_threadpool
+except ImportError:
+    _endpoint_id_to_route_map = None  # type: ignore
+    _BackgroundTasks = None  # type: ignore
+    _HTTPException = None  # type: ignore
+    _RequestValidationError = None  # type: ignore
+    _is_async_callable = None  # type: ignore
+    _run_in_threadpool = None  # type: ignore
 
 logger = logging.getLogger("fastapi")
 
@@ -325,8 +338,10 @@ _http_middleware_dispatchers: list = []
 
 
 def _set_http_middleware_dispatchers(dispatchers: list) -> None:
-    global _http_middleware_dispatchers
+    global _http_middleware_dispatchers, _needs_request_context
     _http_middleware_dispatchers = dispatchers
+    if dispatchers:
+        _needs_request_context = True
 
 
 # Maps raw WS endpoint function id -> (route.app, route) for DI-wrapped dispatch.
@@ -389,6 +404,9 @@ _current_path: _ContextVar = _ContextVar('_current_path', default='/')
 _current_body: _ContextVar = _ContextVar('_current_body', default=b'')
 _current_root_path: _ContextVar = _ContextVar('_current_root_path', default='')
 _server_root_path: str = ''  # module-level root_path set at server startup
+_has_custom_routes: bool = False  # set True if any custom APIRoute subclass registered
+_needs_request_context: bool = True  # set False at startup if no route needs Request injection
+_core_app_needs_req_ctx: dict = {}   # id(core_app) -> bool; per-app version of _needs_request_context
 
 
 def _set_raise_server_exceptions(enabled: bool) -> None:
@@ -1288,7 +1306,8 @@ class CppHttpProtocol(asyncio.Protocol):
 
     __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_pending_tasks_discard", "_active_count", "_sock_fd", "_core_batch", "_core_append_dispatch",
              "_loop_create_task",  # cached bound method — saves LOAD_ATTR per async create_task
-             "_ka_needs_reset")    # flag: True = received data, sweep updates _ka_deadline lazily
+             "_ka_needs_reset",    # flag: True = received data, sweep updates _ka_deadline lazily
+             "_needs_req_ctx")     # per-app flag: skip header parse when False
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -1310,8 +1329,8 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle: asyncio.TimerHandle | None = None
         self._ws_pong_received = True
         self._ws_task: asyncio.Task | None = None  # TS-2: tracked for cancellation
-        self._pending_tasks: set | None = None  # Lazy — only allocated for async endpoints
-        self._pending_tasks_discard = None  # Cached set.discard — avoids bound-method alloc per async req
+        self._pending_tasks: set | None = None  # kept for connection_lost cancel loop
+        self._pending_tasks_discard = None
         self._sock_fd = -1  # Raw socket FD for direct C++ HTTP writes (TCP_QUICKACK re-armed in C++)
         # Cache handle_http_batch_v2 bound method — avoids PyMethodObject alloc per data_received call
         _v2 = getattr(core_app, 'handle_http_batch_v2', None)
@@ -1322,6 +1341,8 @@ class CppHttpProtocol(asyncio.Protocol):
         self._loop_create_task = loop.create_task
         # Flag: set True on data_received; sweep updates _ka_deadline lazily (no _monotonic() per req)
         self._ka_needs_reset = False
+        # Per-app flag: skip expensive header parse when no route needs Request context
+        self._needs_req_ctx = _core_app_needs_req_ctx.get(id(core_app), True)
 
     def _reinit(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
                 ka_timeout: float, connections_set: set | None) -> None:
@@ -1351,6 +1372,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._core_append_dispatch = getattr(core_app, 'handle_http_append_and_dispatch', None)
         self._loop_create_task = loop.create_task
         self._ka_needs_reset = False
+        self._needs_req_ctx = _core_app_needs_req_ctx.get(id(core_app), True)
 
     # ── Connection lifecycle ─────────────────────────────────────────────
 
@@ -1470,30 +1492,32 @@ class CppHttpProtocol(asyncio.Protocol):
                 _qs = _req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:]
         _current_query_string.set(_qs)
         # Parse raw headers and method/path for dep Request injection
-        try:
-            _hdrs_end = data.find(b'\r\n\r\n')
-            if _hdrs_end <= 0:
-                _current_body.set(b'')
-            if _hdrs_end > 0:
-                _hdr_block = data[:_hdrs_end]
-                _hdr_lines = _hdr_block.split(b'\r\n')
-                _req_parts = _hdr_lines[0].split(b' ') if _hdr_lines else []
-                _method = _req_parts[0].decode('latin-1') if len(_req_parts) > 0 else 'GET'
-                _full_path = _req_parts[1].decode('latin-1') if len(_req_parts) > 1 else '/'
-                _path_only = _full_path.split('?')[0]
-                _parsed_hdrs = []
-                for _hl in _hdr_lines[1:]:
-                    _colon = _hl.find(b':')
-                    if _colon > 0:
-                        _parsed_hdrs.append((_hl[:_colon].strip().lower(), _hl[_colon+1:].strip()))
-                _current_raw_headers.set(_parsed_hdrs)
-                _current_method.set(_method)
-                _current_path.set(_path_only)
-                # Extract body (after \r\n\r\n)
-                _body_start = _hdrs_end + 4
-                _current_body.set(data[_body_start:] if _body_start < len(data) else b'')
-        except Exception:
-            pass
+        # Skipped when no route needs Request context (saves ~2.5us/req)
+        if self._needs_req_ctx:
+            try:
+                _hdrs_end = data.find(b'\r\n\r\n')
+                if _hdrs_end <= 0:
+                    _current_body.set(b'')
+                if _hdrs_end > 0:
+                    _hdr_block = data[:_hdrs_end]
+                    _hdr_lines = _hdr_block.split(b'\r\n')
+                    _req_parts = _hdr_lines[0].split(b' ') if _hdr_lines else []
+                    _method = _req_parts[0].decode('latin-1') if len(_req_parts) > 0 else 'GET'
+                    _full_path = _req_parts[1].decode('latin-1') if len(_req_parts) > 1 else '/'
+                    _path_only = _full_path.split('?')[0]
+                    _parsed_hdrs = []
+                    for _hl in _hdr_lines[1:]:
+                        _colon = _hl.find(b':')
+                        if _colon > 0:
+                            _parsed_hdrs.append((_hl[:_colon].strip().lower(), _hl[_colon+1:].strip()))
+                    _current_raw_headers.set(_parsed_hdrs)
+                    _current_method.set(_method)
+                    _current_path.set(_path_only)
+                    # Extract body (after \r\n\r\n)
+                    _body_start = _hdrs_end + 4
+                    _current_body.set(data[_body_start:] if _body_start < len(data) else b'')
+            except Exception:
+                pass
 
         # ── Get first result: fused append+dispatch if available, else separate ────────────
         core_ad = self._core_append_dispatch
@@ -2074,11 +2098,10 @@ class CppHttpProtocol(asyncio.Protocol):
             # Set current route for scope["route"] injection
             _ep_id = id(endpoint)
             _route_token = None
+            _ep_route = _endpoint_id_to_route_map.get(_ep_id) if _endpoint_id_to_route_map is not None else None
             try:
-                from fastapi.routing import _endpoint_id_to_route as _eitr
-                _rt = _eitr.get(_ep_id)
-                if _rt is not None:
-                    _route_token = _current_route.set(_rt)
+                if _ep_route is not None:
+                    _route_token = _current_route.set(_ep_route)
             except Exception:
                 pass
             # Resume DI coroutine with the yielded awaitable
@@ -2124,19 +2147,15 @@ class CppHttpProtocol(asyncio.Protocol):
 
             # Inject BackgroundTasks into endpoint kwargs if endpoint declares it
             try:
-                from fastapi.routing import _endpoint_id_to_route as _eitr2
-                _ep_route = _eitr2.get(id(endpoint))
                 _ep_bg_param = getattr(getattr(_ep_route, 'dependant', None), 'background_tasks_param_name', None)
                 if _ep_bg_param and _ep_bg_param not in kwargs:
-                    from fastapi.background import BackgroundTasks as _BT
                     if di_bg_tasks is None:
-                        di_bg_tasks = _BT()
+                        di_bg_tasks = _BackgroundTasks()
                     kwargs[_ep_bg_param] = di_bg_tasks
             except Exception:
                 pass
             # Call endpoint — handle sync vs async, and wrap with exit_stack for gen dep cleanup
-            _is_async_endpoint = inspect.iscoroutinefunction(endpoint) or inspect.iscoroutinefunction(inspect.unwrap(endpoint))
-
+            _is_async_endpoint = getattr(_ep_route, 'is_coroutine', None) if _ep_route is not None else inspect.iscoroutinefunction(endpoint)
             # Capture response object from DI values for post-endpoint header merging
             _di_response_obj = solved[3] if isinstance(solved, tuple) and len(solved) >= 4 else None
 
@@ -2800,6 +2819,40 @@ async def run_server(
         pass
 
     core_app = app._core_app
+
+    # Determine if any route needs Request context (raw headers/body/method/path)
+    # If not, skip the expensive per-request header parse in data_received
+    # _sync_routes_to_core already set this; run_server recomputes as authoritative final value
+    global _needs_request_context
+    try:
+        from fastapi.routing import APIRoute as _APIRoute, APIWebSocketRoute as _APIWSRoute
+        _routes = getattr(getattr(app, 'router', None), 'routes', [])
+        from pydantic import BaseModel as _BM
+        from fastapi._compat import lenient_issubclass as _lis
+        def _route_needs_ctx(r: object) -> bool:
+            d = getattr(r, 'dependant', None)
+            if getattr(d, 'request_param_name', None) or getattr(d, 'http_connection_param_name', None):
+                return True
+            if type(r) is not _APIRoute and type(r) is not _APIWSRoute and getattr(r, 'include_in_schema', False):
+                return True
+            for _hf in getattr(d, 'header_params', []) + getattr(d, 'cookie_params', []):
+                if _lis(_hf.type_, _BM) and getattr(getattr(_hf.type_, 'model_config', None), 'get', lambda *a: None)('extra') == 'forbid':
+                    return True
+            return False
+        _asgi_mw = any(
+            getattr(getattr(_mw, 'cls', None), '__name__', '') not in
+            ('BaseHTTPMiddleware', 'HTTPSRedirectMiddleware', 'TrustedHostMiddleware', 'CORSMiddleware')
+            for _mw in getattr(app, 'user_middleware', [])
+        )
+        _needs_request_context = bool(
+            _http_middleware_dispatchers or _asgi_mw or
+            any(_route_needs_ctx(r) for r in _routes
+                if hasattr(r, 'endpoint') and type(r) is not _APIWSRoute)
+        )
+    except Exception:
+        _needs_request_context = True  # safe default
+    # Store per-app-instance so protocols read correct value regardless of test ordering
+    _core_app_needs_req_ctx[id(core_app)] = _needs_request_context
 
     # ── Sync CORS config to C++ core ─────────────────────────────────────
     if hasattr(core_app, "configure_cors"):

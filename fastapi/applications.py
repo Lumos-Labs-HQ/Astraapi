@@ -1418,6 +1418,8 @@ class FastAPI(AppBase):
 
         _req_param = getattr(getattr(route, 'dependant', None), 'request_param_name', None)
         _http_conn_param = getattr(getattr(route, 'dependant', None), 'http_connection_param_name', None)
+        if _req_param or _http_conn_param:
+            import fastapi._cpp_server as _s; _s._needs_request_context = True
         _resp_param_name = getattr(getattr(route, 'dependant', None), 'response_param_name', None)
 
         async def _response_shim(**kwargs: Any) -> Any:
@@ -1807,6 +1809,9 @@ class FastAPI(AppBase):
             return
         self._routes_synced = True
 
+        import fastapi._cpp_server as _srv_mod
+        _srv_mod._needs_request_context = False  # reset; set True below if any route needs it
+
         from fastapi.routing import APIRoute, APIWebSocketRoute, _make_dep_solver
         from fastapi import params as _fastapi_params
 
@@ -1816,6 +1821,8 @@ class FastAPI(AppBase):
             getattr(getattr(_mw, 'cls', None), '__name__', '') not in ('BaseHTTPMiddleware', 'HTTPSRedirectMiddleware', 'TrustedHostMiddleware', 'CORSMiddleware')
             for _mw in getattr(self, 'user_middleware', [])
         )
+        if _has_asgi_middleware:
+            _srv_mod._needs_request_context = True
 
         # Group routes by path to handle same-path multi-method routes
         from collections import defaultdict as _dd
@@ -1945,6 +1952,19 @@ class FastAPI(AppBase):
             if _has_custom_route_class:
                 _registered_endpoint = self._make_asgi_route_shim(route)
                 _is_coro = True
+                _srv_mod._needs_request_context = True
+            # Header/cookie model with extra='forbid' needs raw headers to detect unknown fields
+            if not _srv_mod._needs_request_context:
+                try:
+                    from pydantic import BaseModel as _BM
+                    from fastapi._compat import lenient_issubclass as _lis
+                    _dep = getattr(route, 'dependant', None)
+                    for _hf in getattr(_dep, 'header_params', []) + getattr(_dep, 'cookie_params', []):
+                        if _lis(_hf.type_, _BM) and getattr(getattr(_hf.type_, 'model_config', None), 'get', lambda *a: None)('extra') == 'forbid':
+                            _srv_mod._needs_request_context = True
+                            break
+                except Exception:
+                    pass
             if _is_form and not _has_custom_route_class:
                 _has_dep_solver_form = getattr(route, '_dep_solver', None) is not None
                 if _has_dep_solver_form:
@@ -2221,6 +2241,7 @@ class FastAPI(AppBase):
             # Register wildcard path for the mount
             _wildcard_path = _mount_path.rstrip('/') + '/{__mount_path__:path}'
             _exact_path = _mount_path.rstrip('/') or '/'
+            _srv_mod._needs_request_context = True  # mounted apps need full request context
             def _make_mount_endpoint(_app, _prefix):
                 async def _mount_endpoint(**kwargs):
                     from fastapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp, _current_body as _cb, _current_query_string as _cqs
@@ -2327,6 +2348,9 @@ class FastAPI(AppBase):
                 )
             except Exception as exc:
                 logger.debug("C++ core WebSocket registration failed for %s: %s", route.path, exc)
+
+        # Store per-app-instance flag so protocols read correct value regardless of test ordering
+        _srv_mod._core_app_needs_req_ctx[id(self._core_app)] = _srv_mod._needs_request_context
 
     def add_api_route(
         self,
@@ -5891,17 +5915,6 @@ class FastAPI(AppBase):
         """
         import asyncio
 
-        # Use uvloop/winloop for 2-4x faster event loop
-        try:
-            import uvloop
-            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-        except ImportError:
-            try:
-                import winloop
-                asyncio.set_event_loop_policy(winloop.EventLoopPolicy())
-            except ImportError:
-                pass  # Graceful fallback to stdlib asyncio
-
         if reload:
             from fastapi._reloader import is_reload_worker, run_with_reload
 
@@ -5939,4 +5952,8 @@ class FastAPI(AppBase):
             from fastapi._multiworker import receive_shared_socket
             shared_sock = receive_shared_socket()
 
-        asyncio.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
+        try:
+            import uvloop
+            uvloop.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
+        except ImportError:
+            asyncio.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
