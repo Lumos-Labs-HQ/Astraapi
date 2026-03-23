@@ -3230,16 +3230,9 @@ static PyObject* dispatch_one_request(
     // ── Route matching ───────────────────────────────────────────────────
     // Skip lock when routes are frozen (after startup) — atomic check first.
     // Auto-freeze on first request if not already frozen to eliminate lock contention.
-    bool rt_frozen = self->routes_frozen.load(std::memory_order_acquire);
-    std::shared_lock<std::shared_mutex> lock(self->routes_mutex, std::defer_lock);
-    if (!rt_frozen) {
-        // First request: acquire write lock and freeze
+    if (UNLIKELY(!self->routes_frozen.load(std::memory_order_acquire))) {
         std::unique_lock wlock(self->routes_mutex);
-        if (!self->routes_frozen.load(std::memory_order_relaxed)) {
-            self->routes_frozen.store(true, std::memory_order_release);
-        }
-        rt_frozen = true;
-        // wlock released here — routes are now frozen, no lock needed going forward
+        self->routes_frozen.store(true, std::memory_order_release);
     }
 
     auto match = self->router.at(req.path.data, req.path.len);
@@ -3260,7 +3253,6 @@ static PyObject* dispatch_one_request(
         }
         auto alt_match = (do_redirect_check && self->redirect_slashes) ? self->router.at(alt_buf, alt_len) : std::nullopt;
         if (alt_match) {
-            if (!rt_frozen) lock.unlock();
             --self->counters.active_requests;
             // Build 307 redirect response using resize+memcpy
             // Build absolute URL using Host header + scheme
@@ -3312,7 +3304,6 @@ static PyObject* dispatch_one_request(
             return make_consumed_true(self, req.total_consumed);
         }
 
-        if (!rt_frozen) lock.unlock();
         --self->counters.active_requests;
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -3324,7 +3315,6 @@ static PyObject* dispatch_one_request(
 
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
-        if (!rt_frozen) lock.unlock();
         --self->counters.active_requests;
         PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -3340,7 +3330,6 @@ static PyObject* dispatch_one_request(
     if (LIKELY(route.method_mask)) {
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (UNLIKELY(!(route.method_mask & req_method))) {
-            if (!rt_frozen) lock.unlock();
             --self->counters.active_requests;
             PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -3374,7 +3363,6 @@ static PyObject* dispatch_one_request(
         }
         if (entry.count > self->rate_limit_max_requests) {
             // Unlock route lock before writing response
-            if (!rt_frozen) lock.unlock();
             --self->counters.active_requests;
             PyRef resp(build_http_error_response(429, "Rate limit exceeded", req.keep_alive,
                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -3395,7 +3383,6 @@ static PyObject* dispatch_one_request(
     }
 
     if (UNLIKELY(!route.fast_spec)) {
-        if (!rt_frozen) lock.unlock();
         --self->counters.active_requests;
         PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive,
                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
@@ -3418,7 +3405,6 @@ static PyObject* dispatch_one_request(
     bool is_form_local = route.is_form;
     bool is_coro_local = route.is_coroutine;
 
-    if (!rt_frozen) lock.unlock();
 
     // RAII guard — auto-DECREF response_model_local on any return path
     struct PyObjGuard { PyObject* p; ~PyObjGuard() { Py_XDECREF(p); } };
@@ -4045,8 +4031,7 @@ static PyObject* dispatch_one_request(
                 }
             } else if (req.body.len > 0) {
                 // JSON parse failed on non-empty body: return 422 JSON decode error
-                if (!rt_frozen) lock.unlock();
-                --self->counters.active_requests;
+                    --self->counters.active_requests;
                 // Build error: [{"type":"json_invalid","loc":["body",1],"msg":"JSON decode error","input":{},"ctx":{"error":"..."}}]
                 static const char json_err_prefix[] = "{\"detail\":[{\"type\":\"json_invalid\",\"loc\":[\"body\",1],\"msg\":\"JSON decode error\",\"input\":{},\"ctx\":{\"error\":\"";
                 static const char json_err_suffix[] = "\"}}]}";
@@ -4116,8 +4101,7 @@ static PyObject* dispatch_one_request(
             if (false) {
                 handle_json_loads_exception:
                 // json.loads raised -- return 400 with the exception message
-                if (!rt_frozen) lock.unlock();
-                --self->counters.active_requests;
+                    --self->counters.active_requests;
                 PyObject *et400, *ev400, *etb400;
                 PyErr_Fetch(&et400, &ev400, &etb400);
                 std::string exc_msg;
@@ -6074,23 +6058,21 @@ static PyObject* CoreApp_parse_and_route(
         return PyTuple_Pack(2, neg.get(), err_resp.release());
     }
 
-    // ── Route matching (skip lock if routes are frozen after startup) ────
-    std::shared_lock<std::shared_mutex> lock(self->routes_mutex, std::defer_lock);
-    if (!self->routes_frozen.load(std::memory_order_acquire)) {
-        lock.lock();
+    // ── Route matching (routes always frozen after startup) ────
+    if (UNLIKELY(!self->routes_frozen.load(std::memory_order_acquire))) {
+        std::unique_lock wlock(self->routes_mutex);
+        self->routes_frozen.store(true, std::memory_order_release);
     }
     auto match = self->router.at(req.path.data, req.path.len);
     if (!match) {
-        if (lock.owns_lock()) lock.unlock();
-        PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
+            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
         if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
         return make_consumed_true(self, req.total_consumed);
     }
 
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
-        if (lock.owns_lock()) lock.unlock();
-        PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
+            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
         if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
         return make_consumed_true(self, req.total_consumed);
     }
@@ -6101,16 +6083,14 @@ static PyObject* CoreApp_parse_and_route(
     if (route.method_mask) {
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (!(route.method_mask & req_method)) {
-            if (lock.owns_lock()) lock.unlock();
-            PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
+                    PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
             if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
             return make_consumed_true(self, req.total_consumed);
         }
     }
 
     if (!route.fast_spec) {
-        if (lock.owns_lock()) lock.unlock();
-        PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive));
+            PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive));
         if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
         return make_consumed_true(self, req.total_consumed);
     }
@@ -6126,7 +6106,6 @@ static PyObject* CoreApp_parse_and_route(
     if (body_params_local) Py_INCREF(body_params_local);
     bool embed_body_local = spec_ptr->embed_body_fields;
 
-    if (lock.owns_lock()) lock.unlock();
 
     const auto& spec = *spec_ptr;
 

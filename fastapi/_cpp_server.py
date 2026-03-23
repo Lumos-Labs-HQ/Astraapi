@@ -406,7 +406,7 @@ _current_root_path: _ContextVar = _ContextVar('_current_root_path', default='')
 _server_root_path: str = ''  # module-level root_path set at server startup
 _has_custom_routes: bool = False  # set True if any custom APIRoute subclass registered
 _needs_request_context: bool = True  # set False at startup if no route needs Request injection
-_core_app_needs_req_ctx: dict = {}   # id(core_app) -> bool; per-app version of _needs_request_context
+_core_app_needs_req_ctx: dict = {}   # id(core_app) -> (core_app, bool); per-app _needs_request_context
 
 
 def _set_raise_server_exceptions(enabled: bool) -> None:
@@ -1342,7 +1342,8 @@ class CppHttpProtocol(asyncio.Protocol):
         # Flag: set True on data_received; sweep updates _ka_deadline lazily (no _monotonic() per req)
         self._ka_needs_reset = False
         # Per-app flag: skip expensive header parse when no route needs Request context
-        self._needs_req_ctx = _core_app_needs_req_ctx.get(id(core_app), True)
+        _nrc_entry = _core_app_needs_req_ctx.get(id(core_app))
+        self._needs_req_ctx = _nrc_entry[1] if (_nrc_entry is not None and _nrc_entry[0] is core_app) else True
 
     def _reinit(self, core_app: Any, loop: "asyncio.AbstractEventLoop",
                 ka_timeout: float, connections_set: set | None) -> None:
@@ -1372,7 +1373,8 @@ class CppHttpProtocol(asyncio.Protocol):
         self._core_append_dispatch = getattr(core_app, 'handle_http_append_and_dispatch', None)
         self._loop_create_task = loop.create_task
         self._ka_needs_reset = False
-        self._needs_req_ctx = _core_app_needs_req_ctx.get(id(core_app), True)
+        _nrc_entry = _core_app_needs_req_ctx.get(id(core_app))
+        self._needs_req_ctx = _nrc_entry[1] if (_nrc_entry is not None and _nrc_entry[0] is core_app) else True
 
     # ── Connection lifecycle ─────────────────────────────────────────────
 
@@ -2852,7 +2854,7 @@ async def run_server(
     except Exception:
         _needs_request_context = True  # safe default
     # Store per-app-instance so protocols read correct value regardless of test ordering
-    _core_app_needs_req_ctx[id(core_app)] = _needs_request_context
+    _core_app_needs_req_ctx[id(core_app)] = (core_app, _needs_request_context)
 
     # ── Sync CORS config to C++ core ─────────────────────────────────────
     if hasattr(core_app, "configure_cors"):

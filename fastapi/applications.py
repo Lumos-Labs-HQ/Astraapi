@@ -2350,7 +2350,9 @@ class FastAPI(AppBase):
                 logger.debug("C++ core WebSocket registration failed for %s: %s", route.path, exc)
 
         # Store per-app-instance flag so protocols read correct value regardless of test ordering
-        _srv_mod._core_app_needs_req_ctx[id(self._core_app)] = _srv_mod._needs_request_context
+        _srv_mod._core_app_needs_req_ctx[id(self._core_app)] = (self._core_app, _srv_mod._needs_request_context)
+        # Clear protocol pool so reused protocols pick up the new _needs_req_ctx value
+        _srv_mod._protocol_pool._pool.clear()
 
     def add_api_route(
         self,
