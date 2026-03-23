@@ -56,5 +56,5 @@ if __name__ == "__main__":
             host = arg.split("=")[1]
     
     print(f"🚀 Starting server at {host}:{port}...")
-    app.run(host=host, port=port, workers=2)
+    app.run(host=host, port=port, workers=1)
     

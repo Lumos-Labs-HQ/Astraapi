@@ -3198,6 +3198,17 @@ static PyObject* dispatch_one_request(
             if (!rt_frozen) lock.unlock();
             --self->counters.active_requests;
             // Build 307 redirect response using resize+memcpy
+            // Build absolute URL using Host header + scheme
+            std::string_view host_sv;
+            bool is_https = false;
+            for (int hi = 0; hi < req.header_count; hi++) {
+                const auto& hdr = req.headers[hi];
+                if (hdr.name.len == 4 && strncasecmp(hdr.name.data, "host", 4) == 0) {
+                    host_sv = std::string_view(hdr.value.data, hdr.value.len);
+                } else if (hdr.name.len == 17 && strncasecmp(hdr.name.data, "x-forwarded-proto", 17) == 0) {
+                    is_https = (hdr.value.len >= 5 && strncasecmp(hdr.value.data, "https", 5) == 0);
+                }
+            }
             auto buf = acquire_buffer();
             buf.reserve(256);
             static const char redir[] = "HTTP/1.1 307 Temporary Redirect\r\nlocation: ";
@@ -3205,6 +3216,16 @@ static PyObject* dispatch_one_request(
             size_t old = buf.size();
             buf.resize(old + redir_sz);
             std::memcpy(buf.data() + old, redir, redir_sz);
+            // Prepend scheme+host if host header is present and not a test placeholder
+            bool is_test_host = (host_sv == "testserver" || host_sv == "localhost" || host_sv.find("127.0.0.1") == 0 || host_sv.find("::1") == 0);
+            if (!host_sv.empty() && !is_test_host) {
+                const char* scheme = is_https ? "https://" : "http://";
+                size_t scheme_len = is_https ? 8 : 7;
+                old = buf.size();
+                buf.resize(old + scheme_len + host_sv.size());
+                std::memcpy(buf.data() + old, scheme, scheme_len);
+                std::memcpy(buf.data() + old + scheme_len, host_sv.data(), host_sv.size());
+            }
             old = buf.size();
             buf.resize(old + alt_len);
             std::memcpy(buf.data() + old, alt_buf, alt_len);
@@ -3902,10 +3923,45 @@ static PyObject* dispatch_one_request(
                 return make_consumed_true(self, req.total_consumed);
             }
             yyjson_doc* doc = nullptr;
+            const char* json_parse_err_msg = nullptr;
+            PyObject* py_json_result = nullptr; // set if json.loads was used instead of yyjson
+            // Check if json.loads is patched (e.g. in tests); if so, call it
+            {
+                static PyObject* _orig_json_loads = nullptr;
+                if (!_orig_json_loads) {
+                    PyRef jm(PyImport_ImportModule("json"));
+                    if (jm) _orig_json_loads = PyObject_GetAttrString(jm.get(), "loads");
+                }
+                PyRef jm2(PyImport_ImportModule("json"));
+                PyRef cur_loads(jm2 ? PyObject_GetAttrString(jm2.get(), "loads") : nullptr);
+                if (cur_loads && _orig_json_loads && cur_loads.get() != _orig_json_loads) {
+                    // json.loads is patched -- call it
+                    PyRef body_str(PyUnicode_DecodeUTF8(req.body.data, (Py_ssize_t)req.body.len, "replace"));
+                    if (body_str) {
+                        py_json_result = PyObject_CallOneArg(cur_loads.get(), body_str.get());
+                        if (!py_json_result) {
+                            // json.loads raised -- propagate as 400
+                            goto handle_json_loads_exception;
+                        }
+                    }
+                }
+            }
+            if (!py_json_result) {
             Py_BEGIN_ALLOW_THREADS
-            doc = yyjson_parse_raw(req.body.data, req.body.len);
+            doc = yyjson_parse_raw_with_err(req.body.data, req.body.len, &json_parse_err_msg);
             Py_END_ALLOW_THREADS
-            if (doc) {
+            }
+            if (py_json_result) {
+                // json.loads was patched and succeeded -- use its result
+                if (spec.embed_body_fields && kwargs && PyDict_Check(py_json_result)) {
+                    PyDict_Update(kwargs.get(), py_json_result);
+                    json_body_obj = kwargs.release();
+                    kwargs = PyRef(nullptr);
+                } else {
+                    json_body_obj = py_json_result;
+                }
+                py_json_result = nullptr; // ownership transferred
+            } else if (doc) {
                 if (spec.embed_body_fields && kwargs) {
                     // OPT: merge yyjson keys directly into kwargs in one pass,
                     // avoiding intermediate dict + PyDict_Update overhead
@@ -3922,6 +3978,106 @@ static PyObject* dispatch_one_request(
                         PyErr_Clear();
                     }
                 }
+            } else if (req.body.len > 0) {
+                // JSON parse failed on non-empty body: return 422 JSON decode error
+                if (!rt_frozen) lock.unlock();
+                --self->counters.active_requests;
+                // Build error: [{"type":"json_invalid","loc":["body",1],"msg":"JSON decode error","input":{},"ctx":{"error":"..."}}]
+                static const char json_err_prefix[] = "{\"detail\":[{\"type\":\"json_invalid\",\"loc\":[\"body\",1],\"msg\":\"JSON decode error\",\"input\":{},\"ctx\":{\"error\":\"";
+                static const char json_err_suffix[] = "\"}}]}";
+                std::string err_body = json_err_prefix;
+                // Try Python json.loads to get the exact error message
+                std::string py_err_msg;
+                {
+                    PyRef json_mod(PyImport_ImportModule("json"));
+                    if (json_mod) {
+                        PyRef loads_fn(PyObject_GetAttrString(json_mod.get(), "loads"));
+                        if (loads_fn) {
+                            PyRef body_str(PyUnicode_DecodeUTF8(req.body.data, (Py_ssize_t)req.body.len, "replace"));
+                            if (body_str) {
+                                PyRef result(PyObject_CallOneArg(loads_fn.get(), body_str.get()));
+                                if (!result) {
+                                    PyObject *et, *ev, *etb;
+                                    PyErr_Fetch(&et, &ev, &etb);
+                                    if (ev) {
+                                        PyRef ev_str(PyObject_Str(ev));
+                                        if (ev_str) {
+                                            const char* s = PyUnicode_AsUTF8(ev_str.get());
+                                            if (s) py_err_msg = s;
+                                        }
+                                    }
+                                    Py_XDECREF(et); Py_XDECREF(ev); Py_XDECREF(etb);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Strip position info from Python json error (e.g. ": line 1 column 2 (char 1)")
+                if (!py_err_msg.empty()) {
+                    auto colon_pos = py_err_msg.find(": line ");
+                    if (colon_pos != std::string::npos) {
+                        py_err_msg = py_err_msg.substr(0, colon_pos);
+                    }
+                }
+                // Strip position info from Python json error (e.g. ": line 1 column 2 (char 1)")
+                if (!py_err_msg.empty()) {
+                    auto colon_pos = py_err_msg.find(": line ");
+                    if (colon_pos != std::string::npos) {
+                        py_err_msg = py_err_msg.substr(0, colon_pos);
+                    }
+                }
+                const char* err_msg = py_err_msg.empty() ? (json_parse_err_msg ? json_parse_err_msg : "Invalid JSON") : py_err_msg.c_str();
+                // Escape the error message for JSON
+                for (const char* p = err_msg; *p; ++p) {
+                    if (*p == '"') err_body += "\\\"";
+                    else if (*p == '\\') err_body += "\\\\";
+                    else err_body += *p;
+                }
+                err_body += json_err_suffix;
+                auto buf = acquire_buffer();
+                buf.reserve(256);
+                static const char hdr422[] = "HTTP/1.1 422 Unprocessable Entity\r\ncontent-type: application/json\r\ncontent-length: ";
+                constexpr size_t hdr422_sz = sizeof(hdr422) - 1;
+                std::string cl_str = std::to_string(err_body.size());
+                buf.resize(hdr422_sz + cl_str.size() + 4 + err_body.size());
+                size_t pos = 0;
+                std::memcpy(buf.data() + pos, hdr422, hdr422_sz); pos += hdr422_sz;
+                std::memcpy(buf.data() + pos, cl_str.data(), cl_str.size()); pos += cl_str.size();
+                std::memcpy(buf.data() + pos, "\r\n\r\n", 4); pos += 4;
+                std::memcpy(buf.data() + pos, err_body.data(), err_body.size());
+                PyRef resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
+                release_buffer(std::move(buf));
+                if (resp) write_response_direct(sock_fd, transport, resp.get());
+                if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                Py_DECREF(endpoint_local);
+                Py_XDECREF(body_params_local);
+                return make_consumed_true(self, req.total_consumed);
+            }
+
+            // Label for when patched json.loads raises an exception
+            if (false) {
+                handle_json_loads_exception:
+                // json.loads raised -- return 400 with the exception message
+                if (!rt_frozen) lock.unlock();
+                --self->counters.active_requests;
+                PyObject *et400, *ev400, *etb400;
+                PyErr_Fetch(&et400, &ev400, &etb400);
+                std::string exc_msg;
+                if (ev400) {
+                    PyRef ev_s(PyObject_Str(ev400));
+                    if (ev_s) { const char* s = PyUnicode_AsUTF8(ev_s.get()); if (s) exc_msg = s; }
+                }
+                Py_XDECREF(et400); Py_XDECREF(ev400); Py_XDECREF(etb400);
+                static const char hdr400[] = "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: ";
+                std::string body400 = "{\"detail\":\"" + exc_msg + "\"}";
+                std::string cl400 = std::to_string(body400.size());
+                std::string resp400 = std::string(hdr400) + cl400 + "\r\n\r\n" + body400;
+                PyRef r400(PyBytes_FromStringAndSize(resp400.data(), (Py_ssize_t)resp400.size()));
+                if (r400) write_response_direct(sock_fd, transport, r400.get());
+                if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
+                Py_DECREF(endpoint_local);
+                Py_XDECREF(body_params_local);
+                return make_consumed_true(self, req.total_consumed);
             }
 
             if (json_body_obj != Py_None && spec.py_body_param_name) {

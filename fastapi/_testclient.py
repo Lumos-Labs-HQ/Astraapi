@@ -17,22 +17,21 @@ from typing import Any
 class WebSocketTestSession:
     """Synchronous WebSocket test session backed by the C++ WebSocket server.
 
-    Provides the same API as starlette's WebSocketTestSession so existing
-    tests work without modification.
+    All recv() calls are routed through the _run thread to avoid concurrency issues.
     """
 
     def __init__(self, url: str) -> None:
         self._url = url
         self._ws: Any = None
-        self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._closed = threading.Event()
-        self._send_q: list[Any] = []
-        self._recv_q: list[Any] = []
-        self._lock = threading.Lock()
         self._error: BaseException | None = None
-        self._peeked: Any = None
+        self._server_closed: bool = False
+        self._client_closed: bool = False
+        # Queue for messages received by _run thread
+        import queue
+        self._recv_queue: queue.Queue = queue.Queue()
 
     def __enter__(self) -> "WebSocketTestSession":
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -48,12 +47,10 @@ class WebSocketTestSession:
                     if rcvd is not None:
                         code = getattr(rcvd, "code", 1000)
                         reason = getattr(rcvd, "reason", "") or ""
-                        # Decode encoded close codes (e.g. "1006:reason")
                         if reason.startswith("1006:"):
                             code = 1006
                             reason = reason[5:]
                     else:
-                        # No close frame = abnormal closure (1006)
                         proto = getattr(self._error, "protocol", None)
                         code = getattr(proto, "close_code", 1006) if proto else 1006
                         reason = ""
@@ -68,9 +65,7 @@ class WebSocketTestSession:
             self._close_sync()
         except Exception:
             pass
-        # If exiting normally (no exception), raise WebSocketDisconnect
-        # to match Starlette test client behavior (server sees disconnect)
-        if exc_type is None:
+        if exc_type is None and not self._client_closed and not self._server_closed:
             from fastapi._websocket import WebSocketDisconnect
             raise WebSocketDisconnect(code=1000)
 
@@ -78,27 +73,33 @@ class WebSocketTestSession:
         try:
             import websockets.sync.client as _ws_client  # type: ignore[import]
         except ImportError:
-            try:
-                import websockets.sync.client as _ws_client  # type: ignore[import]
-            except ImportError:
-                self._error = ImportError("websockets must be installed: pip install websockets")
-                self._ready.set()
-                return
+            self._error = ImportError("websockets must be installed: pip install websockets")
+            self._ready.set()
+            return
         try:
             self._ws = _ws_client.connect(self._url, compression=None)
-            # Peek: detect immediate server close (e.g. no route found)
+            # Peek: detect immediate server close before signaling ready
             try:
                 msg = self._ws.recv(timeout=5.0)
-                self._peeked = msg  # buffer for first receive_text/bytes
+                self._recv_queue.put(msg)
             except TimeoutError:
-                pass  # alive, no immediate message
+                pass  # no immediate message, server still open
             except Exception as exc:
                 self._error = exc
                 self._ready.set()
                 return
             self._ready.set()
-            # Keep thread alive until close() is called
-            self._closed.wait()
+            # Continuously recv until closed
+            while not self._closed.is_set():
+                try:
+                    msg = self._ws.recv(timeout=2.5)
+                    self._recv_queue.put(msg)
+                except TimeoutError:
+                    pass
+                except Exception:
+                    self._server_closed = True
+                    self._recv_queue.put(None)  # sentinel: server closed
+                    break
         except Exception as exc:
             self._error = exc
             self._ready.set()
@@ -113,6 +114,19 @@ class WebSocketTestSession:
         self._closed.set()
         if self._thread:
             self._thread.join(timeout=5.0)
+
+    def _recv_msg(self) -> Any:
+        """Get next message from queue, raising WebSocketDisconnect if server closed."""
+        import queue
+        while True:
+            try:
+                msg = self._recv_queue.get(timeout=30.0)
+                if msg is None:
+                    from fastapi._websocket import WebSocketDisconnect
+                    raise WebSocketDisconnect(code=1000)
+                return msg
+            except queue.Empty:
+                raise RuntimeError("WebSocket receive timed out")
 
     def send_text(self, data: str) -> None:
         if self._ws is None:
@@ -132,23 +146,13 @@ class WebSocketTestSession:
             self.send_text(text)
 
     def receive_text(self) -> str:
-        if self._ws is None:
-            raise RuntimeError("WebSocket not connected")
-        if self._peeked is not None:
-            msg, self._peeked = self._peeked, None
-        else:
-            msg = self._ws.recv()
+        msg = self._recv_msg()
         if isinstance(msg, bytes):
             return msg.decode("utf-8")
         return msg
 
     def receive_bytes(self) -> bytes:
-        if self._ws is None:
-            raise RuntimeError("WebSocket not connected")
-        if self._peeked is not None:
-            msg, self._peeked = self._peeked, None
-        else:
-            msg = self._ws.recv()
+        msg = self._recv_msg()
         if isinstance(msg, str):
             return msg.encode("utf-8")
         return msg
@@ -159,13 +163,13 @@ class WebSocketTestSession:
         return json.loads(self.receive_text())
 
     def close(self, code: int = 1000) -> None:
+        self._client_closed = True
         if self._ws:
             try:
                 self._ws.close()
             except Exception:
                 pass
         self._close_sync()
-
 
 class TestClient:
     """Test client backed by the C++ HTTP server.
@@ -188,10 +192,12 @@ class TestClient:
         app: Any,
         base_url: str = "http://testserver",
         raise_server_exceptions: bool = True,
+        root_path: str = "",
         **kwargs: Any,
     ) -> None:
         import httpx
         self.app = app
+        self._root_path = root_path
         self._httpx_kwargs = kwargs
         # Server state — all None until _ensure_started() is called
         self._port: int | None = None
@@ -333,7 +339,7 @@ class TestClient:
                     elif isinstance(_ls_state, dict):
                         for _k, _v in _ls_state.items():
                             setattr(_app_state, _k, _v)
-        server = await _create_server(self.app, "127.0.0.1", self._port)
+        server = await _create_server(self.app, "127.0.0.1", self._port, root_path=self._root_path)
         # Use asyncio.Event for clean shutdown instead of polling every 50ms.
         # The stop event is set by close() via loop.call_soon_threadsafe().
         stop_event = asyncio.Event()

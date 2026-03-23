@@ -21,6 +21,18 @@ class Jinja2Templates:
             directory = [directory]
         loader = jinja2.FileSystemLoader(directory)
         self.env = jinja2.Environment(loader=loader, autoescape=True, **env_options)
+        self._setup_env_defaults(self.env)
+
+    def _setup_env_defaults(self, env: Any) -> None:
+        try:
+            from jinja2 import pass_context
+        except ImportError:
+            return
+        @pass_context
+        def url_for(context, name, /, **path_params):
+            request = context['request']
+            return request.url_for(name, **path_params)
+        env.globals.setdefault('url_for', url_for)
 
     def get_template(self, name: str) -> Any:
         return self.env.get_template(name)

@@ -288,11 +288,11 @@ def precompute_ws_signature(endpoint: Any) -> None:
 
 _500_RESP = (
     b"HTTP/1.1 500 Internal Server Error\r\n"
-    b"content-type: application/json\r\n"
-    b"content-length: 34\r\n"
+    b"content-type: text/plain; charset=utf-8\r\n"
+    b"content-length: 21\r\n"
     b"connection: keep-alive\r\n"
     b"\r\n"
-    b'{"detail":"Internal Server Error"}'
+    b'Internal Server Error'
 )
 
 # ── Type cache (initialized at import time) ──────────────────────────────────
@@ -386,6 +386,9 @@ _current_query_string: _ContextVar[bytes] = _ContextVar('_current_query_string',
 _current_raw_headers: _ContextVar = _ContextVar('_current_raw_headers', default=None)
 _current_method: _ContextVar = _ContextVar('_current_method', default='GET')
 _current_path: _ContextVar = _ContextVar('_current_path', default='/')
+_current_body: _ContextVar = _ContextVar('_current_body', default=b'')
+_current_root_path: _ContextVar = _ContextVar('_current_root_path', default='')
+_server_root_path: str = ''  # module-level root_path set at server startup
 
 
 def _set_raise_server_exceptions(enabled: bool) -> None:
@@ -1469,6 +1472,8 @@ class CppHttpProtocol(asyncio.Protocol):
         # Parse raw headers and method/path for dep Request injection
         try:
             _hdrs_end = data.find(b'\r\n\r\n')
+            if _hdrs_end <= 0:
+                _current_body.set(b'')
             if _hdrs_end > 0:
                 _hdr_block = data[:_hdrs_end]
                 _hdr_lines = _hdr_block.split(b'\r\n')
@@ -1484,6 +1489,9 @@ class CppHttpProtocol(asyncio.Protocol):
                 _current_raw_headers.set(_parsed_hdrs)
                 _current_method.set(_method)
                 _current_path.set(_path_only)
+                # Extract body (after \r\n\r\n)
+                _body_start = _hdrs_end + 4
+                _current_body.set(data[_body_start:] if _body_start < len(data) else b'')
         except Exception:
             pass
 
@@ -2166,12 +2174,14 @@ class CppHttpProtocol(asyncio.Protocol):
                     # Run HTTP middleware if registered (@app.middleware("http"))
                     # Zero overhead when empty: branch not taken.
                     if _http_middleware_dispatchers:
+                        _mw_hdrs = kwargs.get('__raw_headers__') or _current_raw_headers.get()
+                        _mw_method = kwargs.get('__method__', '') or _current_method.get() or 'GET'
+                        _mw_path = kwargs.get('__path__', '') or _current_path.get() or '/'
                         _raw = await _run_http_middleware(
                             _raw, _http_middleware_dispatchers,
                             _di_extra_headers, status_code, keep_alive,
                             transport, self._core, self._sock_fd,
-                            kwargs.get('__raw_headers__'), kwargs.get('__method__', 'GET'),
-                            kwargs.get('__path__', '/')
+                            _mw_hdrs, _mw_method, _mw_path
                         )
                     else:
                         _raw_type = type(_raw)
@@ -2377,6 +2387,7 @@ class CppHttpProtocol(asyncio.Protocol):
 async def _create_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
     keep_alive_timeout: float = 30.0,
+    root_path: str = "",
 ) -> asyncio.AbstractServer:
     """Create and return a C++ HTTP server without blocking.
 
@@ -2385,6 +2396,26 @@ async def _create_server(
     """
     loop = asyncio.get_event_loop()
     core_app = app._core_app
+
+    # Set server-level root_path
+    global _server_root_path
+    _server_root_path = root_path or getattr(app, 'root_path', '') or ''
+    # Propagate root_path to app so OpenAPI schema includes it
+    if _server_root_path and not getattr(app, 'root_path', ''):
+        app.root_path = _server_root_path
+    # Pre-add root_path to servers if root_path_in_servers is enabled and no explicit servers
+    if _server_root_path and getattr(app, 'root_path_in_servers', True):
+        _rp = _server_root_path.rstrip('/')
+        _existing_servers = getattr(app, 'servers', []) or []
+        _existing_urls = {s.get('url') for s in _existing_servers}
+        # Only add root_path if no explicit servers are configured
+        if _rp and _rp not in _existing_urls and not _existing_servers:
+            if not hasattr(app, 'servers') or app.servers is None:
+                app.servers = []
+            app.servers.insert(0, {'url': _rp})
+            # Invalidate cached schema
+            app.openapi_schema = None
+            app._openapi_bytes = None
 
     # Sync routes if not yet done
     if hasattr(app, "_sync_routes_to_core"):
@@ -2425,6 +2456,29 @@ async def _create_server(
             _dispatch = _kw.get('dispatch')
             if _dispatch is not None:
                 _http_dispatchers.append(_dispatch)
+        elif _cls_name == 'GZipMiddleware':
+            _kw = getattr(_mw, 'kwargs', {}) or {}
+            _min_size = _kw.get('minimum_size', 500)
+            _level = _kw.get('compresslevel', 9)
+            def _make_gzip_dispatch(_min, _lvl):
+                import gzip as _gzip
+                async def _gzip_dispatch(request, call_next):
+                    response = await call_next(request)
+                    accept_enc = request.headers.get('accept-encoding', '')
+                    if 'gzip' not in accept_enc:
+                        return response
+                    body = getattr(response, 'body', b'')
+                    if not isinstance(body, bytes):
+                        return response
+                    if len(body) < _min:
+                        return response
+                    compressed = _gzip.compress(body, compresslevel=_lvl)
+                    response.body = compressed
+                    response.headers['content-encoding'] = 'gzip'
+                    response.headers['content-length'] = str(len(compressed))
+                    return response
+                return _gzip_dispatch
+            _http_dispatchers.append(_make_gzip_dispatch(_min_size, _level))
     _set_http_middleware_dispatchers(_http_dispatchers)
     if hasattr(core_app, 'set_has_http_middleware'):
         core_app.set_has_http_middleware(bool(_http_dispatchers))

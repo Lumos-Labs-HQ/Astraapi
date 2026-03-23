@@ -522,7 +522,6 @@ class Request(HTTPConnection):
 
     def __init__(self, scope: Scope, receive: Optional[Receive] = None, send: Optional[Send] = None) -> None:
         super().__init__(scope, receive, send)
-        self._body: Optional[bytes] = None
         self._json: Any = None
         self._json_loaded: bool = False
         self._form: Any = None
@@ -541,7 +540,7 @@ class Request(HTTPConnection):
 
     async def stream(self):
         """Yield body chunks from the ASGI receive channel."""
-        if self._body is not None:
+        if hasattr(self, '_body') and self._body is not None:
             yield self._body
             yield b""
             return
@@ -558,7 +557,7 @@ class Request(HTTPConnection):
 
     async def body(self) -> bytes:
         """Read the entire request body."""
-        if self._body is None:
+        if not hasattr(self, '_body') or self._body is None:
             chunks: list[bytes] = []
             async for chunk in self.stream():
                 chunks.append(chunk)

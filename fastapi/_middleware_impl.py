@@ -399,6 +399,41 @@ class GZipMiddleware:
         self.minimum_size = minimum_size
         self.compresslevel = compresslevel
 
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+        # Check if client accepts gzip
+        headers = dict(scope.get('headers', []))
+        accept_enc = headers.get(b'accept-encoding', b'').decode('latin-1')
+        if 'gzip' not in accept_enc:
+            await self.app(scope, receive, send)
+            return
+        # Collect response
+        _status = [200]
+        _resp_headers = [[]]
+        _body = [b'']
+        async def _send_wrapper(msg: Any) -> None:
+            if msg['type'] == 'http.response.start':
+                _status[0] = msg['status']
+                _resp_headers[0] = list(msg.get('headers', []))
+            elif msg['type'] == 'http.response.body':
+                _body[0] += msg.get('body', b'')
+        await self.app(scope, receive, _send_wrapper)
+        body = _body[0]
+        if len(body) >= self.minimum_size:
+            import gzip as _gzip
+            compressed = _gzip.compress(body, compresslevel=self.compresslevel)
+            hdrs = [(k, v) for k, v in _resp_headers[0]
+                    if k.lower() not in (b'content-length', b'content-encoding')]
+            hdrs.append((b'content-encoding', b'gzip'))
+            hdrs.append((b'content-length', str(len(compressed)).encode()))
+            await send({'type': 'http.response.start', 'status': _status[0], 'headers': hdrs})
+            await send({'type': 'http.response.body', 'body': compressed})
+        else:
+            await send({'type': 'http.response.start', 'status': _status[0], 'headers': _resp_headers[0]})
+            await send({'type': 'http.response.body', 'body': body})
+
 
 # ---------------------------------------------------------------------------
 # TrustedHostMiddleware

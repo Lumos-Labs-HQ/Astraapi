@@ -82,8 +82,8 @@ def get_openapi_security_definitions(
     flat_dependant: Dependant,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     security_definitions = {}
-    # Use sets for O(1) scope dedup instead of O(n) list scan
-    operation_security_sets: dict[str, set[str]] = {}
+    # Use dicts for ordered scope dedup (preserves insertion order)
+    operation_security_sets: dict[str, dict[str, None]] = {}
     for security_dependency in flat_dependant._security_dependencies:
         security_definition = jsonable_encoder(
             security_dependency._security_scheme.model,
@@ -92,11 +92,10 @@ def get_openapi_security_definitions(
         )
         security_name = security_dependency._security_scheme.scheme_name
         security_definitions[security_name] = security_definition
-        # Merge scopes for the same security scheme — O(1) per scope
         if security_name not in operation_security_sets:
-            operation_security_sets[security_name] = set()
+            operation_security_sets[security_name] = {}
         for scope in security_dependency.oauth_scopes or []:
-            operation_security_sets[security_name].add(scope)
+            operation_security_sets[security_name][scope] = None
     operation_security = [
         {name: list(scopes)} for name, scopes in operation_security_sets.items()
     ]

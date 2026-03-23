@@ -303,6 +303,18 @@ class Response:
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         """ASGI interface for Starlette TestClient compatibility."""
+        # For FileResponse, read the file if body is empty
+        _body = self.body
+        if not _body and hasattr(self, 'path') and self.path:
+            if not getattr(self, 'send_header_only', False):
+                if not hasattr(self, '_file_headers_populated'):
+                    self._populate_file_headers()
+                    self._file_headers_populated = True
+                try:
+                    with open(self.path, 'rb') as _f:
+                        _body = _f.read()
+                except (OSError, AttributeError):
+                    pass
         await send({
             "type": "http.response.start",
             "status": self.status_code,
@@ -310,7 +322,7 @@ class Response:
         })
         await send({
             "type": "http.response.body",
-            "body": self.body or b"",
+            "body": _body or b"",
         })
         if self.background is not None:
             await self.background()
@@ -479,6 +491,8 @@ class FileResponse(Response):
             for k, v in headers.items():
                 raw_headers.append((k.lower().encode("latin-1"), v.encode("latin-1")))
         self._raw_headers = raw_headers
+        # Populate file headers immediately so C++ can read them
+        self._populate_file_headers()
 
     def _populate_file_headers(self) -> None:
         """Set content-type, content-length, content-disposition, last-modified, etag."""

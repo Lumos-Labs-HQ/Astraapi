@@ -1096,6 +1096,9 @@ class FastAPI(AppBase):
                     if root_path and self.root_path_in_servers:
                         self.servers.insert(0, {"url": root_path})
                         server_urls.add(root_path)
+                        # Invalidate cached schema so it's rebuilt with new server
+                        self.openapi_schema = None
+                        self._openapi_bytes = None
                 self.openapi()  # ensure schema + bytes are built
                 return Response(
                     content=self._openapi_bytes,
@@ -1300,6 +1303,74 @@ class FastAPI(AppBase):
         return _param_shim
 
     @staticmethod
+    def _make_asgi_route_shim(route: Any) -> Callable[..., Any]:
+        """Shim for custom APIRoute subclasses: calls route.app (ASGI) and returns Response."""
+        _asgi_app = route.app
+
+        async def _asgi_shim(**kwargs: Any) -> Any:
+            from fastapi._cpp_server import (
+                _current_raw_headers as _crh, _current_method as _cm,
+                _current_path as _cp, _current_body as _cb, _current_query_string as _cqs,
+            )
+            from fastapi.routing import _make_lightweight_request
+            _raw_headers = _crh.get() or []
+            _method = _cm.get() or 'GET'
+            _path = _cp.get() or '/'
+            _body = _cb.get() if hasattr(_cb, 'get') else b''
+            _qs = _cqs.get() if hasattr(_cqs, 'get') else b''
+            _app_ref = getattr(route, 'dependency_overrides_provider', None)
+            _req = _make_lightweight_request(_raw_headers, _method, _path, app=_app_ref, _shim_route=route)
+            # Patch body into scope so request.body() works
+            _req.scope['_body'] = _body or b''
+            _req.scope['query_string'] = _qs if isinstance(_qs, bytes) else (_qs.encode() if _qs else b'')
+            # Add required AsyncExitStack entries to scope
+            from contextlib import AsyncExitStack as _AES
+            _req.scope['fastapi_middleware_astack'] = _AES()
+            _req.scope['fastapi_inner_astack'] = _AES()
+            _req.scope['fastapi_function_astack'] = _AES()
+            # Build receive callable
+            _body_sent = False
+            async def _receive():
+                nonlocal _body_sent
+                if not _body_sent:
+                    _body_sent = True
+                    return {'type': 'http.request', 'body': _body or b'', 'more_body': False}
+                return {'type': 'http.disconnect'}
+            # Collect ASGI response
+            _resp_status = [200]
+            _resp_headers = [[]]
+            _resp_body = [b'']
+            async def _send(msg):
+                if msg['type'] == 'http.response.start':
+                    _resp_status[0] = msg.get('status', 200)
+                    _resp_headers[0] = list(msg.get('headers', []))
+                elif msg['type'] == 'http.response.body':
+                    _resp_body[0] += msg.get('body', b'')
+            try:
+                await _asgi_app(_req.scope, _receive, _send)
+            except Exception as _exc:
+                from fastapi.exceptions import HTTPException as _HTTPExc
+                from fastapi._response import JSONResponse as _JR
+                if isinstance(_exc, _HTTPExc):
+                    _det = _exc.detail
+                    _hdrs = getattr(_exc, 'headers', None) or {}
+                    _er = _JR({'detail': _det}, status_code=_exc.status_code)
+                    for _k, _v in _hdrs.items():
+                        _er.headers[_k] = _v
+                    return _er
+                raise
+            from fastapi._response import Response as _Resp
+            _r = _Resp(content=_resp_body[0], status_code=_resp_status[0])
+            for _hn, _hv in _resp_headers[0]:
+                _hn_s = _hn.decode('latin-1') if isinstance(_hn, bytes) else _hn
+                _hv_s = _hv.decode('latin-1') if isinstance(_hv, bytes) else _hv
+                if _hn_s.lower() not in ('content-length',):
+                    _r.headers[_hn_s] = _hv_s
+            return _r
+
+        return _asgi_shim
+
+    @staticmethod
     def _make_response_class_shim(route: Any) -> Callable[..., Any]:
         """Create an async endpoint shim that wraps the result in the route's response_class.
 
@@ -1362,7 +1433,8 @@ class FastAPI(AppBase):
                 _rh = kwargs.pop('__raw_headers__', None) or _crh.get()
                 _meth = kwargs.pop('__method__', None) or _cm.get() or 'GET'
                 _pth = kwargs.pop('__path__', None) or _cp.get() or '/'
-                _req_obj = _make_lightweight_request(_rh, _meth, _pth, _shim_route=route)
+                _app_ref = getattr(route, 'dependency_overrides_provider', None)
+                _req_obj = _make_lightweight_request(_rh, _meth, _pth, app=_app_ref, _shim_route=route)
                 if _req_param:
                     kwargs[_req_param] = _req_obj
                 if _http_conn_param:
@@ -1436,16 +1508,30 @@ class FastAPI(AppBase):
             kwargs.pop('__path__', None)
             kwargs.pop('__auth_scheme__', None)
             kwargs.pop('__auth_credentials__', None)
-            kwargs.pop('__exit_stack__', None)
+            _exit_stack = kwargs.pop('__exit_stack__', None)
             kwargs.pop('__deps_ran__', None)
             _exc_handlers_shim = getattr(route, '_app_exception_handlers', None)
 
             async def _call_with_exc_handling():
                 try:
                     if _is_async:
-                        return await original_endpoint(**kwargs)
-                    return original_endpoint(**kwargs)
+                        _r = await original_endpoint(**kwargs)
+                    else:
+                        _r = original_endpoint(**kwargs)
+                    if _exit_stack is not None:
+                        await _exit_stack.aclose()
+                    return _r
                 except Exception as _exc:
+                    if _exit_stack is not None:
+                        _suppressed = await _exit_stack.__aexit__(type(_exc), _exc, _exc.__traceback__)
+                        if _suppressed:
+                            from fastapi.exceptions import FastAPIError as _FAE
+                            raise _FAE(
+                                "Response not awaited. There's a high chance that the "
+                                "application code is raising an exception and a dependency with yield "
+                                "has a block with a bare except, or a block with except Exception, "
+                                "and is not raising the exception again."
+                            )
                     if _exc_handlers_shim:
                         for _exc_cls, _exc_handler in _exc_handlers_shim.items():
                             if isinstance(_exc, _exc_cls):
@@ -1459,6 +1545,26 @@ class FastAPI(AppBase):
                     raise
 
             result = await _call_with_exc_handling()
+
+            # Apply HTTP middleware (e.g. GZipMiddleware) if registered
+            try:
+                import fastapi._cpp_server as _mw_srv
+                _mw_dispatchers = _mw_srv._http_middleware_dispatchers
+                if _mw_dispatchers and isinstance(result, _Response):
+                    from fastapi._cpp_server import _current_raw_headers as _mw_crh, _current_method as _mw_cm, _current_path as _mw_cp
+                    from fastapi.routing import _make_lightweight_request as _mw_mlr
+                    _mw_req = _mw_mlr(_mw_crh.get(), _mw_cm.get() or 'GET', _mw_cp.get() or '/')
+                    _mw_resp = result
+                    for _mw_fn in reversed(_mw_dispatchers):
+                        async def _mw_call_next(_req, _r=_mw_resp):
+                            return _r
+                        _mw_resp = await _mw_fn(_mw_req, _mw_call_next)
+                        if _mw_resp is None:
+                            break
+                    if _mw_resp is not None:
+                        result = _mw_resp
+            except Exception:
+                pass
 
             # If already a Response object, handle based on type
             _final: Any = None
@@ -1704,6 +1810,13 @@ class FastAPI(AppBase):
         from fastapi.routing import APIRoute, APIWebSocketRoute, _make_dep_solver
         from fastapi import params as _fastapi_params
 
+        # Check if any non-BaseHTTPMiddleware middleware is registered (e.g. GZipMiddleware)
+        # If so, force all routes through _response_shim to apply middleware
+        _has_asgi_middleware = any(
+            getattr(getattr(_mw, 'cls', None), '__name__', '') not in ('BaseHTTPMiddleware', 'HTTPSRedirectMiddleware', 'TrustedHostMiddleware', 'CORSMiddleware')
+            for _mw in getattr(self, 'user_middleware', [])
+        )
+
         # Group routes by path to handle same-path multi-method routes
         from collections import defaultdict as _dd
         _path_routes: dict = _dd(list)
@@ -1826,7 +1939,13 @@ class FastAPI(AppBase):
 
             # For form routes: wrap endpoint so C++ raw file dicts become UploadFile
             _registered_endpoint = endpoint
-            if _is_form:
+            # Detect custom APIRoute subclass (overrides get_route_handler)
+            from fastapi.routing import APIRoute as _APIRoute
+            _has_custom_route_class = type(route) is not _APIRoute
+            if _has_custom_route_class:
+                _registered_endpoint = self._make_asgi_route_shim(route)
+                _is_coro = True
+            if _is_form and not _has_custom_route_class:
                 _has_dep_solver_form = getattr(route, '_dep_solver', None) is not None
                 if _has_dep_solver_form:
                     # Form route with dep_solver: use response_class_shim which handles deps
@@ -1845,7 +1964,7 @@ class FastAPI(AppBase):
                     # The shim is async, but if no file params the original endpoint
                     # is returned unchanged — use its actual coroutine status.
                     _is_coro = inspect.iscoroutinefunction(_registered_endpoint)
-            elif not getattr(route, '_fast_path_eligible', False):
+            elif not _has_custom_route_class and not getattr(route, '_fast_path_eligible', False):
                 # Non-fast-path, non-form routes (e.g. response_class=HTMLResponse).
                 # Wrap endpoint so result is a Response object for C++ raw_headers path.
                 # Attach app-level exception handlers (type-keyed) to route for shim
@@ -1856,19 +1975,19 @@ class FastAPI(AppBase):
                 route.dependant.call = _registered_endpoint
                 endpoint = _registered_endpoint
                 _is_coro = True  # shim is always async
-            elif getattr(route, 'response_field', None) is not None:
+            elif not _has_custom_route_class and getattr(route, 'response_field', None) is not None:
                 # Fast-path route with response_model: wrap to apply model filtering.
                 _registered_endpoint = self._make_response_model_shim(route)
                 _is_coro = True  # shim is always async
                 # Update dependant.call and endpoint so C++ fast path uses the shim
                 route.dependant.call = _registered_endpoint
                 endpoint = _registered_endpoint
-            else:
+            elif not _has_custom_route_class:
                 # Fast-path route without response_model.
                 # If route has a dep_solver, use _response_shim (handles deps).
                 # Otherwise use _param_validation_shim (lighter weight).
                 _has_dep_solver = getattr(route, '_dep_solver', None) is not None
-                if _has_dep_solver:
+                if _has_dep_solver or _has_asgi_middleware:
                     try:
                         from fastapi.exception_handlers import http_exception_handler as _dh, request_validation_exception_handler as _dvh
                         _default_exc_handlers = {_dh, _dvh}
@@ -1906,15 +2025,21 @@ class FastAPI(AppBase):
                     summary=route.summary,
                     description=route.description,
                     operation_id=route.operation_id,
-                    has_body=_has_body,
-                    is_form=_is_form,
+                    has_body=False if _has_custom_route_class else _has_body,
+                    is_form=False if _has_custom_route_class else _is_form,
                     exclude_unset=False,
                     exclude_defaults=False,
                     exclude_none=False,
                 )
                 route_index = self._core_app.route_count() - 1
+                # For custom route class routes, register minimal spec (no body parsing)
+                if _has_custom_route_class:
+                    self._core_app.register_fast_spec(
+                        route_index, None, None, None, False,
+                        None, None,
+                    )
                 # Register fast-path metadata for eligible routes
-                if getattr(route, '_fast_path_eligible', False):
+                elif getattr(route, '_fast_path_eligible', False):
                     dep = route.dependant
                     # Collect all body params: route's own + deps' body params
                     _all_body_params = list(dep.body_params)
@@ -2083,6 +2208,104 @@ class FastAPI(AppBase):
                     )
             except Exception as exc:
                 logger.debug("C++ core route registration failed for %s: %s", route.path, exc)
+
+        # Register Mount routes as ASGI fallback endpoints
+        from fastapi._routing_base import Mount as _Mount
+        for route in self.routes:
+            if not isinstance(route, _Mount):
+                continue
+            _mount_path = route.path
+            _mount_app = route.app
+            if _mount_app is None:
+                continue
+            # Register wildcard path for the mount
+            _wildcard_path = _mount_path.rstrip('/') + '/{__mount_path__:path}'
+            _exact_path = _mount_path.rstrip('/') or '/'
+            def _make_mount_endpoint(_app, _prefix):
+                async def _mount_endpoint(**kwargs):
+                    from fastapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp, _current_body as _cb, _current_query_string as _cqs
+                    _raw_headers = _crh.get() or []
+                    _method = _cm.get() or 'GET'
+                    _full_path = _cp.get() or '/'
+                    _body = _cb.get() or b''
+                    _qs = _cqs.get() if hasattr(_cqs, 'get') else b''
+                    # Strip mount prefix from path for sub-app
+                    _sub_path = _full_path[len(_prefix.rstrip('/')):] or '/'
+                    if not _sub_path.startswith('/'):
+                        _sub_path = '/' + _sub_path
+                    # Build ASGI scope
+                    _headers = []
+                    for _h in _raw_headers:
+                        if isinstance(_h, (list, tuple)) and len(_h) == 2:
+                            _hn, _hv = _h
+                            if isinstance(_hn, str): _hn = _hn.encode('latin-1')
+                            if isinstance(_hv, str): _hv = _hv.encode('latin-1')
+                            _headers.append((_hn, _hv))
+                    _scope = {
+                        'type': 'http',
+                        'asgi': {'version': '3.0'},
+                        'http_version': '1.1',
+                        'method': _method,
+                        'headers': _headers,
+                        'path': _sub_path,
+                        'raw_path': _sub_path.encode('utf-8'),
+                        'query_string': _qs if isinstance(_qs, bytes) else b'',
+                        'root_path': _prefix.rstrip('/'),
+                        'scheme': 'http',
+                        'server': ('127.0.0.1', 8000),
+                    }
+                    # Build receive callable
+                    _body_sent = False
+                    async def _receive():
+                        nonlocal _body_sent
+                        if not _body_sent:
+                            _body_sent = True
+                            return {'type': 'http.request', 'body': _body, 'more_body': False}
+                        return {'type': 'http.disconnect'}
+                    # Collect response via send callable
+                    _resp_status = [200]
+                    _resp_headers = [[]]
+                    _resp_body = [b'']
+                    async def _send(msg):
+                        if msg['type'] == 'http.response.start':
+                            _resp_status[0] = msg['status']
+                            _resp_headers[0] = msg.get('headers', [])
+                        elif msg['type'] == 'http.response.body':
+                            _resp_body[0] += msg.get('body', b'')
+                    import warnings as _warnings
+                    with _warnings.catch_warnings():
+                        _warnings.simplefilter('ignore', DeprecationWarning)
+                        await _app(_scope, _receive, _send)
+                    from fastapi._response import Response as _Resp
+                    _r = _Resp(content=_resp_body[0], status_code=_resp_status[0])
+                    for _hn, _hv in _resp_headers[0]:
+                        if isinstance(_hn, bytes): _hn = _hn.decode('latin-1')
+                        if isinstance(_hv, bytes): _hv = _hv.decode('latin-1')
+                        if _hn.lower() not in ('content-length',):
+                            _r.headers[_hn] = _hv
+                    return _r
+                return _mount_endpoint
+            _ep = _make_mount_endpoint(_mount_app, _mount_path)
+            for _mp in [_wildcard_path, _exact_path]:
+                try:
+                    self._core_app.add_route(
+                        _mp,
+                        ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
+                        _ep,
+                        True,
+                        status_code=200,
+                        tags=[],
+                        has_body=True,
+                        exclude_unset=False,
+                        exclude_defaults=False,
+                        exclude_none=False,
+                    )
+                    _ridx = self._core_app.route_count() - 1
+                    self._core_app.register_fast_spec(
+                        _ridx, None, None, None, False, None, None, None
+                    )
+                except Exception as exc:
+                    logger.debug('Mount route registration failed for %s: %s', _mp, exc)
 
         # Register WebSocket routes in C++ core for app.run() fast-path
         from fastapi._routing_base import WebSocketRoute as _WebSocketRoute

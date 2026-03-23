@@ -116,6 +116,19 @@ yyjson_doc* yyjson_parse_raw(const char* data, size_t len) {
     return yyjson_read_opts((char*)data, len, YYJSON_READ_NOFLAG, nullptr, nullptr);
 }
 
+yyjson_doc* yyjson_parse_raw_with_err(const char* data, size_t len, const char** err_msg) {
+    if (!data || len == 0) {
+        if (err_msg) *err_msg = "Empty input";
+        return nullptr;
+    }
+    yyjson_read_err err;
+    yyjson_doc* doc = yyjson_read_opts((char*)data, len, YYJSON_READ_NOFLAG, nullptr, &err);
+    if (!doc && err_msg) {
+        *err_msg = (err.msg && err.msg[0]) ? err.msg : "Invalid JSON";
+    }
+    return doc;
+}
+
 // Phase 2: Convert parsed yyjson_doc to Python objects — requires GIL.
 // Frees the doc internally. Returns new reference or NULL with exception set.
 

@@ -16,6 +16,10 @@ PyObject* yyjson_parse_to_pyobject(const char* data, size_t len);
 // Returns yyjson_doc* on success, nullptr on error (no Python exception set).
 yyjson_doc* yyjson_parse_raw(const char* data, size_t len);
 
+// Parse JSON with error info. Returns doc on success, nullptr on error.
+// On error, *err_msg is set to a static error string (do not free).
+yyjson_doc* yyjson_parse_raw_with_err(const char* data, size_t len, const char** err_msg);
+
 // Phase 2: Convert yyjson_doc to Python objects (requires GIL).
 // Frees the doc internally. Returns new reference or NULL with exception set.
 PyObject* yyjson_doc_to_pyobject(yyjson_doc* doc);

@@ -1196,13 +1196,47 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
                 value = value.encode('latin-1')
             header_list.append((name, value))
 
+    # Get body bytes from ContextVar for request.body() support
+    _body_bytes = b''
+    try:
+        from fastapi._cpp_server import _current_body as _cb
+        _body_bytes = _cb.get() or b''
+    except Exception:
+        pass
+
+    _root_path = ''
+    try:
+        from fastapi._cpp_server import _server_root_path as _srp
+        _root_path = _srp
+    except Exception:
+        pass
+
+    # Extract host from headers for server tuple
+    _host_hdr = None
+    _scheme_hdr = 'http'
+    for _hn, _hv in (header_list or []):
+        _hn_s = _hn.lower() if isinstance(_hn, str) else _hn.lower().decode('latin-1')
+        _hv_s = _hv if isinstance(_hv, str) else _hv.decode('latin-1')
+        if _hn_s == 'host':
+            _host_hdr = _hv_s
+        elif _hn_s == 'x-forwarded-proto':
+            _scheme_hdr = _hv_s
+    _server_tuple = None
+    if _host_hdr:
+        _h_parts = _host_hdr.rsplit(':', 1)
+        _s_host = _h_parts[0]
+        _s_port = int(_h_parts[1]) if len(_h_parts) > 1 else (443 if _scheme_hdr == 'https' else 80)
+        _server_tuple = (_s_host, _s_port)
     scope = {
         "type": "http",
         "method": method or "GET",
         "path": path or "/",
         "query_string": b"",
         "headers": header_list,
-        "root_path": "",
+        "root_path": _root_path,
+        "_body": _body_bytes,
+        "scheme": _scheme_hdr,
+        "server": _server_tuple,
         "client": ("testclient", 50000) if any(
             (n.lower() if isinstance(n, str) else n.lower().decode("latin-1")) == "user-agent" and
             (v if isinstance(v, str) else v.decode("latin-1")).lower() == "testclient"
@@ -1211,6 +1245,8 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
     }
     if app is not None:
         scope["app"] = app
+        if hasattr(app, 'router'):
+            scope["router"] = app.router
     # Inject route for scope["route"] access in endpoints
     _route = _shim_route
     if _route is None and route_id is not None:
@@ -1223,7 +1259,10 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
             pass
     if _route is not None:
         scope["route"] = _route
-    return Request(scope)
+    _req = Request(scope)
+    if _body_bytes:
+        _req._body = _body_bytes
+    return _req
 
 
 def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _app=None):
