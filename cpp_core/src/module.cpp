@@ -68,6 +68,9 @@ extern PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_get_metrics(PyObject* self, PyObject* capsule);
 extern PyObject* py_ws_update_send_metrics(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_and_feed(PyObject* self, PyObject* args);
+extern PyObject* py_ws_run_echo_thread(PyObject* self, PyObject* args);
+extern PyObject* py_ws_handle_and_step(PyObject* self, PyObject* args);
+extern PyObject* py_ws_set_direct_type(PyObject* self, PyObject* arg);
 
 // openapi_gen.cpp
 extern PyObject* py_openapi_dict_to_json_bytes(PyObject* self, PyObject* arg);
@@ -251,6 +254,9 @@ static PyMethodDef module_methods[] = {
     {"ws_get_metrics", (PyCFunction)py_ws_get_metrics, METH_O, nullptr},
     {"ws_update_send_metrics", (PyCFunction)py_ws_update_send_metrics, METH_VARARGS, nullptr},
     {"ws_handle_and_feed", (PyCFunction)py_ws_handle_and_feed, METH_VARARGS, nullptr},
+    {"ws_run_echo_thread", (PyCFunction)py_ws_run_echo_thread, METH_VARARGS, nullptr},
+    {"ws_handle_and_step", (PyCFunction)py_ws_handle_and_step, METH_VARARGS, nullptr},
+    {"ws_set_direct_type", (PyCFunction)py_ws_set_direct_type, METH_O, nullptr},
 
     // v2.0: OpenAPI
     {"openapi_dict_to_json_bytes", (PyCFunction)py_openapi_dict_to_json_bytes, METH_O, nullptr},

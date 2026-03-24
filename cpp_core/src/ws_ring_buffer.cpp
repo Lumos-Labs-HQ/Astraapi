@@ -1511,3 +1511,19 @@ PyObject* py_ws_update_send_metrics(PyObject* /*self*/, PyObject* args) {
     state->bytes_out += (uint64_t)byte_count;
     Py_RETURN_NONE;
 }
+
+// ── Stub functions required by module.cpp ────────────────────────────────────
+// These were added to module.cpp but are not yet implemented.
+// Returning None keeps the module loadable.
+
+PyObject* py_ws_run_echo_thread(PyObject* /*self*/, PyObject* /*args*/) {
+    Py_RETURN_NONE;
+}
+
+PyObject* py_ws_handle_and_step(PyObject* /*self*/, PyObject* /*args*/) {
+    Py_RETURN_NONE;
+}
+
+PyObject* py_ws_set_direct_type(PyObject* /*self*/, PyObject* /*arg*/) {
+    Py_RETURN_NONE;
+}

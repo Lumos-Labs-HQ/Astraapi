@@ -61,6 +61,8 @@ class WebSocket(HTTPConnection):
         super().__init__(scope, receive, send)
         self.client_state = WebSocketState.CONNECTING
         self.application_state = WebSocketState.CONNECTING
+        # Cache CppWebSocket for fast-path bypass of ASGI dict overhead
+        self._cpp_ws = getattr(receive, '__self__', None) if receive is not None else None
 
     @property
     def receive(self) -> Receive:
@@ -115,6 +117,10 @@ class WebSocket(HTTPConnection):
     async def send_text(self, data: str) -> None:
         """Send a text message."""
         self._assert_connected()
+        cpp_ws = self._cpp_ws
+        if cpp_ws is not None:
+            await cpp_ws.send_text(data)
+            return
         await self.send({"type": "websocket.send", "text": data})
 
     async def send_bytes(self, data: bytes) -> None:
@@ -162,6 +168,9 @@ class WebSocket(HTTPConnection):
     async def receive_text(self) -> str:
         """Receive a text message."""
         self._assert_connected()
+        cpp_ws = self._cpp_ws
+        if cpp_ws is not None:
+            return await cpp_ws.receive_text()
         message = await self._receive_message()
         text = message.get("text")
         if text is None:

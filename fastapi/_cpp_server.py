@@ -556,9 +556,9 @@ class CppWebSocket:
         # Auto-cork: coalesce writes within same event loop tick, batch frame building
         self._pending_sends: list[tuple[int, bytes]] = []
         self._flush_scheduled = False
-        # Echo auto-detection
+        # Echo auto-detection (disabled: breaks ASGI endpoint loop pattern)
         self._protocol = None  # back-ref to CppHttpProtocol, set after creation
-        self._echo_detect_count = 0
+        self._echo_detect_count = -1
         self._last_received = None  # track last received for echo detection
         self._last_received_json = None  # track last received JSON for echo detection
         # Graceful close
@@ -638,6 +638,11 @@ class CppWebSocket:
         """Queue a send for batch building: coalesces within same event loop tick."""
         transport = self._transport
         if transport is None or transport.is_closing():
+            return
+        # Fast path: write immediately if nothing else is pending (common echo case)
+        if not self._flush_scheduled and not self._pending_sends:
+            frame = _ws_build_frame_bytes(opcode, payload) if _ws_build_frame_bytes else self._build_frame_py(opcode, payload)
+            transport.write(frame)
             return
         self._pending_sends.append((opcode, payload))
         if not self._flush_scheduled:
