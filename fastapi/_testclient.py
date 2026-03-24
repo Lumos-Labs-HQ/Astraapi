@@ -65,9 +65,6 @@ class WebSocketTestSession:
             self._close_sync()
         except Exception:
             pass
-        if exc_type is None and not self._client_closed and not self._server_closed:
-            from fastapi._websocket import WebSocketDisconnect
-            raise WebSocketDisconnect(code=1000)
 
     def _run(self) -> None:
         try:

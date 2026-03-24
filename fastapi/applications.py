@@ -1953,13 +1953,16 @@ class FastAPI(AppBase):
                 _registered_endpoint = self._make_asgi_route_shim(route)
                 _is_coro = True
                 _srv_mod._needs_request_context = True
-            # Header/cookie model with extra='forbid' needs raw headers to detect unknown fields
+            # Header/cookie/query model with extra='forbid' needs raw query/headers to detect unknown fields
             if not _srv_mod._needs_request_context:
                 try:
                     from pydantic import BaseModel as _BM
                     from fastapi._compat import lenient_issubclass as _lis
                     _dep = getattr(route, 'dependant', None)
-                    for _hf in getattr(_dep, 'header_params', []) + getattr(_dep, 'cookie_params', []):
+                    _all_model_params = (getattr(_dep, 'header_params', []) +
+                                        getattr(_dep, 'cookie_params', []) +
+                                        getattr(_dep, 'query_params', []))
+                    for _hf in _all_model_params:
                         if _lis(_hf.type_, _BM) and getattr(getattr(_hf.type_, 'model_config', None), 'get', lambda *a: None)('extra') == 'forbid':
                             _srv_mod._needs_request_context = True
                             break
