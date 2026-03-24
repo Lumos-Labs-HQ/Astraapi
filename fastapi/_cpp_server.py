@@ -787,9 +787,8 @@ class CppWebSocket:
             self._closed = True
             self.client_state = WebSocketState.DISCONNECTED
             raise WebSocketDisconnect(code=self._parse_close_code(payload))
-        result = payload if isinstance(payload, str) else payload.decode("utf-8")
-        self._last_received = result
-        return result
+        # C++ guarantees str for text frames (opcode 0x1) — no isinstance needed
+        return payload if type(payload) is str else payload.decode("utf-8")
 
     async def receive_bytes(self) -> bytes:
         """Receive a binary message."""

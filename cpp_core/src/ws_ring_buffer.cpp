@@ -35,12 +35,18 @@ static PyObject* g_opcode_text = nullptr;    // 1 (WS_TEXT)
 static PyObject* g_opcode_binary = nullptr;  // 2 (WS_BINARY)
 static PyObject* g_opcode_close = nullptr;   // 8 (WS_CLOSE)
 static PyObject* g_str_done = nullptr;       // interned "done" for waiter.done() calls
+static PyObject* g_str_set_result = nullptr; // interned "set_result" — avoids string alloc per call
+static PyObject* g_str__state = nullptr;     // interned "_state" for direct Future state check
+static PyObject* g_str_PENDING = nullptr;    // interned "PENDING" for state comparison
 
 void init_ws_opcode_cache() {
     g_opcode_text = PyLong_FromLong(WS_TEXT);       // borrowed from small int cache
     g_opcode_binary = PyLong_FromLong(WS_BINARY);
     g_opcode_close = PyLong_FromLong(WS_CLOSE);
     g_str_done = PyUnicode_InternFromString("done");
+    g_str_set_result = PyUnicode_InternFromString("set_result");
+    g_str__state = PyUnicode_InternFromString("_state");
+    g_str_PENDING = PyUnicode_InternFromString("PENDING");
 }
 
 // Helper: build (opcode, payload) tuple using cached opcodes, avoiding PyTuple_Pack varargs
@@ -1144,15 +1150,18 @@ PyObject* py_ws_handle_direct(PyObject* /*self*/, PyObject* args) {
 // The waiter (asyncio.Future) is resolved directly from C++ if available.
 // Remaining frames are appended to buffer_deque.
 
-PyObject* py_ws_handle_and_feed(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
-    Py_buffer py_buf;
-    PyObject* waiter;     // asyncio.Future or None
-    PyObject* buffer_obj; // collections.deque
-
-    if (!PyArg_ParseTuple(args, "Oy*OO", &capsule, &py_buf, &waiter, &buffer_obj)) {
+PyObject* py_ws_handle_and_feed(PyObject* /*self*/, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 4) {
+        PyErr_SetString(PyExc_TypeError, "ws_handle_and_feed requires 4 args");
         return nullptr;
     }
+    PyObject* capsule  = args[0];
+    PyObject* waiter   = args[2];
+    PyObject* buffer_obj = args[3];
+
+    Py_buffer py_buf;
+    if (PyObject_GetBuffer(args[1], &py_buf, PyBUF_SIMPLE) < 0)
+        return nullptr;
 
     WsConnectionState* state = get_conn_state(capsule);
     if (!state) {
@@ -1208,9 +1217,14 @@ PyObject* py_ws_handle_and_feed(PyObject* /*self*/, PyObject* args) {
     // Check waiter: must not be None and not done
     bool waiter_available = (waiter != Py_None);
     if (waiter_available) {
-        // Check if waiter.done() is True — if so, can't resolve it
-        PyRef done_result(PyObject_CallMethodNoArgs(waiter, g_str_done));
-        if (done_result && PyObject_IsTrue(done_result.get())) {
+        // Direct _state attribute check — avoids method call overhead vs .done()
+        // Interned string identity check: g_str_PENDING is the same object as f._state when PENDING
+        PyObject* state = PyObject_GetAttr(waiter, g_str__state);
+        if (state) {
+            waiter_available = (state == g_str_PENDING);  // identity check on interned strings
+            Py_DECREF(state);
+        } else {
+            PyErr_Clear();
             waiter_available = false;
         }
     }
@@ -1248,7 +1262,7 @@ PyObject* py_ws_handle_and_feed(PyObject* /*self*/, PyObject* args) {
             Py_INCREF(close_payload_obj);
             PyTuple_SET_ITEM(tuple.get(), 1, close_payload_obj);
             if (waiter_available) {
-                PyRef sr(PyObject_CallMethod(waiter, "set_result", "(O)", tuple.get()));
+                PyRef sr(PyObject_CallMethodOneArg(waiter, g_str_set_result, tuple.get()));
                 waiter_available = false;
             } else {
                 PyRef ar(PyObject_CallMethod(buffer_obj, "append", "(O)", tuple.get()));
@@ -1264,7 +1278,7 @@ PyObject* py_ws_handle_and_feed(PyObject* /*self*/, PyObject* args) {
         if (!tuple) return nullptr;
 
         if (waiter_available) {
-            PyRef sr(PyObject_CallMethod(waiter, "set_result", "(O)", tuple));
+            PyRef sr(PyObject_CallMethodOneArg(waiter, g_str_set_result, tuple));
             Py_DECREF(tuple);
             waiter_available = false;
         } else {
@@ -1287,7 +1301,7 @@ PyObject* py_ws_handle_and_feed(PyObject* /*self*/, PyObject* args) {
             if (!tuple) return nullptr;
 
             if (waiter_available) {
-                PyRef sr(PyObject_CallMethod(waiter, "set_result", "(O)", tuple));
+                PyRef sr(PyObject_CallMethodOneArg(waiter, g_str_set_result, tuple));
                 Py_DECREF(tuple);
                 waiter_available = false;
             } else {

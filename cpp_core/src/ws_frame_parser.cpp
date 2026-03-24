@@ -528,13 +528,17 @@ PyObject* py_ws_parse_frames(PyObject* /*self*/, PyObject* arg) {
 // ── ws_build_frame_bytes(opcode: int, payload: bytes|str) -> bytes
 // Builds a single server→client frame. Writes directly into PyBytes buffer.
 
-PyObject* py_ws_build_frame_bytes(PyObject* /*self*/, PyObject* args) {
-    int opcode;
-    Py_buffer payload_buf;
-
-    if (!PyArg_ParseTuple(args, "iy*", &opcode, &payload_buf)) {
+PyObject* py_ws_build_frame_bytes(PyObject* /*self*/, PyObject* const* args, Py_ssize_t nargs) {
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError, "ws_build_frame_bytes requires 2 args");
         return nullptr;
     }
+    int opcode = (int)PyLong_AsLong(args[0]);
+    if (opcode == -1 && PyErr_Occurred()) return nullptr;
+
+    Py_buffer payload_buf;
+    if (PyObject_GetBuffer(args[1], &payload_buf, PyBUF_SIMPLE) < 0)
+        return nullptr;
 
     size_t payload_len = (size_t)payload_buf.len;
     size_t hdr_size = ws_frame_header_size(payload_len);

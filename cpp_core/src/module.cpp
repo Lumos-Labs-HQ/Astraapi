@@ -47,7 +47,7 @@ extern PyObject* py_ws_build_json_frame(PyObject* self, PyObject* args);
 // ws_frame_parser.cpp
 extern void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]);
 extern PyObject* py_ws_echo_frames(PyObject* self, PyObject* arg);
-extern PyObject* py_ws_build_frame_bytes(PyObject* self, PyObject* args);
+extern PyObject* py_ws_build_frame_bytes(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
 extern PyObject* py_ws_build_ping_frame(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_build_close_frame_bytes(PyObject* self, PyObject* arg);
 extern PyObject* py_ws_build_frames_batch(PyObject* self, PyObject* arg);
@@ -67,7 +67,7 @@ extern PyObject* py_ws_handle_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_get_metrics(PyObject* self, PyObject* capsule);
 extern PyObject* py_ws_update_send_metrics(PyObject* self, PyObject* args);
-extern PyObject* py_ws_handle_and_feed(PyObject* self, PyObject* args);
+extern PyObject* py_ws_handle_and_feed(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
 extern PyObject* py_ws_run_echo_thread(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_and_step(PyObject* self, PyObject* args);
 extern PyObject* py_ws_set_direct_type(PyObject* self, PyObject* arg);
@@ -232,7 +232,7 @@ static PyMethodDef module_methods[] = {
     {"ws_batch_parse", (PyCFunction)py_ws_batch_parse, METH_O, nullptr},
     {"ws_unmask", (PyCFunction)py_ws_unmask, METH_VARARGS, nullptr},
     {"ws_echo_frames", (PyCFunction)py_ws_echo_frames, METH_O, nullptr},
-    {"ws_build_frame_bytes", (PyCFunction)py_ws_build_frame_bytes, METH_VARARGS, nullptr},
+    {"ws_build_frame_bytes", (PyCFunction)(void*)py_ws_build_frame_bytes, METH_FASTCALL, nullptr},
     {"ws_build_ping_frame", (PyCFunction)py_ws_build_ping_frame, METH_O, nullptr},
     {"ws_build_close_frame_bytes", (PyCFunction)py_ws_build_close_frame_bytes, METH_O, nullptr},
     {"ws_build_frames_batch", (PyCFunction)py_ws_build_frames_batch, METH_O, nullptr},
@@ -253,7 +253,7 @@ static PyMethodDef module_methods[] = {
     {"ws_handle_json_direct", (PyCFunction)py_ws_handle_json_direct, METH_VARARGS, nullptr},
     {"ws_get_metrics", (PyCFunction)py_ws_get_metrics, METH_O, nullptr},
     {"ws_update_send_metrics", (PyCFunction)py_ws_update_send_metrics, METH_VARARGS, nullptr},
-    {"ws_handle_and_feed", (PyCFunction)py_ws_handle_and_feed, METH_VARARGS, nullptr},
+    {"ws_handle_and_feed", (PyCFunction)(void*)py_ws_handle_and_feed, METH_FASTCALL, nullptr},
     {"ws_run_echo_thread", (PyCFunction)py_ws_run_echo_thread, METH_VARARGS, nullptr},
     {"ws_handle_and_step", (PyCFunction)py_ws_handle_and_step, METH_VARARGS, nullptr},
     {"ws_set_direct_type", (PyCFunction)py_ws_set_direct_type, METH_O, nullptr},

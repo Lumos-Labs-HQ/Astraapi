@@ -116,15 +116,19 @@ class WebSocket(HTTPConnection):
 
     async def send_text(self, data: str) -> None:
         """Send a text message."""
-        self._assert_connected()
         cpp_ws = self._cpp_ws
         if cpp_ws is not None:
             await cpp_ws.send_text(data)
             return
+        self._assert_connected()
         await self.send({"type": "websocket.send", "text": data})
 
     async def send_bytes(self, data: bytes) -> None:
         """Send a binary message."""
+        cpp_ws = self._cpp_ws
+        if cpp_ws is not None:
+            await cpp_ws.send_bytes(data)
+            return
         self._assert_connected()
         await self.send({"type": "websocket.send", "bytes": data})
 
@@ -167,10 +171,10 @@ class WebSocket(HTTPConnection):
 
     async def receive_text(self) -> str:
         """Receive a text message."""
-        self._assert_connected()
         cpp_ws = self._cpp_ws
         if cpp_ws is not None:
             return await cpp_ws.receive_text()
+        self._assert_connected()
         message = await self._receive_message()
         text = message.get("text")
         if text is None:
@@ -179,6 +183,9 @@ class WebSocket(HTTPConnection):
 
     async def receive_bytes(self) -> bytes:
         """Receive a binary message."""
+        cpp_ws = self._cpp_ws
+        if cpp_ws is not None:
+            return await cpp_ws.receive_bytes()
         self._assert_connected()
         message = await self._receive_message()
         data = message.get("bytes")
