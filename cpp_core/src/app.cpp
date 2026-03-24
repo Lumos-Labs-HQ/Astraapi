@@ -2944,7 +2944,59 @@ static PyObject* dispatch_one_request(
 {
     // ── Parse HTTP request ───────────────────────────────────────────────
     ParsedHttpRequest req = {};
-    int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
+    // Fast-path GET/HEAD parser: avoids llhttp state machine for simple requests
+    int parse_result = 0;
+    {
+        const char* p = buf_data;
+        bool fast_get  = (buf_len >= 16 && p[0]=='G' && p[1]=='E' && p[2]=='T' && p[3]==' ');
+        bool fast_head = (!fast_get && buf_len >= 17 && p[0]=='H' && p[1]=='E' && p[2]=='A' && p[3]=='D' && p[4]==' ');
+        if (fast_get || fast_head) {
+            int mlen = fast_get ? 3 : 4;
+            const char* uri = p + mlen + 1;
+            const char* uri_end = uri;
+            const char* end = p + buf_len;
+            while (uri_end < end && *uri_end != ' ' && *uri_end != '\r') uri_end++;
+            if (uri_end + 9 < end && *uri_end == ' ' &&
+                uri_end[1]=='H' && uri_end[2]=='T' && uri_end[3]=='T' && uri_end[4]=='P' &&
+                uri_end[5]=='/' && uri_end[7]=='.' && uri_end[9]=='\r') {
+                const char* q = uri; while (q < uri_end && *q != '?') q++;
+                req.path = StringView(uri, (size_t)(q - uri));
+                if (q < uri_end) req.query_string = StringView(q+1, (size_t)(uri_end-q-1));
+                req.full_uri = StringView(uri, (size_t)(uri_end - uri));
+                req.method = fast_get ? StringView("GET",3) : StringView("HEAD",4);
+                req.no_body = true; req.is_head = fast_head; req.keep_alive = true;
+                const char* hdr = uri_end + 10;
+                if (hdr < end && *hdr == '\n') hdr++;
+                req.header_count = 0; bool found_end = false;
+                while (hdr < end && req.header_count < MAX_HEADERS) {
+                    if (hdr[0]=='\r' && hdr+1<end && hdr[1]=='\n') { hdr+=2; found_end=true; break; }
+                    if (hdr[0]=='\n') { hdr++; found_end=true; break; }
+                    const char* col=hdr; while(col<end && *col!=':' && *col!='\r' && *col!='\n') col++;
+                    if (col>=end || *col!=':') break;
+                    const char* v=col+1; while(v<end && *v==' ') v++;
+                    const char* ve=v; while(ve<end && *ve!='\r' && *ve!='\n') ve++;
+                    req.headers[req.header_count].name  = StringView(hdr,(size_t)(col-hdr));
+                    req.headers[req.header_count].value = StringView(v,(size_t)(ve-v));
+                    req.header_count++;
+                    hdr=ve; if(hdr<end&&*hdr=='\r')hdr++; if(hdr<end&&*hdr=='\n')hdr++;
+                }
+                if (found_end) {
+                    req.total_consumed = (size_t)(hdr - buf_data);
+                    bool has_upgrade = false;
+                    for (int i=0;i<req.header_count;i++) {
+                        const auto& h=req.headers[i];
+                        if (h.name.len==10 && (h.name.data[0]|32)=='c' && h.name.iequals("connection",10)) {
+                            if (h.value.len>=7 && strncasecmp(h.value.data,"upgrade",7)==0) { has_upgrade=true; break; }
+                            if (h.value.len>=5 && strncasecmp(h.value.data,"close",5)==0) req.keep_alive=false;
+                        }
+                    }
+                    if (!has_upgrade) parse_result = 1;
+                    // else: fall through to llhttp for WebSocket upgrade
+                }
+            }
+        }
+        if (parse_result == 0) parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
+    }
     // Under connection pressure, force Connection: close to free slots
     if (self->force_close) req.keep_alive = false;
 

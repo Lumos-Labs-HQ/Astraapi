@@ -1485,21 +1485,17 @@ class CppHttpProtocol(asyncio.Protocol):
 
         sock_fd = self._sock_fd
 
-        # Extract query string from raw HTTP request line and store in ContextVar.
-        # This allows dep_solver to inject params for dependency_overrides that
-        # introduce new query parameters not in the original FieldSpec.
-        _qs = b''
-        _nl = data.find(b'\r\n')
-        if _nl > 0:
-            _req_line = data[:_nl]
-            _q = _req_line.find(b'?')
-            if _q >= 0:
-                _sp = _req_line.find(b' ', _q)
-                _qs = _req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:]
-        _current_query_string.set(_qs)
-        # Parse raw headers and method/path for dep Request injection
-        # Skipped when no route needs Request context (saves ~2.5us/req)
+        # Extract query string + header context only when needed
         if self._needs_req_ctx:
+            _qs = b''
+            _nl = data.find(b'\r\n')
+            if _nl > 0:
+                _req_line = data[:_nl]
+                _q = _req_line.find(b'?')
+                if _q >= 0:
+                    _sp = _req_line.find(b' ', _q)
+                    _qs = _req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:]
+            _current_query_string.set(_qs)
             try:
                 _hdrs_end = data.find(b'\r\n\r\n')
                 if _hdrs_end <= 0:

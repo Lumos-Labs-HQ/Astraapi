@@ -6,6 +6,10 @@ app = FastAPI()
 def root():
     return {"message": "Hello World"}
 
+@app.get("/async")
+async def async_root():
+    return {"message": "Hello World"}
+
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
