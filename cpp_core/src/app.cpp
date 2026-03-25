@@ -3960,7 +3960,6 @@ static PyObject* dispatch_one_request(
             } else {
                 // Check for application/*+json (e.g. application/geo+json)
                 // but NOT application/*+json-* (e.g. application/geo+json-seq)
-                const char* pj = nullptr;
                 for (size_t ci = 0; ci + 5 <= content_type_sv.len; ci++) {
                     if (content_type_sv.data[ci] == '+' || content_type_sv.data[ci] == '+') {
                         if (ci + 5 <= content_type_sv.len) {

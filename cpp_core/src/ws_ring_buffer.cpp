@@ -344,118 +344,14 @@ PyObject* py_ws_ring_buffer_create(PyObject* /*self*/, PyObject* /*args*/) {
     return PyCapsule_New(state, WS_CAPSULE_NAME, ws_connection_state_destructor);
 }
 
-PyObject* py_ws_ring_buffer_append(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
-    Py_buffer py_buf;
-
-    if (!PyArg_ParseTuple(args, "Oy*", &capsule, &py_buf)) {
-        return nullptr;
-    }
-
-    WsConnectionState* state = get_conn_state(capsule);
-    if (!state) {
-        PyBuffer_Release(&py_buf);
-        PyErr_SetString(PyExc_ValueError, "Invalid ws_connection_state capsule");
-        return nullptr;
-    }
-
-    bool success = state->ring.append(static_cast<const uint8_t*>(py_buf.buf), py_buf.len);
-    PyBuffer_Release(&py_buf);
-
-    if (success) {
-        Py_RETURN_TRUE;
-    } else {
-        Py_RETURN_FALSE;
-    }
-}
-
-PyObject* py_ws_ring_buffer_readable_region(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
-
-    if (!PyArg_ParseTuple(args, "O", &capsule)) {
-        return nullptr;
-    }
-
-    WsConnectionState* state = get_conn_state(capsule);
-    if (!state) {
-        PyErr_SetString(PyExc_ValueError, "Invalid ws_connection_state capsule");
-        return nullptr;
-    }
-
-    auto [data, size] = state->ring.readable_region();
-
-    if (data == nullptr) {
-        Py_RETURN_NONE;
-    }
-
-    // Return a safe copy as PyBytes. This function is NOT on the hot path
-    // (the *_direct handlers use readable_contiguous() internally).
-    // Returning a copy prevents use-after-free if Python holds the reference
-    // across consume() calls.
-    return PyBytes_FromStringAndSize(
-        reinterpret_cast<const char*>(data),
-        static_cast<Py_ssize_t>(size)
-    );
-}
-
-PyObject* py_ws_ring_buffer_consume(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
-    Py_ssize_t n;
-
-    if (!PyArg_ParseTuple(args, "On", &capsule, &n)) {
-        return nullptr;
-    }
-
-    if (n < 0) {
-        PyErr_SetString(PyExc_ValueError, "Cannot consume negative bytes");
-        return nullptr;
-    }
-
-    WsConnectionState* state = get_conn_state(capsule);
-    if (!state) {
-        PyErr_SetString(PyExc_ValueError, "Invalid ws_connection_state capsule");
-        return nullptr;
-    }
-
-    if (static_cast<size_t>(n) > state->ring.readable()) {
-        PyErr_SetString(PyExc_ValueError, "Cannot consume more bytes than available");
-        return nullptr;
-    }
-
-    state->ring.consume(static_cast<size_t>(n));
-    state->ring.maybe_shrink();
-    Py_RETURN_NONE;
-}
-
-PyObject* py_ws_ring_buffer_readable(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
-
-    if (!PyArg_ParseTuple(args, "O", &capsule)) {
-        return nullptr;
-    }
-
-    WsConnectionState* state = get_conn_state(capsule);
-    if (!state) {
-        PyErr_SetString(PyExc_ValueError, "Invalid ws_connection_state capsule");
-        return nullptr;
-    }
-
-    return PyLong_FromSize_t(state->ring.readable());
-}
-
 PyObject* py_ws_ring_buffer_reset(PyObject* /*self*/, PyObject* args) {
     PyObject* capsule;
-
-    if (!PyArg_ParseTuple(args, "O", &capsule)) {
-        return nullptr;
-    }
-
+    if (!PyArg_ParseTuple(args, "O", &capsule)) return nullptr;
     WsConnectionState* state = get_conn_state(capsule);
     if (!state) {
         PyErr_SetString(PyExc_ValueError, "Invalid ws_connection_state capsule");
         return nullptr;
     }
-
     state->reset();
     Py_RETURN_NONE;
 }
@@ -1527,17 +1423,6 @@ PyObject* py_ws_update_send_metrics(PyObject* /*self*/, PyObject* args) {
 }
 
 // ── Stub functions required by module.cpp ────────────────────────────────────
-// These were added to module.cpp but are not yet implemented.
-// Returning None keeps the module loadable.
 
-PyObject* py_ws_run_echo_thread(PyObject* /*self*/, PyObject* /*args*/) {
-    Py_RETURN_NONE;
-}
 
-PyObject* py_ws_handle_and_step(PyObject* /*self*/, PyObject* /*args*/) {
-    Py_RETURN_NONE;
-}
 
-PyObject* py_ws_set_direct_type(PyObject* /*self*/, PyObject* /*arg*/) {
-    Py_RETURN_NONE;
-}

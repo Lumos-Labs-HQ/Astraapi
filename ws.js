@@ -19,7 +19,7 @@ export const options = {
 };
 
 export default function () {
-  const url = "ws://localhost:3000/ws";
+  const url = "ws://localhost:8002/ws";
 
   const res = ws.connect(url, {}, function (socket) {
     socket.on("open", () => {

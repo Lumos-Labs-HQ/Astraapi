@@ -36,7 +36,6 @@ extern void init_ws_opcode_cache();
 extern PyObject* py_extract_bearer_token(PyObject* self, PyObject* arg);
 extern PyObject* py_extract_basic_credentials(PyObject* self, PyObject* arg);
 extern PyObject* py_get_authorization_scheme_param(PyObject* self, PyObject* arg);
-extern PyObject* py_extract_all_security_credentials(PyObject* self, PyObject* arg);
 
 // websocket_handler.cpp
 extern PyObject* py_ws_parse_json(PyObject* self, PyObject* arg);
@@ -54,10 +53,6 @@ extern PyObject* py_ws_build_frames_batch(PyObject* self, PyObject* arg);
 
 // ws_ring_buffer.cpp
 extern PyObject* py_ws_ring_buffer_create(PyObject* self, PyObject* args);
-extern PyObject* py_ws_ring_buffer_append(PyObject* self, PyObject* args);
-extern PyObject* py_ws_ring_buffer_readable_region(PyObject* self, PyObject* args);
-extern PyObject* py_ws_ring_buffer_consume(PyObject* self, PyObject* args);
-extern PyObject* py_ws_ring_buffer_readable(PyObject* self, PyObject* args);
 extern PyObject* py_ws_ring_buffer_reset(PyObject* self, PyObject* args);
 extern PyObject* py_ws_echo_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_echo_direct_fd(PyObject* self, PyObject* args);
@@ -68,9 +63,6 @@ extern PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
 extern PyObject* py_ws_get_metrics(PyObject* self, PyObject* capsule);
 extern PyObject* py_ws_update_send_metrics(PyObject* self, PyObject* args);
 extern PyObject* py_ws_handle_and_feed(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
-extern PyObject* py_ws_run_echo_thread(PyObject* self, PyObject* args);
-extern PyObject* py_ws_handle_and_step(PyObject* self, PyObject* args);
-extern PyObject* py_ws_set_direct_type(PyObject* self, PyObject* arg);
 
 // openapi_gen.cpp
 extern PyObject* py_openapi_dict_to_json_bytes(PyObject* self, PyObject* arg);
@@ -224,7 +216,6 @@ static PyMethodDef module_methods[] = {
     {"extract_bearer_token", (PyCFunction)py_extract_bearer_token, METH_O, nullptr},
     {"extract_basic_credentials", (PyCFunction)py_extract_basic_credentials, METH_O, nullptr},
     {"get_authorization_scheme_param", (PyCFunction)py_get_authorization_scheme_param, METH_O, nullptr},
-    {"extract_all_security_credentials", (PyCFunction)py_extract_all_security_credentials, METH_O, nullptr},
 
     // v2.0: WebSocket
     {"ws_parse_json", (PyCFunction)py_ws_parse_json, METH_O, nullptr},
@@ -240,10 +231,6 @@ static PyMethodDef module_methods[] = {
 
     // v2.0: WebSocket Ring Buffer
     {"ws_ring_buffer_create", (PyCFunction)py_ws_ring_buffer_create, METH_NOARGS, nullptr},
-    {"ws_ring_buffer_append", (PyCFunction)py_ws_ring_buffer_append, METH_VARARGS, nullptr},
-    {"ws_ring_buffer_readable_region", (PyCFunction)py_ws_ring_buffer_readable_region, METH_VARARGS, nullptr},
-    {"ws_ring_buffer_consume", (PyCFunction)py_ws_ring_buffer_consume, METH_VARARGS, nullptr},
-    {"ws_ring_buffer_readable", (PyCFunction)py_ws_ring_buffer_readable, METH_VARARGS, nullptr},
     {"ws_ring_buffer_reset", (PyCFunction)py_ws_ring_buffer_reset, METH_VARARGS, nullptr},
     {"ws_echo_direct", (PyCFunction)py_ws_echo_direct, METH_VARARGS, nullptr},
     {"ws_echo_direct_fd", (PyCFunction)py_ws_echo_direct_fd, METH_VARARGS, nullptr},
@@ -254,9 +241,6 @@ static PyMethodDef module_methods[] = {
     {"ws_get_metrics", (PyCFunction)py_ws_get_metrics, METH_O, nullptr},
     {"ws_update_send_metrics", (PyCFunction)py_ws_update_send_metrics, METH_VARARGS, nullptr},
     {"ws_handle_and_feed", (PyCFunction)(void*)py_ws_handle_and_feed, METH_FASTCALL, nullptr},
-    {"ws_run_echo_thread", (PyCFunction)py_ws_run_echo_thread, METH_VARARGS, nullptr},
-    {"ws_handle_and_step", (PyCFunction)py_ws_handle_and_step, METH_VARARGS, nullptr},
-    {"ws_set_direct_type", (PyCFunction)py_ws_set_direct_type, METH_O, nullptr},
 
     // v2.0: OpenAPI
     {"openapi_dict_to_json_bytes", (PyCFunction)py_openapi_dict_to_json_bytes, METH_O, nullptr},
