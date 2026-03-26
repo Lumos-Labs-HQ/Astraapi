@@ -374,7 +374,7 @@ def test_openapi_schema(client: TestClient):
                         "properties": {
                             "name": {"type": "string", "title": "Name"},
                             "age": {
-                                "anyOf": [{"type": "integer"}, {"type": "null"}], "default": None, "title": "Age",
+                                "anyOf": [{"type": "integer"}, {"type": "null"}], "title": "Age",
                             },
                             "secret_name": {"type": "string", "title": "Secret Name"},
                         },
@@ -386,7 +386,7 @@ def test_openapi_schema(client: TestClient):
                         "properties": {
                             "name": {"type": "string", "title": "Name"},
                             "age": {
-                                "anyOf": [{"type": "integer"}, {"type": "null"}], "default": None, "title": "Age",
+                                "anyOf": [{"type": "integer"}, {"type": "null"}], "title": "Age",
                             },
                             "id": {"type": "integer", "title": "Id"},
                         },
@@ -397,13 +397,13 @@ def test_openapi_schema(client: TestClient):
                     "HeroUpdate": {
                         "properties": {
                             "name": {
-                                "anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "title": "Name",
+                                "anyOf": [{"type": "string"}, {"type": "null"}], "title": "Name",
                             },
                             "age": {
-                                "anyOf": [{"type": "integer"}, {"type": "null"}], "default": None, "title": "Age",
+                                "anyOf": [{"type": "integer"}, {"type": "null"}], "title": "Age",
                             },
                             "secret_name": {
-                                "anyOf": [{"type": "string"}, {"type": "null"}], "default": None, "title": "Secret Name",
+                                "anyOf": [{"type": "string"}, {"type": "null"}], "title": "Secret Name",
                             },
                         },
                         "type": "object",

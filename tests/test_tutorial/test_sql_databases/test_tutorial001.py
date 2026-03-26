@@ -320,13 +320,11 @@ def test_openapi_schema(client: TestClient):
                         "properties": {
                             "id": {
                                 "anyOf": [{"type": "integer"}, {"type": "null"}],
-                                "default": None,
                                 "title": "Id",
                             },
                             "name": {"type": "string", "title": "Name"},
                             "age": {
                                 "anyOf": [{"type": "integer"}, {"type": "null"}],
-                                "default": None,
                                 "title": "Age",
                             },
                             "secret_name": {"type": "string", "title": "Secret Name"},

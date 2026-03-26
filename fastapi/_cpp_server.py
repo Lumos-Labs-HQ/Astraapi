@@ -1980,6 +1980,19 @@ class CppHttpProtocol(asyncio.Protocol):
                 return
             except Exception:
                 pass
+        # Catch pydantic.ValidationError raised inside endpoints (e.g. model_validate)
+        try:
+            from pydantic import ValidationError as _PydanticVE
+            if isinstance(exc, _PydanticVE):
+                from fastapi._core_bridge import serialize_error_response as _ser
+                _errs = [{k: v for k, v in e.items() if k != "url"} for e in exc.errors(include_url=False)]
+                _body = _ser(_errs)
+                transport.write(
+                    _build_response_from_parts(422, [(b"content-type", b"application/json")], _body, keep_alive)
+                )
+                return
+        except Exception:
+            pass
         logger.exception("Unhandled exception in endpoint")
         if _raise_server_exceptions:
             global _last_server_exception

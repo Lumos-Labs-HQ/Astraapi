@@ -1877,12 +1877,33 @@ class FastAPI(AppBase):
                         _method_shim_map["HEAD"] = _gr_shim
                 _captured_shim_map = dict(_method_shim_map)
                 def _make_group_dispatcher(_smap: dict, _route_map: dict) -> Any:
+                    # Pre-compute known param names per method to filter cross-method kwargs
+                    _method_params: dict = {}
+                    for _mm, _mgr in _route_map.items():
+                        _flat_dep = getattr(_mgr, "_flat_dependant", None) or getattr(_mgr, "dependant", None)
+                        _known: set = set()
+                        for _plist in (getattr(_flat_dep, "query_params", []),
+                                       getattr(_flat_dep, "path_params", []),
+                                       getattr(_flat_dep, "header_params", []),
+                                       getattr(_flat_dep, "cookie_params", [])):
+                            for _pf in _plist:
+                                _known.add(_pf.name)
+                                from fastapi.dependencies.utils import get_validation_alias as _gva
+                                _known.add(_gva(_pf))
+                        _method_params[_mm] = _known
+                    _INTERNAL = frozenset({"__method__", "__raw_headers__", "__path__",
+                                           "__auth_scheme__", "__auth_credentials__",
+                                           "__body__", "__content_type__"})
                     async def _group_dispatcher(**kwargs: Any) -> Any:
                         _m = kwargs.get("__method__", "GET").upper()
                         _shim = _smap.get(_m)
                         if _shim is None:
                             from fastapi.responses import JSONResponse
                             return JSONResponse({"detail": "Method Not Allowed"}, status_code=405)
+                        # Filter out query params from other methods in the group
+                        _known_for_method = _method_params.get(_m, set())
+                        kwargs = {k: v for k, v in kwargs.items()
+                                  if k in _INTERNAL or k in _known_for_method}
                         # Parse body for methods that need it
                         _body_bytes = kwargs.pop("__body__", None)
                         _ct = kwargs.pop("__content_type__", "")

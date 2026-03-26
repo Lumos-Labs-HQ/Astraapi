@@ -5335,6 +5335,7 @@ body_done:
         // s_fut_blocking pre-cached at startup
         if (raw_result) {
             PyObject_SetAttr(raw_result, s_fut_blocking, Py_False);
+            PyErr_Clear();  // Clear AttributeError if raw_result is None or non-Future
         }
 
         // s_async_tag pre-cached at startup

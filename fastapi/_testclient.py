@@ -20,8 +20,11 @@ class WebSocketTestSession:
     All recv() calls are routed through the _run thread to avoid concurrency issues.
     """
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, _explicit_close_flag: list | None = None,
+                 _active_count: list | None = None) -> None:
         self._url = url
+        self._explicit_close_flag = _explicit_close_flag  # shared [bool] with TestClient
+        self._active_count = _active_count  # shared [int] active session count
         self._ws: Any = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -65,6 +68,10 @@ class WebSocketTestSession:
             self._close_sync()
         except Exception:
             pass
+        _flag = self._explicit_close_flag
+        if exc_type is None and not self._client_closed and not self._server_closed and not (_flag and _flag[0]):
+            from fastapi._websocket import WebSocketDisconnect
+            raise WebSocketDisconnect(code=1000)
 
     def _run(self) -> None:
         try:
@@ -111,6 +118,8 @@ class WebSocketTestSession:
         self._closed.set()
         if self._thread:
             self._thread.join(timeout=5.0)
+        if self._active_count is not None and self._active_count[0] > 0:
+            self._active_count[0] -= 1
 
     def _recv_msg(self) -> Any:
         """Get next message from queue, raising WebSocketDisconnect if server closed."""
@@ -161,6 +170,8 @@ class WebSocketTestSession:
 
     def close(self, code: int = 1000) -> None:
         self._client_closed = True
+        if self._explicit_close_flag is not None:
+            self._explicit_close_flag[0] = True
         if self._ws:
             try:
                 self._ws.close()
@@ -445,7 +456,14 @@ class TestClient:
         self._ensure_started()
         # Convert http:// base_url to ws:// WebSocket URL
         ws_url = f"ws://127.0.0.1:{self._port}{url}"
-        return WebSocketTestSession(ws_url)
+        if not hasattr(self, "_ws_close_flag"):
+            self._ws_close_flag: list = [False]
+            self._ws_active: list = [0]
+        self._ws_active[0] += 1
+        if self._ws_active[0] == 1:
+            self._ws_close_flag[0] = False  # reset for new group
+        return WebSocketTestSession(ws_url, _explicit_close_flag=self._ws_close_flag,
+                                    _active_count=self._ws_active)
 
     # -- Lifecycle -----------------------------------------------------------
 

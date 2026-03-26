@@ -708,6 +708,7 @@ class APIWebSocketRoute(routing.WebSocketRoute):
 
 def _build_field_specs(
     dependant: Dependant,
+    endpoint_only_dependant: Optional[Dependant] = None,
 ) -> list[tuple[str, str, str, str, bool, bool, bool, bool, Any]]:
     """
     Build field specs for Core batch parameter extraction.
@@ -718,12 +719,26 @@ def _build_field_specs(
 
     Called once at route registration time (startup), not per-request.
     For model-based params (query/header with BaseModel type), expands to inner fields.
+
+    When endpoint_only_dependant is provided, params NOT in it are marked as
+    not-required (they come from dependencies and are validated by the dep resolver).
     """
     from pydantic import BaseModel as _BaseModel
     from fastapi._compat import is_sequence_field, get_cached_model_fields
     from fastapi.dependencies.utils import _get_scalar_type_tag, _is_json_field, get_validation_alias
 
     specs: list[tuple[str, str, str, str, bool, bool, bool, bool, Any]] = []
+
+    # Build sets of field names that belong to the endpoint itself (not dependencies)
+    # Params from dependencies should be extracted but NOT marked as required by C++
+    # (the dependency resolver handles their validation and raises HTTPException, not 422)
+    _ep_query_names: set = set()
+    _ep_header_names: set = set()
+    _ep_cookie_names: set = set()
+    if endpoint_only_dependant is not None:
+        _ep_query_names = {f.name for f in endpoint_only_dependant.query_params}
+        _ep_header_names = {f.name for f in endpoint_only_dependant.header_params}
+        _ep_cookie_names = {f.name for f in endpoint_only_dependant.cookie_params}
 
     for field in dependant.query_params:
         if lenient_issubclass(field.type_, _BaseModel):
@@ -742,8 +757,11 @@ def _build_field_specs(
             tag = _get_scalar_type_tag(field) or ""
             is_seq = is_sequence_field(field) and not _is_json_field(field)
             is_json = _is_json_field(field)
-            is_req = field.required
-            default = None if is_req else field.get_default()
+            # Only mark as required if it belongs to the endpoint itself (not a dependency)
+            is_ep_param = endpoint_only_dependant is None or field.name in _ep_query_names
+            is_req = field.required and is_ep_param
+            # For dep params that are originally required, use None as default (dep resolver validates)
+            default = None if (is_req or (field.required and not is_ep_param)) else field.get_default()
             specs.append(("query", alias, tag, field.name, is_seq, is_json, False, is_req, default))
 
     for field in dependant.header_params:
@@ -770,8 +788,10 @@ def _build_field_specs(
             tag = _get_scalar_type_tag(field) or ""
             convert = getattr(field.field_info, "convert_underscores", True)
             is_seq = is_sequence_field(field) and not _is_json_field(field)
-            is_req = field.required
-            default = None if is_req else field.get_default()
+            # Only mark as required if it belongs to the endpoint itself (not a dependency)
+            is_ep_param = endpoint_only_dependant is None or field.name in _ep_header_names
+            is_req = field.required and is_ep_param
+            default = None if (is_req or (field.required and not is_ep_param)) else field.get_default()
             specs.append(("header", alias, tag, field.name, is_seq, False, convert, is_req, default))
 
     for field in dependant.cookie_params:
@@ -785,8 +805,10 @@ def _build_field_specs(
         else:
             alias = get_validation_alias(field)
             tag = _get_scalar_type_tag(field) or ""
-            is_req = field.required
-            default = None if is_req else field.get_default()
+            # Only mark as required if it belongs to the endpoint itself (not a dependency)
+            is_ep_param = endpoint_only_dependant is None or field.name in _ep_cookie_names
+            is_req = field.required and is_ep_param
+            default = None if (is_req or (field.required and not is_ep_param)) else field.get_default()
             specs.append(("cookie", alias, tag, field.name, False, False, False, is_req, default))
 
     for field in dependant.path_params:
@@ -2211,7 +2233,7 @@ class APIRoute(routing.Route):
                 self._dependency_order = None
         # Pre-compute field specs and register with Core param extractor.
         self._core_route_id: Optional[int] = None
-        specs = _build_field_specs(self._flat_dependant)
+        specs = _build_field_specs(self._flat_dependant, endpoint_only_dependant=self.dependant)
         try:
             if specs:
                 route_id = next(_route_id_counter)
@@ -2231,7 +2253,7 @@ class APIRoute(routing.Route):
             or self._flat_dependant.header_params
             or self._flat_dependant.cookie_params
         ):
-            self._batch_specs = _build_field_specs(self._flat_dependant)
+            self._batch_specs = _build_field_specs(self._flat_dependant, endpoint_only_dependant=self.dependant)
         else:
             self._batch_specs = []
         # Determine if route is eligible for the Core ASGI fast path

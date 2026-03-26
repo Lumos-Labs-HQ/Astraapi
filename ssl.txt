@@ -1,0 +1,712 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.3, pytest-8.4.2, pluggy-1.6.0
+codspeed: 4.3.0 (disabled, mode: walltime, callgraph: enabled, timer_resolution: 1.0ns)
+rootdir: /mnt/e/temp_git/fastapi-rust
+configfile: pyproject.toml
+plugins: anyio-4.12.1, inline-snapshot-0.32.3, codspeed-4.3.0
+collected 1962 items / 1 skipped
+
+tests/test_tutorial/test_additional_responses/test_tutorial001.py ...    [  0%]
+tests/test_tutorial/test_additional_responses/test_tutorial002.py ...... [  0%]
+                                                                         [  0%]
+tests/test_tutorial/test_additional_responses/test_tutorial003.py ...    [  0%]
+tests/test_tutorial/test_additional_responses/test_tutorial004.py ...... [  0%]
+                                                                         [  0%]
+tests/test_tutorial/test_additional_status_codes/test_tutorial001.py ... [  1%]
+.....                                                                    [  1%]
+tests/test_tutorial/test_advanced_middleware/test_tutorial001.py .       [  1%]
+tests/test_tutorial/test_advanced_middleware/test_tutorial002.py .       [  1%]
+tests/test_tutorial/test_advanced_middleware/test_tutorial003.py .       [  1%]
+tests/test_tutorial/test_async_tests/test_main_a.py ..                   [  1%]
+tests/test_tutorial/test_authentication_error_status_code/test_tutorial001.py . [  1%]
+..                                                                       [  1%]
+tests/test_tutorial/test_background_tasks/test_tutorial001.py .          [  1%]
+tests/test_tutorial/test_background_tasks/test_tutorial002.py ....       [  1%]
+tests/test_tutorial/test_behind_a_proxy/test_tutorial001.py ..           [  2%]
+tests/test_tutorial/test_behind_a_proxy/test_tutorial001_01.py ..        [  2%]
+tests/test_tutorial/test_behind_a_proxy/test_tutorial002.py ..           [  2%]
+tests/test_tutorial/test_behind_a_proxy/test_tutorial003.py ..           [  2%]
+tests/test_tutorial/test_behind_a_proxy/test_tutorial004.py ..           [  2%]
+tests/test_tutorial/test_bigger_applications/test_main.py .............. [  3%]
+....................................                                     [  5%]
+tests/test_tutorial/test_body/test_tutorial001.py ...................... [  6%]
+..........                                                               [  6%]
+tests/test_tutorial/test_body/test_tutorial002.py ............           [  7%]
+tests/test_tutorial/test_body/test_tutorial003.py ........               [  7%]
+tests/test_tutorial/test_body/test_tutorial004.py ........               [  8%]
+tests/test_tutorial/test_body_fields/test_tutorial001.py ............... [  8%]
+.                                                                        [  8%]
+tests/test_tutorial/test_body_multiple_params/test_tutorial001.py ...... [  9%]
+..............                                                           [  9%]
+tests/test_tutorial/test_body_multiple_params/test_tutorial002.py ...... [ 10%]
+............                                                             [ 10%]
+tests/test_tutorial/test_body_multiple_params/test_tutorial003.py ...... [ 11%]
+..........                                                               [ 11%]
+tests/test_tutorial/test_body_multiple_params/test_tutorial004.py ...... [ 11%]
+..................                                                       [ 12%]
+tests/test_tutorial/test_body_multiple_params/test_tutorial005.py ...... [ 13%]
+..................                                                       [ 14%]
+tests/test_tutorial/test_body_nested_models/test_tutorial001_tutorial002_tutorial003.py . [ 14%]
+.............................                                            [ 15%]
+tests/test_tutorial/test_body_nested_models/test_tutorial004.py ........ [ 16%]
+....                                                                     [ 16%]
+tests/test_tutorial/test_body_nested_models/test_tutorial005.py ........ [ 16%]
+......                                                                   [ 16%]
+tests/test_tutorial/test_body_nested_models/test_tutorial006.py ........ [ 17%]
+..                                                                       [ 17%]
+tests/test_tutorial/test_body_nested_models/test_tutorial007.py ........ [ 17%]
+....                                                                     [ 18%]
+tests/test_tutorial/test_body_nested_models/test_tutorial008.py ....     [ 18%]
+tests/test_tutorial/test_body_nested_models/test_tutorial009.py ...      [ 18%]
+tests/test_tutorial/test_body_updates/test_tutorial001.py ......         [ 18%]
+tests/test_tutorial/test_body_updates/test_tutorial002.py ........       [ 19%]
+tests/test_tutorial/test_conditional_openapi/test_tutorial001.py ...     [ 19%]
+tests/test_tutorial/test_configure_swagger_ui/test_tutorial001.py ..     [ 19%]
+tests/test_tutorial/test_configure_swagger_ui/test_tutorial002.py ..     [ 19%]
+tests/test_tutorial/test_configure_swagger_ui/test_tutorial003.py ..     [ 19%]
+tests/test_tutorial/test_cookie_param_models/test_tutorial001.py ....... [ 19%]
+.............                                                            [ 20%]
+tests/test_tutorial/test_cookie_param_models/test_tutorial002.py ....... [ 20%]
+.............                                                            [ 21%]
+tests/test_tutorial/test_cookie_params/test_tutorial001.py ............. [ 22%]
+.......                                                                  [ 22%]
+tests/test_tutorial/test_cors/test_tutorial001.py .                      [ 22%]
+tests/test_tutorial/test_custom_docs_ui/test_tutorial001.py ....         [ 22%]
+tests/test_tutorial/test_custom_docs_ui/test_tutorial002.py ....         [ 23%]
+tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py F. [ 23%]
+FFF.F.....                                                               [ 23%]
+tests/test_tutorial/test_custom_request_and_route/test_tutorial002.py .. [ 23%]
+......                                                                   [ 24%]
+tests/test_tutorial/test_custom_request_and_route/test_tutorial003.py .. [ 24%]
+..                                                                       [ 24%]
+tests/test_tutorial/test_custom_response/test_tutorial001.py ....        [ 24%]
+tests/test_tutorial/test_custom_response/test_tutorial001b.py ..         [ 24%]
+tests/test_tutorial/test_custom_response/test_tutorial002_tutorial003_tutorial004.py . [ 24%]
+.....                                                                    [ 24%]
+tests/test_tutorial/test_custom_response/test_tutorial005.py ..          [ 25%]
+tests/test_tutorial/test_custom_response/test_tutorial006.py ..          [ 25%]
+tests/test_tutorial/test_custom_response/test_tutorial006b.py ..         [ 25%]
+tests/test_tutorial/test_custom_response/test_tutorial006c.py ..         [ 25%]
+tests/test_tutorial/test_custom_response/test_tutorial007.py .           [ 25%]
+tests/test_tutorial/test_custom_response/test_tutorial008.py .           [ 25%]
+tests/test_tutorial/test_custom_response/test_tutorial009.py .           [ 25%]
+tests/test_tutorial/test_custom_response/test_tutorial009b.py .          [ 25%]
+tests/test_tutorial/test_custom_response/test_tutorial009c.py .          [ 25%]
+tests/test_tutorial/test_dataclasses/test_tutorial001.py ......          [ 25%]
+tests/test_tutorial/test_dataclasses/test_tutorial002.py ....            [ 26%]
+tests/test_tutorial/test_dataclasses/test_tutorial003.py ......          [ 26%]
+tests/test_tutorial/test_debugging/test_tutorial001.py ....              [ 26%]
+tests/test_tutorial/test_dependencies/test_tutorial001_tutorial001_02.py . [ 26%]
+...................................                                      [ 28%]
+tests/test_tutorial/test_dependencies/test_tutorial002_tutorial003_tutorial004.py . [ 28%]
+........................................................................ [ 32%]
+...........                                                              [ 32%]
+tests/test_tutorial/test_dependencies/test_tutorial005.py .............. [ 33%]
+..                                                                       [ 33%]
+tests/test_tutorial/test_dependencies/test_tutorial006.py ..........     [ 34%]
+tests/test_tutorial/test_dependencies/test_tutorial007.py .              [ 34%]
+tests/test_tutorial/test_dependencies/test_tutorial008.py ..             [ 34%]
+tests/test_tutorial/test_dependencies/test_tutorial008b.py ......        [ 34%]
+tests/test_tutorial/test_dependencies/test_tutorial008c.py ........      [ 34%]
+tests/test_tutorial/test_dependencies/test_tutorial008d.py ........      [ 35%]
+tests/test_tutorial/test_dependencies/test_tutorial008e.py ..            [ 35%]
+tests/test_tutorial/test_dependencies/test_tutorial010.py .              [ 35%]
+tests/test_tutorial/test_dependencies/test_tutorial011.py ........       [ 35%]
+tests/test_tutorial/test_dependencies/test_tutorial012.py .............. [ 36%]
+....                                                                     [ 36%]
+tests/test_tutorial/test_encoder/test_tutorial001.py ......              [ 37%]
+tests/test_tutorial/test_events/test_tutorial001.py ..                   [ 37%]
+tests/test_tutorial/test_events/test_tutorial002.py ..                   [ 37%]
+tests/test_tutorial/test_events/test_tutorial003.py ..                   [ 37%]
+tests/test_tutorial/test_extending_openapi/test_tutorial001.py ..        [ 37%]
+tests/test_tutorial/test_extra_data_types/test_tutorial001.py ........   [ 37%]
+tests/test_tutorial/test_extra_models/test_tutorial001_tutorial002.py .. [ 38%]
+......                                                                   [ 38%]
+tests/test_tutorial/test_extra_models/test_tutorial003.py ......         [ 38%]
+tests/test_tutorial/test_extra_models/test_tutorial004.py ..             [ 38%]
+tests/test_tutorial/test_extra_models/test_tutorial005.py ..             [ 38%]
+tests/test_tutorial/test_first_steps/test_tutorial001_tutorial002_tutorial003.py . [ 38%]
+.....                                                                    [ 39%]
+tests/test_tutorial/test_generate_clients/test_tutorial001.py ...        [ 39%]
+tests/test_tutorial/test_generate_clients/test_tutorial002.py ....       [ 39%]
+tests/test_tutorial/test_generate_clients/test_tutorial003.py ....       [ 39%]
+tests/test_tutorial/test_generate_clients/test_tutorial004.py .          [ 39%]
+tests/test_tutorial/test_handling_errors/test_tutorial001.py ...         [ 39%]
+tests/test_tutorial/test_handling_errors/test_tutorial002.py ...         [ 40%]
+tests/test_tutorial/test_handling_errors/test_tutorial003.py ...         [ 40%]
+tests/test_tutorial/test_handling_errors/test_tutorial004.py ....        [ 40%]
+tests/test_tutorial/test_handling_errors/test_tutorial005.py ...         [ 40%]
+tests/test_tutorial/test_handling_errors/test_tutorial006.py ....        [ 40%]
+tests/test_tutorial/test_header_param_models/test_tutorial001.py ....... [ 41%]
+.............                                                            [ 41%]
+tests/test_tutorial/test_header_param_models/test_tutorial002.py ....... [ 42%]
+.............                                                            [ 42%]
+tests/test_tutorial/test_header_param_models/test_tutorial003.py ....... [ 43%]
+.................                                                        [ 44%]
+tests/test_tutorial/test_header_params/test_tutorial001.py ............. [ 44%]
+...                                                                      [ 44%]
+tests/test_tutorial/test_header_params/test_tutorial002.py ............. [ 45%]
+.......                                                                  [ 45%]
+tests/test_tutorial/test_header_params/test_tutorial003.py ............. [ 46%]
+...                                                                      [ 46%]
+tests/test_tutorial/test_metadata/test_tutorial001.py ..                 [ 46%]
+tests/test_tutorial/test_metadata/test_tutorial001_1.py ..               [ 46%]
+tests/test_tutorial/test_metadata/test_tutorial002.py ...                [ 47%]
+tests/test_tutorial/test_metadata/test_tutorial003.py .....              [ 47%]
+tests/test_tutorial/test_metadata/test_tutorial004.py ..                 [ 47%]
+tests/test_tutorial/test_middleware/test_tutorial001.py ..               [ 47%]
+tests/test_tutorial/test_openapi_callbacks/test_tutorial001.py ......    [ 47%]
+tests/test_tutorial/test_openapi_webhooks/test_tutorial001.py ...        [ 48%]
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial001.py . [ 48%]
+.                                                                        [ 48%]
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial002.py . [ 48%]
+.                                                                        [ 48%]
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial003.py . [ 48%]
+.                                                                        [ 48%]
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial004.py . [ 48%]
+...                                                                      [ 48%]
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial005.py . [ 48%]
+.                                                                        [ 48%]
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial006.py . [ 48%]
+.                                                                        [ 48%]
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial007.py . [ 48%]
+F..                                                                      [ 48%]
+tests/test_tutorial/test_path_operation_configurations/test_tutorial001.py . [ 48%]
+...                                                                      [ 49%]
+tests/test_tutorial/test_path_operation_configurations/test_tutorial002.py . [ 49%]
+.......                                                                  [ 49%]
+tests/test_tutorial/test_path_operation_configurations/test_tutorial002b.py . [ 49%]
+..                                                                       [ 49%]
+tests/test_tutorial/test_path_operation_configurations/test_tutorial003_tutorial004.py . [ 49%]
+.......                                                                  [ 50%]
+tests/test_tutorial/test_path_operation_configurations/test_tutorial005.py . [ 50%]
+...                                                                      [ 50%]
+tests/test_tutorial/test_path_operation_configurations/test_tutorial006.py . [ 50%]
+...                                                                      [ 50%]
+tests/test_tutorial/test_path_params/test_tutorial001.py ...             [ 50%]
+tests/test_tutorial/test_path_params/test_tutorial002.py ...             [ 50%]
+tests/test_tutorial/test_path_params/test_tutorial003.py ...             [ 50%]
+tests/test_tutorial/test_path_params/test_tutorial003b.py ...            [ 51%]
+tests/test_tutorial/test_path_params/test_tutorial004.py ...             [ 51%]
+tests/test_tutorial/test_path_params/test_tutorial005.py .....           [ 51%]
+tests/test_tutorial/test_path_params_numeric_validations/test_tutorial001.py . [ 51%]
+...............                                                          [ 52%]
+tests/test_tutorial/test_path_params_numeric_validations/test_tutorial002_tutorial003.py . [ 52%]
+...................                                                      [ 53%]
+tests/test_tutorial/test_path_params_numeric_validations/test_tutorial004.py . [ 53%]
+...........                                                              [ 53%]
+tests/test_tutorial/test_path_params_numeric_validations/test_tutorial005.py . [ 54%]
+.............                                                            [ 54%]
+tests/test_tutorial/test_path_params_numeric_validations/test_tutorial006.py . [ 54%]
+.............                                                            [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial001_tutorial002.py .. [ 55%]
+                                                                         [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial003.py ..             [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial004.py .              [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial005.py .              [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial006.py .              [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial007.py .              [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial008.py .              [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial008b.py ..            [ 55%]
+tests/test_tutorial/test_python_types/test_tutorial009_tutorial009b.py . [ 56%]
+..                                                                       [ 56%]
+tests/test_tutorial/test_python_types/test_tutorial009c.py ..            [ 56%]
+tests/test_tutorial/test_python_types/test_tutorial010.py .              [ 56%]
+tests/test_tutorial/test_python_types/test_tutorial011.py ..             [ 56%]
+tests/test_tutorial/test_python_types/test_tutorial012.py .              [ 56%]
+tests/test_tutorial/test_python_types/test_tutorial013.py .              [ 56%]
+tests/test_tutorial/test_query_param_models/test_tutorial001.py ........ [ 56%]
+............                                                             [ 57%]
+tests/test_tutorial/test_query_param_models/test_tutorial002.py ........ [ 57%]
+............                                                             [ 58%]
+tests/test_tutorial/test_query_params/test_tutorial001.py ....           [ 58%]
+tests/test_tutorial/test_query_params/test_tutorial002.py ......         [ 59%]
+tests/test_tutorial/test_query_params/test_tutorial003.py ........       [ 59%]
+tests/test_tutorial/test_query_params/test_tutorial004.py ........       [ 59%]
+tests/test_tutorial/test_query_params/test_tutorial005.py ...            [ 59%]
+tests/test_tutorial/test_query_params/test_tutorial006.py ......         [ 60%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial001.py . [ 60%]
+.......                                                                  [ 60%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial002.py . [ 60%]
+...................                                                      [ 61%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial003.py . [ 61%]
+...................                                                      [ 62%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial004.py . [ 62%]
+...................                                                      [ 63%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial005.py . [ 63%]
+.......                                                                  [ 64%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial006.py . [ 64%]
+.......                                                                  [ 64%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial006c.py x [ 64%]
+xxxxxxx............                                                      [ 65%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial007.py . [ 65%]
+...............                                                          [ 66%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial008.py . [ 66%]
+...............                                                          [ 67%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial009.py . [ 67%]
+...............                                                          [ 68%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial010.py . [ 68%]
+...................                                                      [ 69%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial011.py . [ 69%]
+...........                                                              [ 69%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial012.py . [ 69%]
+.....                                                                    [ 69%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial013.py . [ 70%]
+.....                                                                    [ 70%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial014.py . [ 70%]
+...........                                                              [ 70%]
+tests/test_tutorial/test_query_params_str_validations/test_tutorial015.py . [ 70%]
+.........                                                                [ 71%]
+tests/test_tutorial/test_request_files/test_tutorial001.py ............  [ 72%]
+tests/test_tutorial/test_request_files/test_tutorial001_02.py .......... [ 72%]
+..........                                                               [ 73%]
+tests/test_tutorial/test_request_files/test_tutorial001_03.py ......     [ 73%]
+tests/test_tutorial/test_request_files/test_tutorial002.py ............  [ 73%]
+tests/test_tutorial/test_request_files/test_tutorial003.py ........      [ 74%]
+tests/test_tutorial/test_request_form_models/test_tutorial001.py ....... [ 74%]
+.....                                                                    [ 74%]
+tests/test_tutorial/test_request_form_models/test_tutorial002.py ....... [ 75%]
+.......                                                                  [ 75%]
+tests/test_tutorial/test_request_forms/test_tutorial001.py ............  [ 76%]
+tests/test_tutorial/test_request_forms_and_files/test_tutorial001.py ... [ 76%]
+.........                                                                [ 76%]
+tests/test_tutorial/test_response_change_status_code/test_tutorial001.py . [ 76%]
+                                                                         [ 76%]
+tests/test_tutorial/test_response_cookies/test_tutorial001.py .          [ 77%]
+tests/test_tutorial/test_response_cookies/test_tutorial002.py .          [ 77%]
+tests/test_tutorial/test_response_directly/test_tutorial001.py ....      [ 77%]
+tests/test_tutorial/test_response_directly/test_tutorial002.py ..        [ 77%]
+tests/test_tutorial/test_response_headers/test_tutorial001.py .          [ 77%]
+tests/test_tutorial/test_response_headers/test_tutorial002.py .          [ 77%]
+tests/test_tutorial/test_response_model/test_tutorial001_tutorial001_01.py . [ 77%]
+...............                                                          [ 78%]
+tests/test_tutorial/test_response_model/test_tutorial002.py ....         [ 78%]
+tests/test_tutorial/test_response_model/test_tutorial003.py ....         [ 78%]
+tests/test_tutorial/test_response_model/test_tutorial003_01.py ....      [ 78%]
+tests/test_tutorial/test_response_model/test_tutorial003_02.py ...       [ 79%]
+tests/test_tutorial/test_response_model/test_tutorial003_03.py ..        [ 79%]
+tests/test_tutorial/test_response_model/test_tutorial003_04.py ..        [ 79%]
+tests/test_tutorial/test_response_model/test_tutorial003_05.py ......    [ 79%]
+tests/test_tutorial/test_response_model/test_tutorial004.py ........     [ 79%]
+tests/test_tutorial/test_response_model/test_tutorial005.py ......       [ 80%]
+tests/test_tutorial/test_response_model/test_tutorial006.py ......       [ 80%]
+tests/test_tutorial/test_response_status_code/test_tutorial001_tutorial002.py . [ 80%]
+...                                                                      [ 80%]
+tests/test_tutorial/test_schema_extra_example/test_tutorial001.py ....   [ 80%]
+tests/test_tutorial/test_schema_extra_example/test_tutorial002.py ....   [ 81%]
+tests/test_tutorial/test_schema_extra_example/test_tutorial003.py ...... [ 81%]
+..                                                                       [ 81%]
+tests/test_tutorial/test_schema_extra_example/test_tutorial004.py ...... [ 81%]
+..                                                                       [ 82%]
+tests/test_tutorial/test_schema_extra_example/test_tutorial005.py ...... [ 82%]
+..                                                                       [ 82%]
+tests/test_tutorial/test_security/test_tutorial001.py ........           [ 82%]
+tests/test_tutorial/test_security/test_tutorial002.py ............       [ 83%]
+tests/test_tutorial/test_security/test_tutorial003.py .................. [ 84%]
+..................                                                       [ 85%]
+tests/test_tutorial/test_security/test_tutorial004.py .................. [ 86%]
+..............................................                           [ 88%]
+tests/test_tutorial/test_security/test_tutorial005.py .................. [ 89%]
+..........................................................               [ 92%]
+tests/test_tutorial/test_security/test_tutorial006.py ..........         [ 92%]
+tests/test_tutorial/test_security/test_tutorial007.py ..............     [ 93%]
+tests/test_tutorial/test_separate_openapi_schemas/test_tutorial001.py .. [ 93%]
+....                                                                     [ 93%]
+tests/test_tutorial/test_separate_openapi_schemas/test_tutorial002.py .. [ 94%]
+....                                                                     [ 94%]
+tests/test_tutorial/test_settings/test_app01.py ...                      [ 94%]
+tests/test_tutorial/test_settings/test_app02.py ....                     [ 94%]
+tests/test_tutorial/test_settings/test_app03.py ....                     [ 94%]
+tests/test_tutorial/test_settings/test_tutorial001.py .                  [ 94%]
+tests/test_tutorial/test_sql_databases/test_tutorial001.py ........      [ 95%]
+tests/test_tutorial/test_sql_databases/test_tutorial002.py ........      [ 95%]
+tests/test_tutorial/test_static_files/test_tutorial001.py ...            [ 95%]
+tests/test_tutorial/test_sub_applications/test_tutorial001.py ....       [ 96%]
+tests/test_tutorial/test_templates/test_tutorial001.py .                 [ 96%]
+tests/test_tutorial/test_testing/test_main_a.py ...                      [ 96%]
+tests/test_tutorial/test_testing/test_main_b.py ....                     [ 96%]
+tests/test_tutorial/test_testing/test_tutorial001.py ...                 [ 96%]
+tests/test_tutorial/test_testing/test_tutorial002.py ....                [ 96%]
+tests/test_tutorial/test_testing/test_tutorial003.py .                   [ 96%]
+tests/test_tutorial/test_testing/test_tutorial004.py ..                  [ 96%]
+tests/test_tutorial/test_testing_dependencies/test_tutorial001.py ...... [ 97%]
+......................                                                   [ 98%]
+tests/test_tutorial/test_using_request_directly/test_tutorial001.py ..   [ 98%]
+tests/test_tutorial/test_websockets/test_tutorial001.py ..               [ 98%]
+tests/test_tutorial/test_websockets/test_tutorial002.py ................ [ 99%]
+........                                                                 [ 99%]
+tests/test_tutorial/test_websockets/test_tutorial003.py ..               [ 99%]
+tests/test_tutorial/test_wsgi/test_tutorial001.py ..                     [100%]
+
+=================================== FAILURES ===================================
+___________________ test_gzip_request[tutorial001_py39-True] ___________________
+
+client = <fastapi._testclient.TestClient object at 0x7fada87714f0>
+compress = True
+
+    @pytest.mark.parametrize("compress", [True, False])
+    def test_gzip_request(client: TestClient, compress):
+        n = 1000
+        headers = {}
+        body = [1] * n
+        data = json.dumps(body).encode()
+        if compress:
+            data = gzip.compress(data)
+            headers["Content-Encoding"] = "gzip"
+        headers["Content-Type"] = "application/json"
+        response = client.post("/sum", content=data, headers=headers)
+>       assert response.json() == {"sum": n}
+               ^^^^^^^^^^^^^^^
+
+tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py:43: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+.venv/lib/python3.14/site-packages/httpx/_models.py:832: in json
+    return jsonlib.loads(self.content, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = b'{"detail":[{"type":"list_type","loc":["body"],"msg":"Input should be a valid list","input":"\\u001f\x8b\\b\\u0000\\u...h\\u0014\x8d\xa2Q4\x8aF\xd1(\\u001aE\xa3h\\u0014\\rj\\u0014\\u000b\\u0000\xbc\xf4\x92\x8c\xb8\\u000b\\u0000\\u0000"}]}'
+cls = None, object_hook = None, parse_float = None, parse_int = None
+parse_constant = None, object_pairs_hook = None, kw = {}
+
+    def loads(s, *, cls=None, object_hook=None, parse_float=None,
+            parse_int=None, parse_constant=None, object_pairs_hook=None, **kw):
+        """Deserialize ``s`` (a ``str``, ``bytes`` or ``bytearray`` instance
+        containing a JSON document) to a Python object.
+    
+        ``object_hook`` is an optional function that will be called with the
+        result of any object literal decode (a ``dict``). The return value of
+        ``object_hook`` will be used instead of the ``dict``. This feature
+        can be used to implement custom decoders (e.g. JSON-RPC class hinting).
+    
+        ``object_pairs_hook`` is an optional function that will be called with
+        the result of any object literal decoded with an ordered list of pairs.
+        The return value of ``object_pairs_hook`` will be used instead of the
+        ``dict``.  This feature can be used to implement custom decoders.  If
+        ``object_hook`` is also defined, the ``object_pairs_hook`` takes
+        priority.
+    
+        ``parse_float``, if specified, will be called with the string
+        of every JSON float to be decoded. By default this is equivalent to
+        float(num_str). This can be used to use another datatype or parser
+        for JSON floats (e.g. decimal.Decimal).
+    
+        ``parse_int``, if specified, will be called with the string
+        of every JSON int to be decoded. By default this is equivalent to
+        int(num_str). This can be used to use another datatype or parser
+        for JSON integers (e.g. float).
+    
+        ``parse_constant``, if specified, will be called with one of the
+        following strings: -Infinity, Infinity, NaN.
+        This can be used to raise an exception if invalid JSON numbers
+        are encountered.
+    
+        To use a custom ``JSONDecoder`` subclass, specify it with the ``cls``
+        kwarg; otherwise ``JSONDecoder`` is used.
+        """
+        if isinstance(s, str):
+            if s.startswith('\ufeff'):
+                raise JSONDecodeError("Unexpected UTF-8 BOM (decode using utf-8-sig)",
+                                      s, 0)
+        else:
+            if not isinstance(s, (bytes, bytearray)):
+                raise TypeError(f'the JSON object must be str, bytes or bytearray, '
+                                f'not {s.__class__.__name__}')
+>           s = s.decode(detect_encoding(s), 'surrogatepass')
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           UnicodeDecodeError: 'utf-8' codec can't decode byte 0x8b in position 98: invalid start byte
+
+/usr/local/lib/python3.14/json/__init__.py:347: UnicodeDecodeError
+__________________ test_gzip_request[tutorial001_py310-True] ___________________
+
+client = <fastapi._testclient.TestClient object at 0x7fada8773200>
+compress = True
+
+    @pytest.mark.parametrize("compress", [True, False])
+    def test_gzip_request(client: TestClient, compress):
+        n = 1000
+        headers = {}
+        body = [1] * n
+        data = json.dumps(body).encode()
+        if compress:
+            data = gzip.compress(data)
+            headers["Content-Encoding"] = "gzip"
+        headers["Content-Type"] = "application/json"
+        response = client.post("/sum", content=data, headers=headers)
+>       assert response.json() == {"sum": n}
+               ^^^^^^^^^^^^^^^
+
+tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py:43: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+.venv/lib/python3.14/site-packages/httpx/_models.py:832: in json
+    return jsonlib.loads(self.content, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = b'{"detail":[{"type":"list_type","loc":["body"],"msg":"Input should be a valid list","input":"\\u001f\x8b\\b\\u0000\\u...h\\u0014\x8d\xa2Q4\x8aF\xd1(\\u001aE\xa3h\\u0014\\rj\\u0014\\u000b\\u0000\xbc\xf4\x92\x8c\xb8\\u000b\\u0000\\u0000"}]}'
+cls = None, object_hook = None, parse_float = None, parse_int = None
+parse_constant = None, object_pairs_hook = None, kw = {}
+
+    def loads(s, *, cls=None, object_hook=None, parse_float=None,
+            parse_int=None, parse_constant=None, object_pairs_hook=None, **kw):
+        """Deserialize ``s`` (a ``str``, ``bytes`` or ``bytearray`` instance
+        containing a JSON document) to a Python object.
+    
+        ``object_hook`` is an optional function that will be called with the
+        result of any object literal decode (a ``dict``). The return value of
+        ``object_hook`` will be used instead of the ``dict``. This feature
+        can be used to implement custom decoders (e.g. JSON-RPC class hinting).
+    
+        ``object_pairs_hook`` is an optional function that will be called with
+        the result of any object literal decoded with an ordered list of pairs.
+        The return value of ``object_pairs_hook`` will be used instead of the
+        ``dict``.  This feature can be used to implement custom decoders.  If
+        ``object_hook`` is also defined, the ``object_pairs_hook`` takes
+        priority.
+    
+        ``parse_float``, if specified, will be called with the string
+        of every JSON float to be decoded. By default this is equivalent to
+        float(num_str). This can be used to use another datatype or parser
+        for JSON floats (e.g. decimal.Decimal).
+    
+        ``parse_int``, if specified, will be called with the string
+        of every JSON int to be decoded. By default this is equivalent to
+        int(num_str). This can be used to use another datatype or parser
+        for JSON integers (e.g. float).
+    
+        ``parse_constant``, if specified, will be called with one of the
+        following strings: -Infinity, Infinity, NaN.
+        This can be used to raise an exception if invalid JSON numbers
+        are encountered.
+    
+        To use a custom ``JSONDecoder`` subclass, specify it with the ``cls``
+        kwarg; otherwise ``JSONDecoder`` is used.
+        """
+        if isinstance(s, str):
+            if s.startswith('\ufeff'):
+                raise JSONDecodeError("Unexpected UTF-8 BOM (decode using utf-8-sig)",
+                                      s, 0)
+        else:
+            if not isinstance(s, (bytes, bytearray)):
+                raise TypeError(f'the JSON object must be str, bytes or bytearray, '
+                                f'not {s.__class__.__name__}')
+>           s = s.decode(detect_encoding(s), 'surrogatepass')
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           UnicodeDecodeError: 'utf-8' codec can't decode byte 0x8b in position 98: invalid start byte
+
+/usr/local/lib/python3.14/json/__init__.py:347: UnicodeDecodeError
+__________________ test_gzip_request[tutorial001_py310-False] __________________
+
+client = <fastapi._testclient.TestClient object at 0x7fada8773890>
+compress = False
+
+    @pytest.mark.parametrize("compress", [True, False])
+    def test_gzip_request(client: TestClient, compress):
+        n = 1000
+        headers = {}
+        body = [1] * n
+        data = json.dumps(body).encode()
+        if compress:
+            data = gzip.compress(data)
+            headers["Content-Encoding"] = "gzip"
+        headers["Content-Type"] = "application/json"
+        response = client.post("/sum", content=data, headers=headers)
+>       assert response.json() == {"sum": n}
+E       AssertionError: assert {'detail': [{...: 'missing'}]} == {'sum': 1000}
+E         
+E         Left contains 1 more item:
+E         {'detail': [{'input': None,
+E                      'loc': ['body'],
+E                      'msg': 'Field required',
+E                      'type': 'missing'}]}
+E         Right contains 1 more item:
+E         {'sum': 1000}
+E         Use -v to get more diff
+
+tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py:43: AssertionError
+_________________ test_gzip_request[tutorial001_an_py39-True] __________________
+
+client = <fastapi._testclient.TestClient object at 0x7fada86e8500>
+compress = True
+
+    @pytest.mark.parametrize("compress", [True, False])
+    def test_gzip_request(client: TestClient, compress):
+        n = 1000
+        headers = {}
+        body = [1] * n
+        data = json.dumps(body).encode()
+        if compress:
+            data = gzip.compress(data)
+            headers["Content-Encoding"] = "gzip"
+        headers["Content-Type"] = "application/json"
+        response = client.post("/sum", content=data, headers=headers)
+>       assert response.json() == {"sum": n}
+               ^^^^^^^^^^^^^^^
+
+tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py:43: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+.venv/lib/python3.14/site-packages/httpx/_models.py:832: in json
+    return jsonlib.loads(self.content, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = b'{"detail":[{"type":"list_type","loc":["body"],"msg":"Input should be a valid list","input":"\\u001f\x8b\\b\\u0000\\u...h\\u0014\x8d\xa2Q4\x8aF\xd1(\\u001aE\xa3h\\u0014\\rj\\u0014\\u000b\\u0000\xbc\xf4\x92\x8c\xb8\\u000b\\u0000\\u0000"}]}'
+cls = None, object_hook = None, parse_float = None, parse_int = None
+parse_constant = None, object_pairs_hook = None, kw = {}
+
+    def loads(s, *, cls=None, object_hook=None, parse_float=None,
+            parse_int=None, parse_constant=None, object_pairs_hook=None, **kw):
+        """Deserialize ``s`` (a ``str``, ``bytes`` or ``bytearray`` instance
+        containing a JSON document) to a Python object.
+    
+        ``object_hook`` is an optional function that will be called with the
+        result of any object literal decode (a ``dict``). The return value of
+        ``object_hook`` will be used instead of the ``dict``. This feature
+        can be used to implement custom decoders (e.g. JSON-RPC class hinting).
+    
+        ``object_pairs_hook`` is an optional function that will be called with
+        the result of any object literal decoded with an ordered list of pairs.
+        The return value of ``object_pairs_hook`` will be used instead of the
+        ``dict``.  This feature can be used to implement custom decoders.  If
+        ``object_hook`` is also defined, the ``object_pairs_hook`` takes
+        priority.
+    
+        ``parse_float``, if specified, will be called with the string
+        of every JSON float to be decoded. By default this is equivalent to
+        float(num_str). This can be used to use another datatype or parser
+        for JSON floats (e.g. decimal.Decimal).
+    
+        ``parse_int``, if specified, will be called with the string
+        of every JSON int to be decoded. By default this is equivalent to
+        int(num_str). This can be used to use another datatype or parser
+        for JSON integers (e.g. float).
+    
+        ``parse_constant``, if specified, will be called with one of the
+        following strings: -Infinity, Infinity, NaN.
+        This can be used to raise an exception if invalid JSON numbers
+        are encountered.
+    
+        To use a custom ``JSONDecoder`` subclass, specify it with the ``cls``
+        kwarg; otherwise ``JSONDecoder`` is used.
+        """
+        if isinstance(s, str):
+            if s.startswith('\ufeff'):
+                raise JSONDecodeError("Unexpected UTF-8 BOM (decode using utf-8-sig)",
+                                      s, 0)
+        else:
+            if not isinstance(s, (bytes, bytearray)):
+                raise TypeError(f'the JSON object must be str, bytes or bytearray, '
+                                f'not {s.__class__.__name__}')
+>           s = s.decode(detect_encoding(s), 'surrogatepass')
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           UnicodeDecodeError: 'utf-8' codec can't decode byte 0x8b in position 98: invalid start byte
+
+/usr/local/lib/python3.14/json/__init__.py:347: UnicodeDecodeError
+_________________ test_gzip_request[tutorial001_an_py310-True] _________________
+
+client = <fastapi._testclient.TestClient object at 0x7fada87723f0>
+compress = True
+
+    @pytest.mark.parametrize("compress", [True, False])
+    def test_gzip_request(client: TestClient, compress):
+        n = 1000
+        headers = {}
+        body = [1] * n
+        data = json.dumps(body).encode()
+        if compress:
+            data = gzip.compress(data)
+            headers["Content-Encoding"] = "gzip"
+        headers["Content-Type"] = "application/json"
+        response = client.post("/sum", content=data, headers=headers)
+>       assert response.json() == {"sum": n}
+               ^^^^^^^^^^^^^^^
+
+tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py:43: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+.venv/lib/python3.14/site-packages/httpx/_models.py:832: in json
+    return jsonlib.loads(self.content, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+s = b'{"detail":[{"type":"list_type","loc":["body"],"msg":"Input should be a valid list","input":"\\u001f\x8b\\b\\u0000\\u...h\\u0014\x8d\xa2Q4\x8aF\xd1(\\u001aE\xa3h\\u0014\\rj\\u0014\\u000b\\u0000\xbc\xf4\x92\x8c\xb8\\u000b\\u0000\\u0000"}]}'
+cls = None, object_hook = None, parse_float = None, parse_int = None
+parse_constant = None, object_pairs_hook = None, kw = {}
+
+    def loads(s, *, cls=None, object_hook=None, parse_float=None,
+            parse_int=None, parse_constant=None, object_pairs_hook=None, **kw):
+        """Deserialize ``s`` (a ``str``, ``bytes`` or ``bytearray`` instance
+        containing a JSON document) to a Python object.
+    
+        ``object_hook`` is an optional function that will be called with the
+        result of any object literal decode (a ``dict``). The return value of
+        ``object_hook`` will be used instead of the ``dict``. This feature
+        can be used to implement custom decoders (e.g. JSON-RPC class hinting).
+    
+        ``object_pairs_hook`` is an optional function that will be called with
+        the result of any object literal decoded with an ordered list of pairs.
+        The return value of ``object_pairs_hook`` will be used instead of the
+        ``dict``.  This feature can be used to implement custom decoders.  If
+        ``object_hook`` is also defined, the ``object_pairs_hook`` takes
+        priority.
+    
+        ``parse_float``, if specified, will be called with the string
+        of every JSON float to be decoded. By default this is equivalent to
+        float(num_str). This can be used to use another datatype or parser
+        for JSON floats (e.g. decimal.Decimal).
+    
+        ``parse_int``, if specified, will be called with the string
+        of every JSON int to be decoded. By default this is equivalent to
+        int(num_str). This can be used to use another datatype or parser
+        for JSON integers (e.g. float).
+    
+        ``parse_constant``, if specified, will be called with one of the
+        following strings: -Infinity, Infinity, NaN.
+        This can be used to raise an exception if invalid JSON numbers
+        are encountered.
+    
+        To use a custom ``JSONDecoder`` subclass, specify it with the ``cls``
+        kwarg; otherwise ``JSONDecoder`` is used.
+        """
+        if isinstance(s, str):
+            if s.startswith('\ufeff'):
+                raise JSONDecodeError("Unexpected UTF-8 BOM (decode using utf-8-sig)",
+                                      s, 0)
+        else:
+            if not isinstance(s, (bytes, bytearray)):
+                raise TypeError(f'the JSON object must be str, bytes or bytearray, '
+                                f'not {s.__class__.__name__}')
+>           s = s.decode(detect_encoding(s), 'surrogatepass')
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E           UnicodeDecodeError: 'utf-8' codec can't decode byte 0x8b in position 98: invalid start byte
+
+/usr/local/lib/python3.14/json/__init__.py:347: UnicodeDecodeError
+___________________ test_post_broken_yaml[tutorial007_py39] ____________________
+
+client = <fastapi._testclient.TestClient object at 0x7face87d5f40>
+
+    def test_post_broken_yaml(client: TestClient):
+        yaml_data = """
+            name: Deadpoolio
+            tags:
+            x - x-force
+            x - x-men
+            x - x-avengers
+            """
+        response = client.post("/items/", content=yaml_data)
+        assert response.status_code == 422, response.text
+>       assert response.json() == {"detail": "Invalid YAML"}
+E       AssertionError: assert {'detail': [{... Item', ...}]} == {'detail': 'Invalid YAML'}
+E         
+E         Differing items:
+E         {'detail': [{'ctx': {'class_name': 'Item'}, 'input': None, 'loc': [], 'msg': 'Input should be a valid dictionary or instance of Item', ...}]} != {'detail': 'Invalid YAML'}
+E         Use -v to get more diff
+
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial007.py:48: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py::test_gzip_request[tutorial001_py39-True]
+FAILED tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py::test_gzip_request[tutorial001_py310-True]
+FAILED tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py::test_gzip_request[tutorial001_py310-False]
+FAILED tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py::test_gzip_request[tutorial001_an_py39-True]
+FAILED tests/test_tutorial/test_custom_request_and_route/test_tutorial001.py::test_gzip_request[tutorial001_an_py310-True]
+FAILED tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial007.py::test_post_broken_yaml[tutorial007_py39]
+======= 6 failed, 1948 passed, 1 skipped, 8 xfailed in 651.42s (0:10:51) =======

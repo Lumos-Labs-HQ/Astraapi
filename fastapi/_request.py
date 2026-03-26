@@ -527,6 +527,10 @@ class Request(HTTPConnection):
         self._form: Any = None
         self._disconnected = False
         self._stream_consumed = False
+        # Pre-populate body from scope if C++ server cached it there.
+        # Use "_body" key presence (not truthiness) so empty body is also cached.
+        if "_body" in scope:
+            self._body = scope["_body"]
 
     @property
     def receive(self) -> Receive:
