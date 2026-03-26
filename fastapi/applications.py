@@ -1310,13 +1310,19 @@ class FastAPI(AppBase):
         async def _asgi_shim(**kwargs: Any) -> Any:
             from fastapi._cpp_server import (
                 _current_raw_headers as _crh, _current_method as _cm,
-                _current_path as _cp, _current_body as _cb, _current_query_string as _cqs,
+                _current_path as _cp, _current_query_string as _cqs,
             )
             from fastapi.routing import _make_lightweight_request
-            _raw_headers = _crh.get() or []
-            _method = _cm.get() or 'GET'
-            _path = _cp.get() or '/'
-            _body = _cb.get() if hasattr(_cb, 'get') else b''
+            _raw_headers = kwargs.pop('__raw_headers__', None) or _crh.get() or []
+            _method = kwargs.pop('__method__', None) or _cm.get() or 'GET'
+            _path = kwargs.pop('__path__', None) or _cp.get() or '/'
+            # Prefer __body__ injected by C++ dep_solver path (avoids ContextVar race)
+            _body = kwargs.pop('__body__', None)
+            if _body is None:
+                from fastapi._cpp_server import _current_body as _cb
+                _body = _cb.get() if hasattr(_cb, 'get') else b''
+            kwargs.pop('__auth_scheme__', None); kwargs.pop('__auth_credentials__', None)
+            kwargs.pop('__content_type__', None); kwargs.pop('__deps_ran__', None)
             _qs = _cqs.get() if hasattr(_cqs, 'get') else b''
             _app_ref = getattr(route, 'dependency_overrides_provider', None)
             _req = _make_lightweight_request(_raw_headers, _method, _path, app=_app_ref, _shim_route=route)
@@ -2076,11 +2082,14 @@ class FastAPI(AppBase):
                     exclude_none=False,
                 )
                 route_index = self._core_app.route_count() - 1
-                # For custom route class routes, register minimal spec (no body parsing)
+                # For custom route class routes, register with a body-injecting dep_solver
+                # so C++ injects __body__ into kwargs (avoids ContextVar race with anyio).
                 if _has_custom_route_class:
+                    async def _body_injector(kwargs_dict):
+                        return ({}, [], None, None)
                     self._core_app.register_fast_spec(
                         route_index, None, None, None, False,
-                        None, None,
+                        _registered_endpoint, _body_injector,
                     )
                 # Register fast-path metadata for eligible routes
                 elif getattr(route, '_fast_path_eligible', False):

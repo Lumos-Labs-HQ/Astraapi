@@ -527,10 +527,10 @@ class Request(HTTPConnection):
         self._form: Any = None
         self._disconnected = False
         self._stream_consumed = False
-        # Pre-populate body from scope if C++ server cached it there.
-        # Use "_body" key presence (not truthiness) so empty body is also cached.
-        if "_body" in scope:
-            self._body = scope["_body"]
+        # NOTE: Do NOT pre-populate self._body here.
+        # Subclasses (e.g. GzipRequest) override body() and check hasattr(self, "_body").
+        # Pre-populating would bypass their custom logic.
+        # Instead, body() reads scope["_body"] as a fallback (see below).
 
     @property
     def receive(self) -> Receive:
@@ -562,6 +562,13 @@ class Request(HTTPConnection):
     async def body(self) -> bytes:
         """Read the entire request body."""
         if not hasattr(self, '_body') or self._body is None:
+            # Fast path: body cached in scope by _make_lightweight_request.
+            # Only use when receive channel is unavailable (lightweight request).
+            if self._receive is None:
+                _scope_body = self._scope.get("_body")
+                if _scope_body is not None:
+                    self._body = _scope_body
+                    return self._body
             chunks: list[bytes] = []
             async for chunk in self.stream():
                 chunks.append(chunk)
