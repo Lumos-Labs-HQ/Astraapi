@@ -1008,7 +1008,11 @@ static PyObject* CoreApp_record_error(CoreAppObject* self, PyObject*) {
 }
 
 static PyObject* CoreApp_route_count(CoreAppObject* self, PyObject*) {
-    std::shared_lock lock(self->routes_mutex);
+    // F-6: After freeze_routes(), routes are read-only — skip the lock.
+    if (!self->routes_frozen.load(std::memory_order_acquire)) {
+        std::shared_lock lock(self->routes_mutex);
+        return PyLong_FromSsize_t((Py_ssize_t)self->routes.size());
+    }
     return PyLong_FromSsize_t((Py_ssize_t)self->routes.size());
 }
 
@@ -1023,19 +1027,27 @@ static PyObject* CoreApp_get_metrics(CoreAppObject* self, PyObject*) {
     PyRef tr(PyLong_FromUnsignedLongLong(self->counters.total_requests));
     PyRef ar(PyLong_FromLongLong(self->counters.active_requests));
     PyRef te(PyLong_FromUnsignedLongLong(self->counters.total_errors));
-    std::shared_lock lock(self->routes_mutex);
-    PyRef rc(PyLong_FromSsize_t((Py_ssize_t)self->routes.size()));
-    lock.unlock();
-    if (!tr || !ar || !te || !rc) return nullptr;
+    Py_ssize_t rc;
+    if (!self->routes_frozen.load(std::memory_order_acquire)) {
+        std::shared_lock lock(self->routes_mutex);
+        rc = (Py_ssize_t)self->routes.size();
+    } else {
+        rc = (Py_ssize_t)self->routes.size();
+    }
+    PyRef rco(PyLong_FromSsize_t(rc));
+    if (!tr || !ar || !te || !rco) return nullptr;
     if (PyDict_SetItemString(dict.get(), "total_requests", tr.get()) < 0 ||
         PyDict_SetItemString(dict.get(), "active_requests", ar.get()) < 0 ||
         PyDict_SetItemString(dict.get(), "total_errors", te.get()) < 0 ||
-        PyDict_SetItemString(dict.get(), "route_count", rc.get()) < 0) return nullptr;
+        PyDict_SetItemString(dict.get(), "route_count", rco.get()) < 0) return nullptr;
     return dict.release();
 }
 
 static PyObject* CoreApp_get_routes(CoreAppObject* self, PyObject*) {
-    std::shared_lock lock(self->routes_mutex);
+    // F-6: Skip lock when routes are frozen (startup is done)
+    const bool frozen = self->routes_frozen.load(std::memory_order_acquire);
+    std::optional<std::shared_lock<std::shared_mutex>> lock;
+    if (!frozen) lock.emplace(self->routes_mutex);
     PyRef list(PyList_New((Py_ssize_t)self->route_paths.size()));
     if (!list) return nullptr;
     for (size_t i = 0; i < self->route_paths.size(); i++) {
@@ -1202,24 +1214,22 @@ static PyObject* CoreApp_match_request(CoreAppObject* self, PyObject* args) {
     const char* path;
     if (!PyArg_ParseTuple(args, "ss", &method, &path)) return nullptr;
 
-    std::shared_lock lock(self->routes_mutex);
+    // F-6: Skip lock when routes are frozen (post-startup normal path)
+    const bool frozen = self->routes_frozen.load(std::memory_order_acquire);
+    std::optional<std::shared_lock<std::shared_mutex>> lock;
+    if (!frozen) lock.emplace(self->routes_mutex);
+
     auto match = self->router.at(path, strlen(path));
-    if (!match) {
-        lock.unlock();
-        Py_RETURN_NONE;
-    }
+    if (!match) Py_RETURN_NONE;
 
     int idx = match->route_index;
-    if (idx < 0 || idx >= (int)self->routes.size()) {
-        lock.unlock();
-        Py_RETURN_NONE;
-    }
+    if (idx < 0 || idx >= (int)self->routes.size()) Py_RETURN_NONE;
 
     const auto& route = self->routes[idx];
 
     if (route.method_mask) {
         uint8_t req_method = method_str_to_bit_ci(method, strlen(method));
-        if (!(route.method_mask & req_method)) { lock.unlock(); Py_RETURN_NONE; }
+        if (!(route.method_mask & req_method)) { Py_RETURN_NONE; }
     }
 
     MatchResultObject* mr = PyObject_New(MatchResultObject, &MatchResultType);
@@ -1251,7 +1261,11 @@ static PyObject* CoreApp_get_endpoint(CoreAppObject* self, PyObject* arg) {
     Py_ssize_t idx = PyLong_AsSsize_t(arg);
     if (idx < 0 && PyErr_Occurred()) return nullptr;
 
-    std::shared_lock lock(self->routes_mutex);
+    // F-6: Lock-free after freeze_routes()
+    const bool frozen = self->routes_frozen.load(std::memory_order_acquire);
+    std::optional<std::shared_lock<std::shared_mutex>> lock;
+    if (!frozen) lock.emplace(self->routes_mutex);
+
     if (idx < 0 || idx >= (Py_ssize_t)self->routes.size()) {
         PyErr_SetString(PyExc_IndexError, "route index out of range");
         return nullptr;
@@ -1267,7 +1281,10 @@ static PyObject* CoreApp_get_response_model_field(CoreAppObject* self, PyObject*
     Py_ssize_t idx = PyLong_AsSsize_t(arg);
     if (idx < 0 && PyErr_Occurred()) return nullptr;
 
-    std::shared_lock lock(self->routes_mutex);
+    const bool frozen = self->routes_frozen.load(std::memory_order_acquire);
+    std::optional<std::shared_lock<std::shared_mutex>> lock;
+    if (!frozen) lock.emplace(self->routes_mutex);
+
     if (idx < 0 || idx >= (Py_ssize_t)self->routes.size()) Py_RETURN_NONE;
     PyObject* f = self->routes[idx].response_model_field;
     if (!f) Py_RETURN_NONE;
@@ -1281,7 +1298,10 @@ static PyObject* CoreApp_get_response_filters(CoreAppObject* self, PyObject* arg
     Py_ssize_t idx = PyLong_AsSsize_t(arg);
     if (idx < 0 && PyErr_Occurred()) return nullptr;
 
-    std::shared_lock lock(self->routes_mutex);
+    const bool frozen = self->routes_frozen.load(std::memory_order_acquire);
+    std::optional<std::shared_lock<std::shared_mutex>> lock;
+    if (!frozen) lock.emplace(self->routes_mutex);
+
     if (idx < 0 || idx >= (Py_ssize_t)self->routes.size()) {
         return Py_BuildValue("(OO)", Py_None, Py_None);
     }
@@ -2661,8 +2681,10 @@ public:
     void clear() {
         read_pos_ = 0;
         write_pos_ = 0;
-        // Shrink if capacity grew beyond initial — reclaim memory on pool return
-        if (capacity_ > INITIAL_CAPACITY) {
+        // B-8: Only shrink when the buffer grew > 4x initial capacity.
+        // Avoids a realloc syscall on every connection close for normal requests.
+        // A 4KB high-water buffer stays allocated for reuse, saving allocator round-trips.
+        if (capacity_ > INITIAL_CAPACITY * 4) {
             uint8_t* nb = static_cast<uint8_t*>(realloc(buf_, INITIAL_CAPACITY));
             if (nb) {
                 buf_ = nb;

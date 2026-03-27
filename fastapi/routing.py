@@ -84,13 +84,11 @@ from typing_extensions import deprecated
 from fastapi._datastructures_impl import FormData, Headers, UploadFile
 
 from fastapi._core_bridge import (
-    CoreRouter,
     compute_dependency_order,
     encode_to_json_bytes,
     parse_multipart_body,
     parse_urlencoded_body,
     process_request,
-    register_route_params,
 )
 
 # Atomic counter for unique route IDs (used by Core param extractor)
@@ -2237,7 +2235,6 @@ class APIRoute(routing.Route):
         try:
             if specs:
                 route_id = next(_route_id_counter)
-                register_route_params(route_id, specs)
                 self._core_route_id = route_id
                 _route_id_to_route[route_id] = self
                 _endpoint_id_to_route[id(self.endpoint)] = self
@@ -2608,7 +2605,10 @@ class APIRouter(routing.Router):
         self.default_response_class = default_response_class
         self.generate_unique_id_function = generate_unique_id_function
         # Core-accelerated trie-based route matching
-        self._core_router: Optional[Any] = CoreRouter()
+        # CoreRouter (legacy v0.1 C++ trie) has been removed.
+        # Kept as None so all existing guards (if self._core_router is not None)
+        # correctly skip the trie path without any further code changes.
+        self._core_router: Optional[Any] = None
         self._core_route_index: dict[int, APIRoute] = {}
 
     def route(

@@ -1333,8 +1333,8 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle: asyncio.TimerHandle | None = None
         self._ws_pong_received = True
         self._ws_task: asyncio.Task | None = None  # TS-2: tracked for cancellation
-        self._pending_tasks: set | None = None  # kept for connection_lost cancel loop
-        self._pending_tasks_discard = None
+        self._pending_tasks: set = set()  # F-9: pre-init — always a set, never None
+        self._pending_tasks_discard = self._pending_tasks.discard
         self._sock_fd = -1  # Raw socket FD for direct C++ HTTP writes (TCP_QUICKACK re-armed in C++)
         # Cache handle_http_batch_v2 bound method — avoids PyMethodObject alloc per data_received call
         _v2 = getattr(core_app, 'handle_http_batch_v2', None)
@@ -1372,6 +1372,9 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_task = None
         if self._pending_tasks is not None:
             self._pending_tasks.clear()  # reuse existing set's backing store
+        else:
+            self._pending_tasks = set()
+            self._pending_tasks_discard = self._pending_tasks.discard
         _v2 = getattr(core_app, 'handle_http_batch_v2', None)
         self._core_batch = _v2 if _v2 is not None else core_app.handle_http_batch
         self._core_append_dispatch = getattr(core_app, 'handle_http_append_and_dispatch', None)
@@ -1416,7 +1419,8 @@ class CppHttpProtocol(asyncio.Protocol):
     def connection_lost(self, exc: Exception | None) -> None:
         # Cancel all pending async HTTP tasks to prevent writes to stale transport
         if self._pending_tasks:
-            for t in self._pending_tasks:
+            # F-7: iterate snapshot — done callbacks (discard) can fire mid-cancel
+            for t in list(self._pending_tasks):
                 if not t.done():
                     t.cancel()
             self._pending_tasks.clear()
@@ -1485,8 +1489,10 @@ class CppHttpProtocol(asyncio.Protocol):
 
         sock_fd = self._sock_fd
 
-        # Extract query string + header context only when needed
-        if self._needs_req_ctx:
+        # Extract query string + header context only when needed.
+        # Skip entirely when data is empty (called from _drain_buf for pipelined
+        # request processing — no new TCP data, must not clobber _current_body).
+        if self._needs_req_ctx and data:
             _qs = b''
             _nl = data.find(b'\r\n')
             if _nl > 0:
@@ -1652,11 +1658,8 @@ class CppHttpProtocol(asyncio.Protocol):
                         self._handle_async(coro, first_yield, status_code, keep_alive))
                     if not task.done():
                         pt = self._pending_tasks
-                        if pt is None:
-                            pt = self._pending_tasks = set()
-                            self._pending_tasks_discard = pt.discard
                         pt.add(task)
-                        task.add_done_callback(self._pending_tasks_discard)
+                        task.add_done_callback(pt.discard)
 
                 elif tag == "mw":
                     raw_resp = result[1]
@@ -1669,11 +1672,8 @@ class CppHttpProtocol(asyncio.Protocol):
                         self._handle_middleware_result(raw_resp, int(status_code), bool(keep_alive), _mw_hdrs, _mw_method, _mw_path))
                     if not task.done():
                         pt = self._pending_tasks
-                        if pt is None:
-                            pt = self._pending_tasks = set()
-                            self._pending_tasks_discard = pt.discard
                         pt.add(task)
-                        task.add_done_callback(self._pending_tasks_discard)
+                        task.add_done_callback(pt.discard)
 
                 elif tag == "stream":
                     _, raw_resp, status_code, keep_alive = result
@@ -1681,11 +1681,8 @@ class CppHttpProtocol(asyncio.Protocol):
                         self._handle_stream(raw_resp, status_code, keep_alive))
                     if not task.done():
                         pt = self._pending_tasks
-                        if pt is None:
-                            pt = self._pending_tasks = set()
-                            self._pending_tasks_discard = pt.discard
                         pt.add(task)
-                        task.add_done_callback(self._pending_tasks_discard)
+                        task.add_done_callback(pt.discard)
 
                 elif tag == "async_di":
                     _, di_coro, first_yield, endpoint, kwargs, sc, ka = result
@@ -1698,21 +1695,15 @@ class CppHttpProtocol(asyncio.Protocol):
                         self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka))
                     if not task.done():
                         pt = self._pending_tasks
-                        if pt is None:
-                            pt = self._pending_tasks = set()
-                            self._pending_tasks_discard = pt.discard
                         pt.add(task)
-                        task.add_done_callback(self._pending_tasks_discard)
+                        task.add_done_callback(pt.discard)
 
             elif IR and r_type is IR:
                 task = create_task(self._handle_pydantic(result))
                 if not task.done():
                     pt = self._pending_tasks
-                    if pt is None:
-                        pt = self._pending_tasks = set()
-                        self._pending_tasks_discard = pt.discard
                     pt.add(task)
-                    task.add_done_callback(self._pending_tasks_discard)
+                    task.add_done_callback(pt.discard)
 
             # Fetch next pipelined request (most often returns int = no more data)
             result = core_batch(http_buf, transport, sock_fd)
@@ -1865,9 +1856,12 @@ class CppHttpProtocol(asyncio.Protocol):
     def _drain_buf(self) -> None:
         if self._wr_paused or _http_buf_len(self._http_buf) == 0:
             return
-        # Process buffered data that arrived during backpressure.
-        # Data is already in the C++ buffer — just trigger processing with 0 new bytes.
+        # F-8: Process ALL buffered pipelined requests, not just one.
+        # Back-pressure may have queued multiple complete requests in the buffer.
         self.data_received(b"")
+        # If there is still unprocessed data (e.g. partial next request), reschedule.
+        if not self._wr_paused and _http_buf_len(self._http_buf) > 0:
+            self._loop.call_soon(self._drain_buf)
 
     # ── WebSocket heartbeat (PING/PONG) ───────────────────────────────────
 

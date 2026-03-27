@@ -716,56 +716,60 @@ async def solve_dependencies(
         )
     ):
         try:
-            # Use pre-computed batch specs from scope (cached at route registration)
-            _specs = request.scope.get("_batch_specs")
+            # F-2: Use pre-computed batch specs cached on the Dependant object.
+            # Dependant objects are per-route singletons (created once at startup).
+            # On first request: build+cache. All subsequent requests: zero-alloc read.
+            _specs = getattr(dependant, '_precomputed_batch_specs', None)
             if _specs is None:
+                _TAG = {"str": 0, "int": 1, "float": 2, "bool": 3}
                 _specs = []
                 for field in dependant.query_params:
                     alias = get_validation_alias(field)
                     tag_str = _get_scalar_type_tag(field) or ""
-                    tag_int = {"str": 0, "int": 1, "float": 2, "bool": 3}.get(tag_str, 0)
                     _specs.append({
                         "field_name": field.name,
                         "alias": alias,
                         "location": 0,
-                        "type_tag": tag_int,
+                        "type_tag": _TAG.get(tag_str, 0),
                         "default_value": None,
                         "is_sequence": is_sequence_field(field),
                     })
                 for field in dependant.header_params:
                     alias = get_validation_alias(field)
                     tag_str = _get_scalar_type_tag(field) or ""
-                    tag_int = {"str": 0, "int": 1, "float": 2, "bool": 3}.get(tag_str, 0)
                     _specs.append({
                         "field_name": field.name,
                         "alias": alias,
                         "header_lookup_key": alias,
                         "location": 1,
-                        "type_tag": tag_int,
+                        "type_tag": _TAG.get(tag_str, 0),
                         "default_value": None,
                     })
                 for field in dependant.cookie_params:
                     alias = get_validation_alias(field)
                     tag_str = _get_scalar_type_tag(field) or ""
-                    tag_int = {"str": 0, "int": 1, "float": 2, "bool": 3}.get(tag_str, 0)
                     _specs.append({
                         "field_name": field.name,
                         "alias": alias,
                         "location": 2,
-                        "type_tag": tag_int,
+                        "type_tag": _TAG.get(tag_str, 0),
                         "default_value": None,
                     })
                 for field in dependant.path_params:
                     alias = get_validation_alias(field)
                     tag_str = _get_scalar_type_tag(field) or ""
-                    tag_int = {"str": 0, "int": 1, "float": 2, "bool": 3}.get(tag_str, 0)
                     _specs.append({
                         "field_name": field.name,
                         "alias": alias,
                         "location": 3,
-                        "type_tag": tag_int,
+                        "type_tag": _TAG.get(tag_str, 0),
                         "default_value": None,
                     })
+                # Cache on the dependant object — survives for lifetime of the route
+                try:
+                    object.__setattr__(dependant, '_precomputed_batch_specs', _specs)
+                except (AttributeError, TypeError):
+                    pass  # frozen dataclass edge case — fall back to per-request build
 
             _qp = request.scope.get("_core_query_params")
             if _qp is None and dependant.query_params:

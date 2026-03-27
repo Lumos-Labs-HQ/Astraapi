@@ -2,36 +2,26 @@
 #include <Python.h>
 #include "pyref.hpp"
 #include <cstring>
-#include <string>
 #include <vector>
-#include <unordered_map>
-#include <mutex>
-#include <shared_mutex>
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Concurrent route parameter registry
+// Inline param extraction — no global registry, no mutex.
+// Called from Python's solve_dependencies() with pre-built field_specs list.
 // ══════════════════════════════════════════════════════════════════════════════
 
 struct ParamSpec {
-    std::string field_name;
-    std::string alias;
-    std::string header_lookup_key;
+    const char* field_name;   // points into Python unicode object (stable)
+    const char* alias;
+    const char* header_lookup_key;
     int location;   // 0=query, 1=header, 2=cookie, 3=path
     int type_tag;   // 0=str, 1=int, 2=float, 3=bool
     bool required;
-    bool is_sequence;  // true for List/Set/frozenset typed params
-    PyObject* default_value;  // strong ref or nullptr
+    bool is_sequence;
+    PyObject* default_value;  // borrowed ref into the Python spec dict
 };
-
-struct RouteParamRegistry {
-    std::vector<ParamSpec> specs;
-};
-
-static std::unordered_map<uint64_t, RouteParamRegistry> g_registry;
-static std::shared_mutex g_registry_mutex;
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Scalar coercion helper
+// Scalar coercion helper — converts str to int/float/bool where possible
 // ══════════════════════════════════════════════════════════════════════════════
 
 static PyObject* coerce_value(PyObject* val, int type_tag) {
@@ -60,7 +50,7 @@ static PyObject* coerce_value(PyObject* val, int type_tag) {
             Py_INCREF(val);
             return val;
         }
-        case 3: {  // bool — only accept standard bool strings; return original for others
+        case 3: {  // bool — only accept standard bool strings
             if ((slen == 4 && (memcmp(s, "true", 4) == 0 || memcmp(s, "True", 4) == 0)) ||
                 (slen == 1 && s[0] == '1') ||
                 (slen == 3 && (memcmp(s, "yes", 3) == 0 || memcmp(s, "Yes", 3) == 0)) ||
@@ -73,7 +63,6 @@ static PyObject* coerce_value(PyObject* val, int type_tag) {
                 (slen == 3 && (memcmp(s, "off", 3) == 0 || memcmp(s, "Off", 3) == 0))) {
                 Py_RETURN_FALSE;
             }
-            // Not a recognised bool string — return original for param_validator
             Py_INCREF(val);
             return val;
         }
@@ -84,93 +73,8 @@ static PyObject* coerce_value(PyObject* val, int type_tag) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// register_route_params(route_id: u64, field_specs_list: PyList) → None
-// ══════════════════════════════════════════════════════════════════════════════
-
-PyObject* py_register_route_params(PyObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {"route_id", "field_specs_list", nullptr};
-    unsigned long long route_id;
-    PyObject* specs_list;
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "KO", (char**)kwlist,
-            &route_id, &specs_list)) return nullptr;
-
-    if (!PyList_Check(specs_list)) {
-        PyErr_SetString(PyExc_TypeError, "expected list");
-        return nullptr;
-    }
-
-    RouteParamRegistry reg;
-    Py_ssize_t n = PyList_GET_SIZE(specs_list);
-    for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* spec_dict = PyList_GET_ITEM(specs_list, i);
-        if (!PyDict_Check(spec_dict)) continue;
-
-        ParamSpec ps;
-        PyObject* fn = PyDict_GetItemString(spec_dict, "field_name");
-        PyObject* al = PyDict_GetItemString(spec_dict, "alias");
-        PyObject* hlk = PyDict_GetItemString(spec_dict, "header_lookup_key");
-        PyObject* loc = PyDict_GetItemString(spec_dict, "location");
-        PyObject* tt = PyDict_GetItemString(spec_dict, "type_tag");
-        PyObject* req = PyDict_GetItemString(spec_dict, "required");
-        PyObject* def = PyDict_GetItemString(spec_dict, "default_value");
-
-        const char* fn_str = fn ? PyUnicode_AsUTF8(fn) : nullptr;
-        ps.field_name = fn_str ? fn_str : "";
-        const char* al_str = (al && PyUnicode_Check(al)) ? PyUnicode_AsUTF8(al) : nullptr;
-        ps.alias = al_str ? al_str : ps.field_name;
-        const char* hlk_str = (hlk && PyUnicode_Check(hlk)) ? PyUnicode_AsUTF8(hlk) : nullptr;
-        ps.header_lookup_key = hlk_str ? hlk_str : "";
-        ps.location = loc ? (int)PyLong_AsLong(loc) : 0;
-        ps.type_tag = tt ? (int)PyLong_AsLong(tt) : 0;
-        ps.required = req ? PyObject_IsTrue(req) : false;
-        if (def && def != Py_None) {
-            Py_INCREF(def);
-            ps.default_value = def;
-        } else {
-            ps.default_value = nullptr;
-        }
-
-        reg.specs.push_back(std::move(ps));
-    }
-
-    {
-        std::unique_lock lock(g_registry_mutex);
-        // Clean up old entry if exists
-        auto it = g_registry.find(route_id);
-        if (it != g_registry.end()) {
-            for (auto& ps : it->second.specs) {
-                Py_XDECREF(ps.default_value);
-            }
-        }
-        g_registry[route_id] = std::move(reg);
-    }
-
-    Py_RETURN_NONE;
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// unregister_route_params(route_id: u64) → None
-// ══════════════════════════════════════════════════════════════════════════════
-
-PyObject* py_unregister_route_params(PyObject* self, PyObject* arg) {
-    unsigned long long route_id = PyLong_AsUnsignedLongLong(arg);
-    if (route_id == (unsigned long long)-1 && PyErr_Occurred()) return nullptr;
-
-    std::unique_lock lock(g_registry_mutex);
-    auto it = g_registry.find(route_id);
-    if (it != g_registry.end()) {
-        for (auto& ps : it->second.specs) {
-            Py_XDECREF(ps.default_value);
-        }
-        g_registry.erase(it);
-    }
-
-    Py_RETURN_NONE;
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Internal: extract params using specs from a source dict by location
+// extract_from_source — inner loop for one location (query/header/cookie/path)
+// Uses PyUnicode_InternFromString so dict key lookups use pointer equality.
 // ══════════════════════════════════════════════════════════════════════════════
 
 static void extract_from_source(PyObject* result, PyObject* source,
@@ -180,84 +84,49 @@ static void extract_from_source(PyObject* result, PyObject* source,
     for (const auto& ps : specs) {
         if (ps.location != location) continue;
 
-        const char* lookup_key = ps.alias.empty() ? ps.field_name.c_str() : ps.alias.c_str();
-        if (location == 1) {  // header
-            lookup_key = ps.header_lookup_key.empty() ? ps.field_name.c_str() : ps.header_lookup_key.c_str();
+        const char* lookup_key = ps.alias ? ps.alias : ps.field_name;
+        if (location == 1 && ps.header_lookup_key && ps.header_lookup_key[0]) {
+            lookup_key = ps.header_lookup_key;
         }
 
-        PyRef py_lookup(PyUnicode_FromString(lookup_key));
-        PyObject* val = PyDict_GetItem(source, py_lookup.get());  // borrowed
+        // InternFromString: returns the same interned object on every call → pointer-equal
+        // dict key lookup uses pointer compare (no hash computation for interned strings)
+        PyObject* py_lookup = PyUnicode_InternFromString(lookup_key);
+        if (!py_lookup) continue;
+        PyObject* val = PyDict_GetItem(source, py_lookup);  // borrowed
+        Py_DECREF(py_lookup);
+
+        PyObject* py_fname = PyUnicode_InternFromString(ps.field_name);
+        if (!py_fname) continue;
 
         if (val) {
-            PyRef py_fname(PyUnicode_FromString(ps.field_name.c_str()));
             if (PyList_Check(val)) {
                 if (ps.is_sequence) {
-                    // Sequence field: return the full list as-is
-                    PyDict_SetItem(result, py_fname.get(), val);
+                    PyDict_SetItem(result, py_fname, val);
                 } else if (PyList_GET_SIZE(val) > 0) {
-                    // Scalar field: take first element and coerce
                     PyObject* coerced = coerce_value(PyList_GET_ITEM(val, 0), ps.type_tag);
                     if (coerced) {
-                        PyDict_SetItem(result, py_fname.get(), coerced);
+                        PyDict_SetItem(result, py_fname, coerced);
                         Py_DECREF(coerced);
                     }
                 }
             } else {
                 PyObject* coerced = coerce_value(val, ps.type_tag);
                 if (coerced) {
-                    PyDict_SetItem(result, py_fname.get(), coerced);
+                    PyDict_SetItem(result, py_fname, coerced);
                     Py_DECREF(coerced);
                 }
             }
         } else if (ps.default_value) {
-            PyRef py_fname(PyUnicode_FromString(ps.field_name.c_str()));
-            PyDict_SetItem(result, py_fname.get(), ps.default_value);
+            PyDict_SetItem(result, py_fname, ps.default_value);
         }
+        Py_DECREF(py_fname);
     }
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// batch_extract_all_params(route_id, query_params, headers, cookies, path_params)
-// ══════════════════════════════════════════════════════════════════════════════
-
-PyObject* py_batch_extract_all_params(PyObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {
-        "route_id", "query_params", "headers", "cookies", "path_params", nullptr
-    };
-
-    unsigned long long route_id;
-    PyObject* query_params;
-    PyObject* headers;
-    PyObject* cookies;
-    PyObject* path_params;
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "KOOOO", (char**)kwlist,
-            &route_id, &query_params, &headers, &cookies, &path_params)) {
-        return nullptr;
-    }
-
-    std::shared_lock lock(g_registry_mutex);
-    auto it = g_registry.find(route_id);
-    if (it == g_registry.end()) {
-        lock.unlock();
-        return PyDict_New();  // empty dict
-    }
-
-    const auto& specs = it->second.specs;
-
-    PyRef result(PyDict_New());
-    if (!result) return nullptr;
-
-    extract_from_source(result.get(), query_params, specs, 0);   // query
-    extract_from_source(result.get(), headers, specs, 1);         // header
-    extract_from_source(result.get(), cookies, specs, 2);         // cookie
-    extract_from_source(result.get(), path_params, specs, 3);     // path
-
-    return result.release();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // batch_extract_params_inline(query_params, headers, cookies, path_params, field_specs)
+// All param sources + specs passed directly — zero global state, zero mutex.
 // ══════════════════════════════════════════════════════════════════════════════
 
 PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObject* kwargs) {
@@ -281,58 +150,53 @@ PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObjec
         return nullptr;
     }
 
-    // Build temporary specs
+    // Build temporary specs from Python dicts. field_name/alias pointers are
+    // into interned Python unicode objects so they remain valid for the call duration.
     std::vector<ParamSpec> specs;
     Py_ssize_t n = PyList_GET_SIZE(field_specs_list);
+    specs.reserve((size_t)n);
+
     for (Py_ssize_t i = 0; i < n; i++) {
         PyObject* sd = PyList_GET_ITEM(field_specs_list, i);
         if (!PyDict_Check(sd)) continue;
 
         ParamSpec ps;
-        PyObject* fn = PyDict_GetItemString(sd, "field_name");
-        PyObject* al = PyDict_GetItemString(sd, "alias");
+        PyObject* fn  = PyDict_GetItemString(sd, "field_name");
+        PyObject* al  = PyDict_GetItemString(sd, "alias");
         PyObject* hlk = PyDict_GetItemString(sd, "header_lookup_key");
         PyObject* loc = PyDict_GetItemString(sd, "location");
-        PyObject* tt = PyDict_GetItemString(sd, "type_tag");
+        PyObject* tt  = PyDict_GetItemString(sd, "type_tag");
         PyObject* def = PyDict_GetItemString(sd, "default_value");
         PyObject* seq = PyDict_GetItemString(sd, "is_sequence");
 
-        const char* fn_str = fn ? PyUnicode_AsUTF8(fn) : nullptr;
-        ps.field_name = fn_str ? fn_str : "";
-        const char* al_str = (al && PyUnicode_Check(al)) ? PyUnicode_AsUTF8(al) : nullptr;
-        ps.alias = al_str ? al_str : ps.field_name;
-        const char* hlk_str = (hlk && PyUnicode_Check(hlk)) ? PyUnicode_AsUTF8(hlk) : nullptr;
-        ps.header_lookup_key = hlk_str ? hlk_str : "";
-        ps.location = loc ? (int)PyLong_AsLong(loc) : 0;
-        ps.type_tag = tt ? (int)PyLong_AsLong(tt) : 0;
-        ps.is_sequence = seq ? PyObject_IsTrue(seq) : false;
-        ps.default_value = (def && def != Py_None) ? def : nullptr;
+        ps.field_name        = (fn  && PyUnicode_Check(fn))  ? PyUnicode_AsUTF8(fn)  : nullptr;
+        ps.alias             = (al  && PyUnicode_Check(al))  ? PyUnicode_AsUTF8(al)  : nullptr;
+        ps.header_lookup_key = (hlk && PyUnicode_Check(hlk)) ? PyUnicode_AsUTF8(hlk) : nullptr;
+        ps.location          = loc ? (int)PyLong_AsLong(loc) : 0;
+        ps.type_tag          = tt  ? (int)PyLong_AsLong(tt)  : 0;
+        ps.is_sequence       = seq ? (PyObject_IsTrue(seq) == 1) : false;
+        ps.default_value     = (def && def != Py_None) ? def : nullptr;
 
-        specs.push_back(std::move(ps));
+        if (!ps.field_name) continue;
+        specs.push_back(ps);
     }
 
     PyRef result(PyDict_New());
     if (!result) return nullptr;
 
-    extract_from_source(result.get(), query_params, specs, 0);
-    extract_from_source(result.get(), headers, specs, 1);
-    extract_from_source(result.get(), cookies, specs, 2);
-    extract_from_source(result.get(), path_params, specs, 3);
+    extract_from_source(result.get(), query_params, specs, 0);  // query
+    extract_from_source(result.get(), headers,      specs, 1);  // header
+    extract_from_source(result.get(), cookies,      specs, 2);  // cookie
+    extract_from_source(result.get(), path_params,  specs, 3);  // path
 
     return result.release();
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Module shutdown: release all PyObject* refs held in the global registry
+// cleanup_param_registry — no-op now (no global registry), kept for link compat
 // ══════════════════════════════════════════════════════════════════════════════
 
 void cleanup_param_registry() {
-    std::unique_lock lock(g_registry_mutex);
-    for (auto& [id, reg] : g_registry) {
-        for (auto& ps : reg.specs) {
-            Py_XDECREF(ps.default_value);
-            ps.default_value = nullptr;
-        }
-    }
-    g_registry.clear();
+    // Nothing to clean: global registry removed. PyUnicode_InternFromString
+    // interned strings are owned by the interpreter and freed at shutdown.
 }

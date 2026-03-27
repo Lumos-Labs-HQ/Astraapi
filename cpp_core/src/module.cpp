@@ -78,7 +78,7 @@ extern PyObject* py_fast_jsonable_encode(PyObject* self, PyObject* arg);
 // dependency_resolver.cpp
 extern PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg);
 
-// response_pipeline.cpp
+
 extern PyObject* py_encode_to_json_bytes(PyObject* self, PyObject* args, PyObject* kwargs);
 
 // request_pipeline.cpp
@@ -96,86 +96,7 @@ extern PyObject* py_serialize_error_response(PyObject* self, PyObject* arg);
 extern PyObject* py_serialize_error_list(PyObject* self, PyObject* arg);
 
 // param_extractor.cpp
-extern PyObject* py_register_route_params(PyObject* self, PyObject* args, PyObject* kwargs);
 extern PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObject* kwargs);
-
-// ══════════════════════════════════════════════════════════════════════════════
-// CoreRouter — standalone trie router (v0.1 compat)
-// ══════════════════════════════════════════════════════════════════════════════
-
-typedef struct {
-    PyObject_HEAD
-    Router router;
-    std::vector<int> route_indices;
-} CoreRouterObject;
-
-static PyObject* CoreRouter_new(PyTypeObject* type, PyObject*, PyObject*) {
-    CoreRouterObject* self = (CoreRouterObject*)type->tp_alloc(type, 0);
-    if (self) {
-        new (&self->router) Router();
-        new (&self->route_indices) std::vector<int>();
-    }
-    return (PyObject*)self;
-}
-
-static void CoreRouter_dealloc(CoreRouterObject* self) {
-    self->router.~Router();
-    self->route_indices.~vector();
-    Py_TYPE(self)->tp_free((PyObject*)self);
-}
-
-static PyObject* CoreRouter_add_route(CoreRouterObject* self, PyObject* args) {
-    const char* path;
-    int index;
-    if (!PyArg_ParseTuple(args, "si", &path, &index)) return nullptr;
-    self->router.insert(path, index);
-    self->route_indices.push_back(index);
-    Py_RETURN_NONE;
-}
-
-static PyObject* CoreRouter_match_route(CoreRouterObject* self, PyObject* arg) {
-    const char* path;
-    if (PyUnicode_Check(arg)) {
-        path = PyUnicode_AsUTF8(arg);
-        if (!path) return nullptr;
-    } else {
-        PyErr_SetString(PyExc_TypeError, "expected str");
-        return nullptr;
-    }
-
-    auto match = self->router.at(path, strlen(path));
-    if (!match) Py_RETURN_NONE;
-
-    // Return (route_index, path_params_dict)
-    PyRef params_dict(PyDict_New());
-    if (!params_dict) return nullptr;
-    for (int pi = 0; pi < match->param_count; pi++) {
-        auto k = match->params[pi].name;
-        auto v = match->params[pi].value;
-        PyRef pk(PyUnicode_FromStringAndSize(k.data(), k.size()));
-        PyRef pv(PyUnicode_FromStringAndSize(v.data(), v.size()));
-        if (!pk || !pv) return nullptr;
-        if (PyDict_SetItem(params_dict.get(), pk.get(), pv.get()) < 0) return nullptr;
-    }
-
-    return Py_BuildValue("(iN)", match->route_index, params_dict.release());
-}
-
-static PyMethodDef CoreRouter_methods[] = {
-    {"add_route", (PyCFunction)CoreRouter_add_route, METH_VARARGS, nullptr},
-    {"match_route", (PyCFunction)CoreRouter_match_route, METH_O, nullptr},
-    {nullptr}
-};
-
-static PyTypeObject CoreRouterType = {
-    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_fastapi_core.CoreRouter",
-    .tp_basicsize = sizeof(CoreRouterObject),
-    .tp_dealloc = (destructor)CoreRouter_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_methods = CoreRouter_methods,
-    .tp_new = CoreRouter_new,
-};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // WebSocket unmask — Python-callable wrapper for ws_frame_parser.cpp
@@ -272,7 +193,6 @@ static PyMethodDef module_methods[] = {
     {"serialize_error_list", (PyCFunction)py_serialize_error_list, METH_O, nullptr},
 
     // Param extractor
-    {"register_route_params", (PyCFunction)py_register_route_params, METH_VARARGS | METH_KEYWORDS, nullptr},
     {"batch_extract_params_inline", (PyCFunction)py_batch_extract_params_inline, METH_VARARGS | METH_KEYWORDS, nullptr},
 
     // Warm-up / eager initialization
@@ -311,9 +231,10 @@ static void module_free(void* /*module*/) {
     // Clean up ASGI constants
     cleanup_asgi_constants();
 
-    // Clean up global registries
+    // Clean up param_extractor global registry
     cleanup_param_registry();
 }
+
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Module definition
@@ -347,11 +268,6 @@ PyMODINIT_FUNC PyInit__fastapi_core(void) {
         return nullptr;
     }
 
-    // Register CoreRouter type (v0.1 compat)
-    if (PyType_Ready(&CoreRouterType) < 0) { Py_DECREF(m); return nullptr; }
-    Py_INCREF(&CoreRouterType);
-    PyModule_AddObject(m, "CoreRouter", (PyObject*)&CoreRouterType);
-
     // Pre-initialize JSON writer special type caches
     json_writer_init();
 
@@ -363,3 +279,4 @@ PyMODINIT_FUNC PyInit__fastapi_core(void) {
 
     return m;
 }
+

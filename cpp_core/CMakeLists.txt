@@ -24,7 +24,6 @@ set(SOURCES
     src/json_encoder.cpp
     src/param_extractor.cpp
     src/openapi_gen.cpp
-    src/dep_engine.cpp
     src/security.cpp
     src/websocket_handler.cpp
     src/error_response.cpp
@@ -57,34 +56,13 @@ target_include_directories(_fastapi_core PRIVATE
     ${Python3_INCLUDE_DIRS}
 )
 
-# ── PGO (Profile-Guided Optimization) ────────────────────────────────────────
-# Usage (GCC/Clang):
-#   Step 1: cmake -DENABLE_PGO_GENERATE=ON .. && make -j$(nproc)
-#   Step 2: Run benchmarks to generate profile data
-#   Step 3: cmake -DENABLE_PGO_USE=ON .. && make -j$(nproc)
-option(ENABLE_PGO_GENERATE "Build with PGO instrumentation" OFF)
-option(ENABLE_PGO_USE "Build with PGO data" OFF)
-
-# ── Compiler flags: maximum optimization (platform-specific) ─────────────────
+# ── Compiler flags ───────────────────────────────────────────────────────────
 if(MSVC)
-    # MSVC (Windows)
     target_compile_options(_fastapi_core PRIVATE
-        /O2 /Ob3 /GL /fp:fast /arch:AVX2
-        /W3 /wd4244 /wd4267 /wd4996
+        /O2 /GL /GS- /fp:fast /Oi /Gy
+        /W3 /wd4100 /wd4127 /wd4201
     )
-    target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GR->)
     target_link_options(_fastapi_core PRIVATE /LTCG)
-
-    # PGO for MSVC
-    if(ENABLE_PGO_GENERATE)
-        target_compile_options(_fastapi_core PRIVATE /GL)
-        target_link_options(_fastapi_core PRIVATE /LTCG:PGI)
-        message(STATUS "PGO: MSVC instrumentation enabled")
-    elseif(ENABLE_PGO_USE)
-        target_compile_options(_fastapi_core PRIVATE /GL)
-        target_link_options(_fastapi_core PRIVATE /LTCG:PGO)
-        message(STATUS "PGO: MSVC using profile data")
-    endif()
 else()
     # GCC / Clang (Linux, macOS)
     target_compile_options(_fastapi_core PRIVATE
@@ -103,18 +81,8 @@ else()
 
     # -Wno-free-nonheap-object: suppress GCC 14 false positive in LTO-inlined vector::push_back
     target_link_options(_fastapi_core PRIVATE -flto -Wno-free-nonheap-object)
-
-    # PGO for GCC/Clang
-    if(ENABLE_PGO_GENERATE)
-        target_compile_options(_fastapi_core PRIVATE -fprofile-generate)
-        target_link_options(_fastapi_core PRIVATE -fprofile-generate)
-        message(STATUS "PGO: Instrumentation enabled — run benchmarks to generate profile data")
-    elseif(ENABLE_PGO_USE)
-        target_compile_options(_fastapi_core PRIVATE -fprofile-use -fprofile-correction)
-        target_link_options(_fastapi_core PRIVATE -fprofile-use)
-        message(STATUS "PGO: Using profile data for optimization")
-    endif()
 endif()
+
 
 # ── Link system libs ────────────────────────────────────────────────────────
 # Try to find libdeflate (2-3x faster single-shot gzip); fall back to zlib

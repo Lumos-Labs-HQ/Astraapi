@@ -2,7 +2,7 @@
 C++ core-accelerated FastAPI internals (v2.0).
 
 Core extension is REQUIRED — no Python fallback.
-Exported: 18 functions + 3 classes.
+Exported: 16 functions + 2 classes.
 """
 
 from fastapi._fastapi_core import (  # type: ignore[import-not-found]
@@ -12,8 +12,6 @@ from fastapi._fastapi_core import (  # type: ignore[import-not-found]
     ResponseData,
     # ── OpenAPI ──────────────────────────────────────────────────────────
     openapi_dict_to_json_bytes,
-    # ── Router ───────────────────────────────────────────────────────────
-    CoreRouter,
     # ── Request pipeline ─────────────────────────────────────────────────
     process_request,
     encode_to_json_bytes,
@@ -24,7 +22,6 @@ from fastapi._fastapi_core import (  # type: ignore[import-not-found]
     parse_multipart_body,
     parse_urlencoded_body,
     # ── Parameter extraction & coercion ──────────────────────────────────
-    register_route_params,
     batch_extract_params_inline,
     batch_coerce_scalars,
     # ── Dependency resolution ────────────────────────────────────────────
