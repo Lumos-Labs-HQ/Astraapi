@@ -1,6 +1,6 @@
 """AstraAPI framework, high performance, easy to learn, fast to code, ready for production"""
 
-__version__ = "0.128.3"
+__version__ = "0.1.0"
 
 # ── Lazy imports via __getattr__ ────────────────────────────────────────────
 # Deferring heavy imports (pydantic, openapi models, dependency resolution)
