@@ -7,22 +7,51 @@ on:
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Build wheels (${{ matrix.os }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-12, macos-14]
+        include:
+          # Linux x86_64 — manylinux_2_28 container (GCC 14)
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-latest
+            cibw_archs: x86_64
+
+          # Linux aarch64 — native ARM runner (no Docker/QEMU)
+          - os: linux
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            cibw_archs: aarch64
+
+          # macOS Intel
+          - os: macos
+            arch: x86_64
+            runner: macos-12
+            cibw_archs: x86_64
+
+          # macOS Apple Silicon (native)
+          - os: macos
+            arch: arm64
+            runner: macos-14
+            cibw_archs: arm64
+
+          # Windows x64
+          - os: windows
+            arch: AMD64
+            runner: windows-latest
+            cibw_archs: AMD64
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install deps (macOS)
-        if: runner.os == 'macOS'
+        if: matrix.os == 'macos'
         run: brew install libdeflate brotli || true
 
       - name: Install zlib (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.os == 'windows'
         run: vcpkg install zlib:x64-windows
 
       - name: Install cibuildwheel
@@ -31,28 +60,21 @@ jobs:
       - name: Build wheels
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
-          # Python 3.10+ required: code uses Py_T_OBJECT_EX, PySendResult, PyIter_Send,
-          # Py_NewRef, Py_TPFLAGS_DISALLOW_INSTANTIATION — all added in Python 3.10.
-          # Python 3.9 is NOT supported by the C++ core.
           CIBW_BUILD: "cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
-          CIBW_ARCHS_LINUX: "x86_64 aarch64"
-          CIBW_ARCHS_MACOS: "x86_64 arm64"
-          CIBW_ARCHS_WINDOWS: "AMD64"
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
 
-          # manylinux_2_28 uses GCC 12 which supports:
-          #   - std::atomic<std::shared_ptr<T>> (C++20)
-          #   - heterogeneous lookup in unordered_map/set (C++20)
-          # manylinux2014 (GCC 10) does NOT support these — do not use it.
-          CIBW_MANYLINUX_X86_64_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
-          CIBW_MANYLINUX_AARCH64_IMAGE: "quay.io/pypa/manylinux_2_28_aarch64"
+          # Linux: use manylinux_2_28 (GCC 14, glibc 2.28) — required for C++20 features
+          CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_28_x86_64
+          CIBW_MANYLINUX_AARCH64_IMAGE: quay.io/pypa/manylinux_2_28_aarch64
 
-          CIBW_BEFORE_BUILD_LINUX: >
-            dnf install -y libdeflate-devel brotli-devel || true
+          # Linux: install compression libs inside manylinux container
+          CIBW_BEFORE_BUILD_LINUX: dnf install -y libdeflate-devel brotli-devel || true
 
-          # macOS: set deployment target; brew prefix is auto-detected in CMakeLists
+          # macOS: set deployment target
           CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=12.0
 
+          # Windows: pass vcpkg toolchain
           CIBW_CONFIG_SETTINGS_WINDOWS: >
             cmake.define.CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
             cmake.define.VCPKG_TARGET_TRIPLET=x64-windows
@@ -61,7 +83,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
           path: wheelhouse/*.whl
 
   build_sdist:
