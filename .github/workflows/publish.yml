@@ -71,8 +71,8 @@ jobs:
           # Linux: install compression libs inside manylinux container
           CIBW_BEFORE_BUILD_LINUX: dnf install -y libdeflate-devel brotli-devel || true
 
-          # macOS: set deployment target
-          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=12.0
+          # macOS: brew libs on macos-14 runner require deployment target 14.0
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=14.0
 
           # Windows: pass vcpkg toolchain
           CIBW_CONFIG_SETTINGS_WINDOWS: >
