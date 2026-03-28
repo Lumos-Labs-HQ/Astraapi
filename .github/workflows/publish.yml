@@ -25,12 +25,6 @@ jobs:
             runner: ubuntu-24.04-arm
             cibw_archs: aarch64
 
-          # macOS Intel
-          - os: macos
-            arch: x86_64
-            runner: macos-13
-            cibw_archs: x86_64
-
           # macOS Apple Silicon (native)
           - os: macos
             arch: arm64
