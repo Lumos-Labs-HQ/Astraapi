@@ -28,7 +28,7 @@ jobs:
           # macOS Intel
           - os: macos
             arch: x86_64
-            runner: macos-12
+            runner: macos-13
             cibw_archs: x86_64
 
           # macOS Apple Silicon (native)
