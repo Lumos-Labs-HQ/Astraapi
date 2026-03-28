@@ -12,21 +12,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
+        os: [ubuntu-latest, windows-latest, macos-12, macos-14]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install zlib (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          vcpkg install zlib:x64-windows
-          echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $env:GITHUB_ENV
-          echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $env:GITHUB_ENV
-
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
         run: brew install libdeflate brotli || true
+
+      - name: Install zlib (Windows)
+        if: runner.os == 'Windows'
+        run: vcpkg install zlib:x64-windows
 
       - name: Install cibuildwheel
         run: pip install cibuildwheel==2.22.0
@@ -42,11 +39,13 @@ jobs:
           CIBW_BEFORE_BUILD_LINUX: >
             yum install -y libdeflate-devel brotli-devel || true &&
             apt-get install -y libdeflate-dev libbrotli-dev || true
-          CIBW_ENVIRONMENT_MACOS: >
-            ARCHFLAGS="-arch {arch}"
+          # Pass the target arch to CMake so it skips -march=native when cross-compiling
+          CIBW_CONFIG_SETTINGS: >
+            cmake.define.CMAKE_OSX_ARCHITECTURES={arch}
           CIBW_CONFIG_SETTINGS_WINDOWS: >
             cmake.define.CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
             cmake.define.VCPKG_TARGET_TRIPLET=x64-windows
+            cmake.define.CMAKE_OSX_ARCHITECTURES=
           CIBW_BUILD_VERBOSITY: 1
 
       - uses: actions/upload-artifact@v4

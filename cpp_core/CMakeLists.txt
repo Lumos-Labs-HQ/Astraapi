@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# scikit-build-core sets Python3_ROOT_DIR; we just need to find the module component
+find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+
 # ── Sources ──────────────────────────────────────────────────────────────────
 set(SOURCES
     src/module.cpp
@@ -32,7 +35,6 @@ set(SOURCES
     src/ws_ring_buffer.cpp
 )
 
-# ── Third-party C libraries (yyjson, ryu, llhttp) ─────────────────────────
 set(THIRD_PARTY_C_SOURCES
     third_party/yyjson/yyjson.c
     third_party/ryu/d2s.c
@@ -42,7 +44,6 @@ set(THIRD_PARTY_C_SOURCES
 )
 set_source_files_properties(${THIRD_PARTY_C_SOURCES} PROPERTIES LANGUAGE C)
 
-# ── Build the extension module (scikit-build-core provides Python3) ──────────
 Python3_add_library(_astraapi_core MODULE ${SOURCES} ${THIRD_PARTY_C_SOURCES})
 
 target_include_directories(_astraapi_core PRIVATE
@@ -61,22 +62,15 @@ if(MSVC)
     )
     target_link_options(_astraapi_core PRIVATE /LTCG)
 else()
-    # -march=native is unsafe for cross-compilation (e.g. macOS arm64 runner building x86_64)
-    # Only use it when not cross-compiling
-    if(NOT CMAKE_CROSSCOMPILING AND NOT DEFINED ENV{ARCHFLAGS})
-        set(_MARCH_FLAG -march=native)
+    # Skip -march=native when cross-compiling (e.g. macOS arm64 runner → x86_64 wheel)
+    if(NOT CMAKE_OSX_ARCHITECTURES OR CMAKE_OSX_ARCHITECTURES STREQUAL CMAKE_SYSTEM_PROCESSOR)
+        set(_MARCH -march=native)
     else()
-        set(_MARCH_FLAG "")
+        set(_MARCH "")
     endif()
 
     target_compile_options(_astraapi_core PRIVATE
-        -O3
-        ${_MARCH_FLAG}
-        -flto
-        -fno-math-errno
-        -funroll-loops
-        -fomit-frame-pointer
-        -ftree-vectorize
+        -O3 ${_MARCH} -flto -fno-math-errno -funroll-loops -fomit-frame-pointer -ftree-vectorize
         -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type
     )
     target_compile_options(_astraapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
@@ -85,17 +79,17 @@ else()
     target_link_options(_astraapi_core PRIVATE -flto -Wno-free-nonheap-object)
 endif()
 
-# ── Link system libs ─────────────────────────────────────────────────────────
+# ── Optional compression libs ────────────────────────────────────────────────
 find_library(LIBDEFLATE deflate)
 find_library(BROTLI_ENC brotlienc)
 find_library(BROTLI_DEC brotlidec)
 
 if(MSVC)
+    target_link_libraries(_astraapi_core PRIVATE ws2_32)
     find_package(ZLIB QUIET)
     if(ZLIB_FOUND)
         target_link_libraries(_astraapi_core PRIVATE ZLIB::ZLIB)
     endif()
-    target_link_libraries(_astraapi_core PRIVATE ws2_32)
 else()
     target_link_libraries(_astraapi_core PRIVATE z)
 endif()
@@ -103,16 +97,12 @@ endif()
 if(LIBDEFLATE)
     target_link_libraries(_astraapi_core PRIVATE ${LIBDEFLATE})
     target_compile_definitions(_astraapi_core PRIVATE HAS_LIBDEFLATE=1)
-    message(STATUS "libdeflate found — using fast single-shot gzip compression")
-else()
-    message(STATUS "libdeflate not found — falling back to zlib")
+    message(STATUS "libdeflate found")
 endif()
 
 if(BROTLI_ENC AND BROTLI_DEC)
     target_link_libraries(_astraapi_core PRIVATE ${BROTLI_ENC} ${BROTLI_DEC})
     target_compile_definitions(_astraapi_core PRIVATE HAS_BROTLI=1)
-else()
-    message(STATUS "Brotli not found — gzip only")
 endif()
 
 target_compile_definitions(_astraapi_core PRIVATE YYJSON_DISABLE_NON_STANDARD=1)
