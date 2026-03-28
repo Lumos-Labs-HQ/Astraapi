@@ -19,10 +19,7 @@ jobs:
 
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
-        run: |
-          brew install libdeflate brotli || true
-          # Make brew headers visible to CMake for both native and cross-compile
-          echo "BREW_PREFIX=$(brew --prefix)" >> $GITHUB_ENV
+        run: brew install libdeflate brotli || true
 
       - name: Install zlib (Windows)
         if: runner.os == 'Windows'
@@ -53,10 +50,8 @@ jobs:
           CIBW_BEFORE_BUILD_LINUX: >
             dnf install -y libdeflate-devel brotli-devel || true
 
-          # macOS: pass brew prefix so CMake finds libdeflate/brotli for both archs
-          CIBW_ENVIRONMENT_MACOS: >
-            MACOSX_DEPLOYMENT_TARGET=12.0
-            CMAKE_PREFIX_PATH=$BREW_PREFIX
+          # macOS: set deployment target; brew prefix is auto-detected in CMakeLists
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=12.0
 
           CIBW_CONFIG_SETTINGS_WINDOWS: >
             cmake.define.CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake

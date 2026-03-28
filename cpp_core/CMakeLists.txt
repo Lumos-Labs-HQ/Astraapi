@@ -79,6 +79,16 @@ else()
     target_link_options(_astraapi_core PRIVATE -flto -Wno-free-nonheap-object)
 endif()
 
+# On macOS, add Homebrew prefix to search paths (handles both Intel and Apple Silicon)
+if(APPLE)
+    execute_process(COMMAND brew --prefix OUTPUT_VARIABLE BREW_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(BREW_PREFIX)
+        list(APPEND CMAKE_PREFIX_PATH "${BREW_PREFIX}")
+        include_directories(SYSTEM "${BREW_PREFIX}/include")
+        link_directories("${BREW_PREFIX}/lib")
+    endif()
+endif()
+
 find_library(LIBDEFLATE deflate)
 find_library(BROTLI_ENC brotlienc)
 find_library(BROTLI_DEC brotlidec)
@@ -108,5 +118,4 @@ target_compile_definitions(_astraapi_core PRIVATE YYJSON_DISABLE_NON_STANDARD=1)
 
 set_target_properties(_astraapi_core PROPERTIES
     PREFIX ""
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
