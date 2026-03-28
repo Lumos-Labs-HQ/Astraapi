@@ -80,12 +80,28 @@ else()
 endif()
 
 # On macOS, add Homebrew prefix to search paths (handles both Intel and Apple Silicon)
+# Only add if the brew libs match the target architecture (avoids cross-compile arch mismatch)
 if(APPLE)
     execute_process(COMMAND brew --prefix OUTPUT_VARIABLE BREW_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(BREW_PREFIX)
-        list(APPEND CMAKE_PREFIX_PATH "${BREW_PREFIX}")
-        include_directories(SYSTEM "${BREW_PREFIX}/include")
-        link_directories("${BREW_PREFIX}/lib")
+        # Detect target arch
+        if(CMAKE_OSX_ARCHITECTURES)
+            set(_TARGET_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+        else()
+            execute_process(COMMAND uname -m OUTPUT_VARIABLE _TARGET_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
+        endif()
+        # Check if brew libs match target arch (skip on cross-compile)
+        execute_process(
+            COMMAND file "${BREW_PREFIX}/lib/libdeflate.dylib"
+            OUTPUT_VARIABLE _DEFLATE_FILE_OUT ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if(_DEFLATE_FILE_OUT MATCHES "${_TARGET_ARCH}")
+            list(APPEND CMAKE_PREFIX_PATH "${BREW_PREFIX}")
+            include_directories(SYSTEM "${BREW_PREFIX}/include")
+            link_directories("${BREW_PREFIX}/lib")
+        else()
+            message(STATUS "Skipping brew libs: arch mismatch (target=${_TARGET_ARCH})")
+        endif()
     endif()
 endif()
 
@@ -119,3 +135,6 @@ target_compile_definitions(_astraapi_core PRIVATE YYJSON_DISABLE_NON_STANDARD=1)
 set_target_properties(_astraapi_core PROPERTIES
     PREFIX ""
 )
+
+# scikit-build-core requires an explicit install() to package the .so into the wheel
+install(TARGETS _astraapi_core DESTINATION .)
