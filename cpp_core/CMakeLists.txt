@@ -5,10 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# scikit-build-core sets Python3_ROOT_DIR; we just need to find the module component
+# scikit-build-core injects Python3 via Development.Module (works in all containers)
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 
-# ── Sources ──────────────────────────────────────────────────────────────────
 set(SOURCES
     src/module.cpp
     src/asgi_constants.cpp
@@ -54,7 +53,6 @@ target_include_directories(_astraapi_core PRIVATE
     ${Python3_INCLUDE_DIRS}
 )
 
-# ── Compiler flags ───────────────────────────────────────────────────────────
 if(MSVC)
     target_compile_options(_astraapi_core PRIVATE
         /O2 /GL /GS- /fp:fast /Oi /Gy
@@ -62,11 +60,13 @@ if(MSVC)
     )
     target_link_options(_astraapi_core PRIVATE /LTCG)
 else()
-    # Skip -march=native when cross-compiling (e.g. macOS arm64 runner → x86_64 wheel)
-    if(NOT CMAKE_OSX_ARCHITECTURES OR CMAKE_OSX_ARCHITECTURES STREQUAL CMAKE_SYSTEM_PROCESSOR)
-        set(_MARCH -march=native)
-    else()
+    # -march=native is only safe for native (non-cross) builds.
+    # On macOS, cibuildwheel sets CMAKE_OSX_ARCHITECTURES when cross-compiling
+    # (e.g. building x86_64 on arm64 runner). Skip -march=native in that case.
+    if(DEFINED CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "")
         set(_MARCH "")
+    else()
+        set(_MARCH -march=native)
     endif()
 
     target_compile_options(_astraapi_core PRIVATE
@@ -79,7 +79,6 @@ else()
     target_link_options(_astraapi_core PRIVATE -flto -Wno-free-nonheap-object)
 endif()
 
-# ── Optional compression libs ────────────────────────────────────────────────
 find_library(LIBDEFLATE deflate)
 find_library(BROTLI_ENC brotlienc)
 find_library(BROTLI_DEC brotlidec)

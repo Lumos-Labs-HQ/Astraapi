@@ -31,21 +31,35 @@ jobs:
       - name: Build wheels
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
-          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*"
+          # Python 3.10+ required: code uses Py_T_OBJECT_EX, PySendResult, PyIter_Send,
+          # Py_NewRef, Py_TPFLAGS_DISALLOW_INSTANTIATION — all added in Python 3.10.
+          # Python 3.9 is NOT supported by the C++ core.
+          CIBW_BUILD: "cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-musllinux* *-win32 *-manylinux_i686"
           CIBW_ARCHS_LINUX: "x86_64 aarch64"
           CIBW_ARCHS_MACOS: "x86_64 arm64"
           CIBW_ARCHS_WINDOWS: "AMD64"
+
+          # manylinux_2_28 uses GCC 12 which supports:
+          #   - std::atomic<std::shared_ptr<T>> (C++20)
+          #   - heterogeneous lookup in unordered_map/set (C++20)
+          # manylinux2014 (GCC 10) does NOT support these — do not use it.
+          CIBW_MANYLINUX_X86_64_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
+          CIBW_MANYLINUX_AARCH64_IMAGE: "quay.io/pypa/manylinux_2_28_aarch64"
+
           CIBW_BEFORE_BUILD_LINUX: >
-            yum install -y libdeflate-devel brotli-devel || true &&
-            apt-get install -y libdeflate-dev libbrotli-dev || true
-          # Pass the target arch to CMake so it skips -march=native when cross-compiling
-          CIBW_CONFIG_SETTINGS: >
-            cmake.define.CMAKE_OSX_ARCHITECTURES={arch}
+            dnf install -y libdeflate-devel brotli-devel || true
+
+          # macOS: set deployment target and let CMake detect arch natively
+          # Do NOT pass CMAKE_OSX_ARCHITECTURES via config-settings — cibuildwheel
+          # already sets ARCHFLAGS and the SDK target correctly per wheel.
+          CIBW_ENVIRONMENT_MACOS: >
+            MACOSX_DEPLOYMENT_TARGET=12.0
+
           CIBW_CONFIG_SETTINGS_WINDOWS: >
             cmake.define.CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
             cmake.define.VCPKG_TARGET_TRIPLET=x64-windows
-            cmake.define.CMAKE_OSX_ARCHITECTURES=
+
           CIBW_BUILD_VERBOSITY: 1
 
       - uses: actions/upload-artifact@v4
