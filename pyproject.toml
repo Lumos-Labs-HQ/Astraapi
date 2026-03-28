@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "astraapi"
-dynamic = ["version"]
+version = "0.1.0"
 description = "AstraAPI framework, high performance, easy to learn, fast to code, ready for production"
 readme = "README.md"
 license = "MIT"
@@ -164,6 +164,11 @@ cmake.source-dir = "cpp_core"
 cmake.build-type = "Release"
 wheel.install-dir = "astraapi"
 wheel.packages = ["astraapi"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "astraapi/__init__.py"
+regex = '__version__\s*=\s*"(?P<value>[^"]+)"'
 
 [tool.pdm]
 version = { source = "file", path = "astraapi/__init__.py" }

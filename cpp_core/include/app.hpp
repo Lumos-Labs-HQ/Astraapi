@@ -159,19 +159,32 @@ struct RouteInfo {
 // ── Rate limiter shard count (outside struct — can't have static constexpr in unnamed struct)
 constexpr int RATE_LIMIT_SHARDS = 16;
 
+
+// std::atomic<std::shared_ptr<T>> is not supported by libc++ (Apple Clang) or MSVC.
+// Use a simple mutex-protected wrapper instead.
+template<typename T>
+struct AtomicSharedPtr {
+    mutable std::mutex mtx;
+    std::shared_ptr<T> ptr;
+    AtomicSharedPtr() = default;
+    explicit AtomicSharedPtr(std::shared_ptr<T> p) : ptr(std::move(p)) {}
+    std::shared_ptr<T> load() const { std::lock_guard<std::mutex> lk(mtx); return ptr; }
+    void store(std::shared_ptr<T> p) { std::lock_guard<std::mutex> lk(mtx); ptr = std::move(p); }
+};
+
 // ── CoreApp Python object ───────────────────────────────────────────────────
 
-typedef struct {
+struct CoreAppObject {
     PyObject_HEAD
     Router router;
     std::vector<RouteInfo> routes;
     std::vector<std::string> route_paths;
     std::shared_mutex routes_mutex;
     std::atomic<bool> routes_frozen{false};  // Skip lock after startup
-    std::atomic<std::shared_ptr<CorsConfig>> cors_config;
+    AtomicSharedPtr<CorsConfig> cors_config;
     bool cors_enabled = false;  // Cached bool — avoids atomic shared_ptr load per request
     const CorsConfig* cors_ptr_cached = nullptr;       // Raw pointer — set once in configure_cors
-    std::atomic<std::shared_ptr<TrustedHostConfig>> trusted_host_config;
+    AtomicSharedPtr<TrustedHostConfig> trusted_host_config;
     bool trusted_host_enabled = false;                  // Cached bool — skip atomic load per request
     const TrustedHostConfig* th_ptr_cached = nullptr;   // Raw pointer — set once
     std::unordered_map<uint16_t, PyObject*> exception_handlers;
@@ -237,7 +250,7 @@ typedef struct {
     // Set by handle_http before returning Py_True. Python reads via tp_members.
     // Avoids per-request PyTuple_New(2) + PyLong_FromLongLong() allocation.
     Py_ssize_t last_consumed = 0;
-} CoreAppObject;
+};
 
 // ── MatchResult Python object ───────────────────────────────────────────────
 

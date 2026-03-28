@@ -606,8 +606,8 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
         new (&self->routes) std::vector<RouteInfo>();
         new (&self->route_paths) std::vector<std::string>();
         new (&self->routes_mutex) std::shared_mutex();
-        new (&self->cors_config) std::atomic<std::shared_ptr<CorsConfig>>();
-        new (&self->trusted_host_config) std::atomic<std::shared_ptr<TrustedHostConfig>>();
+        new (&self->cors_config) AtomicSharedPtr<CorsConfig>();
+        new (&self->trusted_host_config) AtomicSharedPtr<TrustedHostConfig>();
         new (&self->exception_handlers) std::unordered_map<uint16_t, PyObject*>();
         self->route_counter.store(0);
         self->counters.total_requests = 0;
@@ -674,8 +674,8 @@ static void CoreApp_dealloc(CoreAppObject* self) {
     self->routes.~vector();
     self->route_paths.~vector();
     self->routes_mutex.~shared_mutex();
-    self->cors_config.~atomic();
-    self->trusted_host_config.~atomic();
+    self->cors_config.~AtomicSharedPtr();
+    self->trusted_host_config.~AtomicSharedPtr();
     self->exception_handlers.~unordered_map();
     Py_XDECREF(self->type_exception_handlers);
     Py_XDECREF(self->openapi_json_resp);
