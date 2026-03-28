@@ -5,9 +5,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# ── Find Python ──────────────────────────────────────────────────────────────
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
-
 # ── Sources ──────────────────────────────────────────────────────────────────
 set(SOURCES
     src/module.cpp
@@ -45,7 +42,7 @@ set(THIRD_PARTY_C_SOURCES
 )
 set_source_files_properties(${THIRD_PARTY_C_SOURCES} PROPERTIES LANGUAGE C)
 
-# ── Build the extension module ───────────────────────────────────────────────
+# ── Build the extension module (scikit-build-core provides Python3) ──────────
 Python3_add_library(_astraapi_core MODULE ${SOURCES} ${THIRD_PARTY_C_SOURCES})
 
 target_include_directories(_astraapi_core PRIVATE
@@ -64,10 +61,17 @@ if(MSVC)
     )
     target_link_options(_astraapi_core PRIVATE /LTCG)
 else()
-    # GCC / Clang (Linux, macOS)
+    # -march=native is unsafe for cross-compilation (e.g. macOS arm64 runner building x86_64)
+    # Only use it when not cross-compiling
+    if(NOT CMAKE_CROSSCOMPILING AND NOT DEFINED ENV{ARCHFLAGS})
+        set(_MARCH_FLAG -march=native)
+    else()
+        set(_MARCH_FLAG "")
+    endif()
+
     target_compile_options(_astraapi_core PRIVATE
         -O3
-        -march=native
+        ${_MARCH_FLAG}
         -flto
         -fno-math-errno
         -funroll-loops
@@ -78,21 +82,20 @@ else()
     target_compile_options(_astraapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
     target_compile_options(_astraapi_core PRIVATE -fvisibility=hidden)
     target_compile_options(_astraapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>)
-
-    # -Wno-free-nonheap-object: suppress GCC 14 false positive in LTO-inlined vector::push_back
     target_link_options(_astraapi_core PRIVATE -flto -Wno-free-nonheap-object)
 endif()
 
-
-# ── Link system libs ────────────────────────────────────────────────────────
-# Try to find libdeflate (2-3x faster single-shot gzip); fall back to zlib
+# ── Link system libs ─────────────────────────────────────────────────────────
 find_library(LIBDEFLATE deflate)
 find_library(BROTLI_ENC brotlienc)
 find_library(BROTLI_DEC brotlidec)
 
 if(MSVC)
-    find_package(ZLIB REQUIRED)
-    target_link_libraries(_astraapi_core PRIVATE ZLIB::ZLIB ws2_32)
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_link_libraries(_astraapi_core PRIVATE ZLIB::ZLIB)
+    endif()
+    target_link_libraries(_astraapi_core PRIVATE ws2_32)
 else()
     target_link_libraries(_astraapi_core PRIVATE z)
 endif()
@@ -102,24 +105,18 @@ if(LIBDEFLATE)
     target_compile_definitions(_astraapi_core PRIVATE HAS_LIBDEFLATE=1)
     message(STATUS "libdeflate found — using fast single-shot gzip compression")
 else()
-    message(STATUS "libdeflate not found — using zlib for gzip compression")
+    message(STATUS "libdeflate not found — falling back to zlib")
 endif()
 
 if(BROTLI_ENC AND BROTLI_DEC)
     target_link_libraries(_astraapi_core PRIVATE ${BROTLI_ENC} ${BROTLI_DEC})
     target_compile_definitions(_astraapi_core PRIVATE HAS_BROTLI=1)
 else()
-    message(STATUS "Brotli not found — compression will fall back to gzip only")
+    message(STATUS "Brotli not found — gzip only")
 endif()
 
-# ── yyjson optimization: strict JSON mode + SIMD (implied by -march=native) ──
-target_compile_definitions(_astraapi_core PRIVATE
-    YYJSON_DISABLE_NON_STANDARD=1
-)
+target_compile_definitions(_astraapi_core PRIVATE YYJSON_DISABLE_NON_STANDARD=1)
 
-# ── Output name: match Python's expected module name ─────────────────────────
-# Linux:   _astraapi_core.cpython-311-x86_64-linux-gnu.so
-# Windows: _astraapi_core.pyd
 set_target_properties(_astraapi_core PROPERTIES
     PREFIX ""
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
