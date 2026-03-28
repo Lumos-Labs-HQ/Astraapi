@@ -26,7 +26,6 @@ archive.zip
 .*.sw?
 .cache
 
-.github
 
 # macOS
 .DS_Store
