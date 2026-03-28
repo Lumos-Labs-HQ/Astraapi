@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from astraapi import AstraAPI
+from astraapi.middleware.trustedhost import TrustedHostMiddleware
 
-app = FastAPI()
+app = AstraAPI()
 
 app.add_middleware(
     TrustedHostMiddleware, allowed_hosts=["example.com", "*.example.com"]

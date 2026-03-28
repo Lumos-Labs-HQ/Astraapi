@@ -1,9 +1,9 @@
 from typing import Union
 
-from fastapi import APIRouter, FastAPI
+from astraapi import APIRouter, AstraAPI
 from pydantic import BaseModel, HttpUrl
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Invoice(BaseModel):

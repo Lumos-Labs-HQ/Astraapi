@@ -76,12 +76,12 @@ static inline bool ci_contains(const char* s, size_t s_len, const char* needle, 
 
 // ── Module-level cached imports (consolidated, cleaned up at exit) ────────────
 static PyObject* s_http_exc_type = nullptr;         // starlette.exceptions.HTTPException
-static PyObject* s_fastapi_http_exc_type = nullptr;  // fastapi.exceptions.HTTPException
-static PyObject* s_validation_exc_type = nullptr;    // fastapi.exceptions.RequestValidationError
-static PyObject* s_resume_func = nullptr;            // fastapi._core_app._resume_coro
-static PyObject* s_request_body_to_args = nullptr;   // fastapi.dependencies.utils.request_body_to_args
-static PyObject* s_form_data_class = nullptr;         // fastapi._datastructures_impl.FormData
-static PyObject* s_upload_file_class = nullptr;       // fastapi._datastructures_impl.UploadFile
+static PyObject* s_astraapi_http_exc_type = nullptr;  // astraapi.exceptions.HTTPException
+static PyObject* s_validation_exc_type = nullptr;    // astraapi.exceptions.RequestValidationError
+static PyObject* s_resume_func = nullptr;            // astraapi._core_app._resume_coro
+static PyObject* s_request_body_to_args = nullptr;   // astraapi.dependencies.utils.request_body_to_args
+static PyObject* s_form_data_class = nullptr;         // astraapi._datastructures_impl.FormData
+static PyObject* s_upload_file_class = nullptr;       // astraapi._datastructures_impl.UploadFile
 
 // Pre-interned strings for transport method calls (cleaned up at exit)
 static PyObject* g_str_write = nullptr;
@@ -180,7 +180,7 @@ static inline PyObject* get_cached_method(const char* data, size_t len, bool& is
 
 void cleanup_cached_refs() {
     Py_CLEAR(s_http_exc_type);
-    Py_CLEAR(s_fastapi_http_exc_type);
+    Py_CLEAR(s_astraapi_http_exc_type);
     Py_CLEAR(s_validation_exc_type);
     Py_CLEAR(s_resume_func);
     Py_CLEAR(s_request_body_to_args);
@@ -238,26 +238,26 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
         if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
         else PyErr_Clear();
     }
-    if (!s_fastapi_http_exc_type) {
-        PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
-        if (mod) s_fastapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+    if (!s_astraapi_http_exc_type) {
+        PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
+        if (mod) s_astraapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
         else PyErr_Clear();
     }
     if (!s_validation_exc_type) {
-        PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
+        PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
         if (mod) s_validation_exc_type = PyObject_GetAttrString(mod.get(), "RequestValidationError");
         else PyErr_Clear();
     }
 
     // Pre-import request_body_to_args (avoids 3-8ms lazy import on first body request)
     if (!s_request_body_to_args) {
-        PyRef mod(PyImport_ImportModule("fastapi.dependencies.utils"));
+        PyRef mod(PyImport_ImportModule("astraapi.dependencies.utils"));
         if (mod) s_request_body_to_args = PyObject_GetAttrString(mod.get(), "request_body_to_args");
         else PyErr_Clear();
     }
     // Pre-import FormData + UploadFile classes
     if (!s_form_data_class || !s_upload_file_class) {
-        PyRef mod(PyImport_ImportModule("fastapi._datastructures_impl"));
+        PyRef mod(PyImport_ImportModule("astraapi._datastructures_impl"));
         if (mod) {
             if (!s_form_data_class)
                 s_form_data_class = PyObject_GetAttrString(mod.get(), "FormData");
@@ -349,7 +349,7 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
 }
 
 // ── HTTPException type check helper ──────────────────────────────────────────
-// Checks both starlette.exceptions.HTTPException and fastapi.exceptions.HTTPException
+// Checks both starlette.exceptions.HTTPException and astraapi.exceptions.HTTPException
 // since they are separate class hierarchies.
 static bool is_http_exception(PyObject* exc_type) {
     if (!exc_type) return false;
@@ -358,9 +358,9 @@ static bool is_http_exception(PyObject* exc_type) {
         if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
         else PyErr_Clear();
     }
-    if (!s_fastapi_http_exc_type) {
-        PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
-        if (mod) s_fastapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+    if (!s_astraapi_http_exc_type) {
+        PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
+        if (mod) s_astraapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
         else PyErr_Clear();
     }
     int r;
@@ -369,8 +369,8 @@ static bool is_http_exception(PyObject* exc_type) {
         if (r < 0) PyErr_Clear();
         if (r == 1) return true;
     }
-    if (s_fastapi_http_exc_type) {
-        r = PyObject_IsSubclass(exc_type, s_fastapi_http_exc_type);
+    if (s_astraapi_http_exc_type) {
+        r = PyObject_IsSubclass(exc_type, s_astraapi_http_exc_type);
         if (r < 0) PyErr_Clear();
         if (r == 1) return true;
     }
@@ -380,7 +380,7 @@ static bool is_http_exception(PyObject* exc_type) {
 static bool is_validation_exception(PyObject* exc_type) {
     if (!exc_type) return false;
     if (!s_validation_exc_type) {
-        PyRef mod(PyImport_ImportModule("fastapi.exceptions"));
+        PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
         if (mod) s_validation_exc_type = PyObject_GetAttrString(mod.get(), "RequestValidationError");
         else PyErr_Clear();
     }
@@ -421,7 +421,7 @@ static PyMemberDef InlineResult_members[] = {
 
 PyTypeObject InlineResultType = {
     .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_fastapi_core.InlineResult",
+    .tp_name = "_astraapi_core.InlineResult",
     .tp_basicsize = sizeof(InlineResultObject),
     .tp_dealloc = (destructor)InlineResult_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
@@ -503,7 +503,7 @@ static PyMethodDef MatchResult_methods[] = {
 
 PyTypeObject MatchResultType = {
     .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_fastapi_core.MatchResult",
+    .tp_name = "_astraapi_core.MatchResult",
     .tp_basicsize = sizeof(MatchResultObject),
     .tp_dealloc = (destructor)MatchResult_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
@@ -587,7 +587,7 @@ static PyMethodDef ResponseData_methods[] = {
 
 PyTypeObject ResponseDataType = {
     .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_fastapi_core.ResponseData",
+    .tp_name = "_astraapi_core.ResponseData",
     .tp_basicsize = sizeof(ResponseDataObject),
     .tp_dealloc = (destructor)ResponseData_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
@@ -903,7 +903,7 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
 
     // Build Swagger UI HTML with substituted title, openapi_url, and oauth2_redirect_url
     {
-        const std::string title = "FastAPI - Swagger UI";
+        const std::string title = "AstraAPI - Swagger UI";
         const std::string& openapi_url = self->openapi_url;
         const std::string& oauth2_url = self->oauth2_redirect_url;
         // SWAGGER_UI_HTML has 4 %s placeholders: title, openapi_url, extra_params, oauth2_redirect_url
@@ -927,7 +927,7 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
 
     // Build ReDoc HTML with substituted title and openapi_url
     {
-        const std::string title = "FastAPI - ReDoc";
+        const std::string title = "AstraAPI - ReDoc";
         const std::string& openapi_url = self->openapi_url;
         // REDOC_HTML has 2 %s placeholders: title, openapi_url
         std::string html;
@@ -964,7 +964,7 @@ static PyObject* CoreApp_set_swagger_ui_parameters(CoreAppObject* self, PyObject
     self->swagger_ui_extra_params = params;
     // Rebuild docs HTML if already built
     if (self->docs_html_resp) {
-        const std::string title = "FastAPI - Swagger UI";
+        const std::string title = "AstraAPI - Swagger UI";
         const std::string& openapi_url = self->openapi_url;
         const std::string& oauth2_url = self->oauth2_redirect_url;
         const std::string& extra_params = self->swagger_ui_extra_params;
@@ -1320,7 +1320,7 @@ static inline PyObject* coerce_param(std::string_view val, ParamType type_tag) {
         case TYPE_INT: {
             // Return original string so param_validator passes it to Pydantic.
             // This ensures validation error 'input' field shows the raw string
-            // (e.g. "42") not the coerced int (42), matching standard FastAPI.
+            // (e.g. "42") not the coerced int (42), matching standard AstraAPI.
             // Pydantic coerces "42" -> 42 on success; on failure shows "42".
             return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
         }
@@ -1328,7 +1328,7 @@ static inline PyObject* coerce_param(std::string_view val, ParamType type_tag) {
             // Return original string so that param_validator passes the original
             // string to Pydantic — ensuring validation error 'input' field shows
             // the raw string value ('2') not the coerced float (2.0), matching
-            // standard FastAPI behaviour.
+            // standard AstraAPI behaviour.
             return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
         }
         case TYPE_BOOL: {
@@ -1362,7 +1362,7 @@ static void log_and_clear_pyerr(const char* context) {
     PyErr_NormalizeException(&type, &value, &tb);
     PyRef val_str(value ? PyObject_Str(value) : nullptr);
     const char* msg = val_str ? PyUnicode_AsUTF8(val_str.get()) : "<unknown>";
-    fprintf(stderr, "[fastapi-cpp] %s: %s\n", context, msg ? msg : "<unknown>");
+    fprintf(stderr, "[astraapi-cpp] %s: %s\n", context, msg ? msg : "<unknown>");
     Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
 }
 
@@ -3876,7 +3876,7 @@ static PyObject* dispatch_one_request(
                                         // File upload — create UploadFile(filename, file=BytesIO(data), ...)
                                         // Lazy-init: get UploadFile class if not already cached
                                         if (!s_upload_file_class) {
-                                            PyRef m(PyImport_ImportModule("fastapi._datastructures_impl"));
+                                            PyRef m(PyImport_ImportModule("astraapi._datastructures_impl"));
                                             if (m) {
                                                 s_upload_file_class = PyObject_GetAttrString(m.get(), "UploadFile");
                                             } else { PyErr_Clear(); }
@@ -4207,7 +4207,7 @@ static PyObject* dispatch_one_request(
 
     // For form routes with Pydantic validation: wrap the form dict in a FormData instance
     // so request_body_to_args calls _extract_form_body which fills in model defaults.
-    // This ensures error "input" shows the defaults (matching standard FastAPI behavior).
+    // This ensures error "input" shows the defaults (matching standard AstraAPI behavior).
     if (is_form_local && has_body_params_local && s_form_data_class) {
         PyObject* src = (json_body_obj != Py_None) ? json_body_obj : nullptr;
         PyRef empty_dict;
@@ -4619,7 +4619,7 @@ static PyObject* dispatch_one_request(
                                   }
                                 }
                                 if (mv_handler) {
-                                    if (!s_mv_rve_cls) { PyRef em(PyImport_ImportModule("fastapi.exceptions")); if (em) s_mv_rve_cls = PyObject_GetAttrString(em.get(), "RequestValidationError"); }
+                                    if (!s_mv_rve_cls) { PyRef em(PyImport_ImportModule("astraapi.exceptions")); if (em) s_mv_rve_cls = PyObject_GetAttrString(em.get(), "RequestValidationError"); }
                                     if (s_mv_rve_cls) {
                                         if (!s_mv_body_kw) s_mv_body_kw = PyUnicode_InternFromString("body");
                                         PyRef mv_kw(PyDict_New()); if (mv_kw) PyDict_SetItem(mv_kw.get(), s_mv_body_kw, json_body_obj);
@@ -4681,7 +4681,7 @@ static PyObject* dispatch_one_request(
 
         // Lazy-load request_body_to_args function (one-time)
         if (!s_request_body_to_args) {
-            PyRef deps_mod(PyImport_ImportModule("fastapi.dependencies.utils"));
+            PyRef deps_mod(PyImport_ImportModule("astraapi.dependencies.utils"));
             if (deps_mod) {
                 s_request_body_to_args = PyObject_GetAttrString(deps_mod.get(), "request_body_to_args");
             }
@@ -4742,7 +4742,7 @@ static PyObject* dispatch_one_request(
                                     if (handler) {
                                         // Create RequestValidationError to pass to handler
                                         if (!s_rve_cls2) {
-                                            PyRef exc_mod(PyImport_ImportModule("fastapi.exceptions"));
+                                            PyRef exc_mod(PyImport_ImportModule("astraapi.exceptions"));
                                             if (exc_mod) s_rve_cls2 = PyObject_GetAttrString(exc_mod.get(), "RequestValidationError");
                                         }
                                         if (s_rve_cls2) {
@@ -5140,7 +5140,7 @@ body_done:
             PyBytes_AsStringAndSize(body_attr.get(), &resp_body, &resp_body_len);
 
             // Extract raw_headers to build custom header block
-            // Local fastapi Response uses _raw_headers (list), while Starlette
+            // Local astraapi Response uses _raw_headers (list), while Starlette
             // uses raw_headers (also list). Try _raw_headers first (faster), fall back.
             PyRef raw_hdrs;
             if (s_attr_raw_headers && PyObject_HasAttr(raw_result, s_attr_raw_headers)) {
@@ -5257,7 +5257,7 @@ body_done:
         // ── Pydantic model: no response_model_field configured ──────────────────
         // model_dump_json(by_alias=True) returns JSON bytes directly — zero re-encode overhead.
         // Fixes endpoints that return Pydantic models without response_model_field.
-        // by_alias=True matches FastAPI's jsonable_encoder default behavior.
+        // by_alias=True matches AstraAPI's jsonable_encoder default behavior.
         {
             if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
             if (!s_by_alias_kw) s_by_alias_kw = PyUnicode_InternFromString("by_alias");
@@ -5266,7 +5266,7 @@ body_done:
                 Py_DECREF(raw_result);
                 raw_result = nullptr;
                 if (mdj_method) {
-                    // Call model_dump_json(by_alias=True) to match FastAPI's jsonable_encoder
+                    // Call model_dump_json(by_alias=True) to match AstraAPI's jsonable_encoder
                     PyRef kw(PyDict_New());
                     if (kw) PyDict_SetItem(kw.get(), s_by_alias_kw, Py_True);
                     PyRef json_bytes(PyObject_Call(mdj_method.get(), g_empty_tuple, kw.get()));
@@ -5993,7 +5993,7 @@ static PyObject* CoreApp_build_response_from_any(
 
     // Pydantic model: use model_dump_json(by_alias=True) → JSON bytes directly.
     // Faster than model_dump(mode='json') + yyjson re-serialization.
-    // by_alias=True matches FastAPI's jsonable_encoder default behavior.
+    // by_alias=True matches AstraAPI's jsonable_encoder default behavior.
     {
         if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
         if (!s_by_alias_kw) s_by_alias_kw = PyUnicode_InternFromString("by_alias");
@@ -6062,7 +6062,7 @@ static PyMemberDef PreparedRequest_members[] = {
 
 PyTypeObject PreparedRequestType = {
     .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_fastapi_core.PreparedRequest",
+    .tp_name = "_astraapi_core.PreparedRequest",
     .tp_basicsize = sizeof(PreparedRequestObject),
     .tp_dealloc = (destructor)PreparedRequest_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
@@ -6654,7 +6654,7 @@ static PyMemberDef CoreApp_members[] = {
 
 PyTypeObject CoreAppType = {
     .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_fastapi_core.CoreApp",
+    .tp_name = "_astraapi_core.CoreApp",
     .tp_basicsize = sizeof(CoreAppObject),
     .tp_dealloc = (destructor)CoreApp_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,

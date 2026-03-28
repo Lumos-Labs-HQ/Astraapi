@@ -2,7 +2,7 @@ import importlib
 
 import pytest
 from dirty_equals import IsList
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from ...utils import needs_py310
 
@@ -164,7 +164,7 @@ def test_openapi_schema(client: TestClient):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/{item_id}": {
                 "put": {

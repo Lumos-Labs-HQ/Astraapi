@@ -1,13 +1,13 @@
-from fastapi import APIRouter, FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI
+from astraapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from astraapi.testclient import TestClient
 
 
 class OverrideResponse(JSONResponse):
     media_type = "application/x-override"
 
 
-app = FastAPI()
+app = AstraAPI()
 router_a = APIRouter()
 router_a_a = APIRouter()
 router_a_b_override = APIRouter()  # Overrides default class

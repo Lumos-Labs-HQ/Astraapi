@@ -3,15 +3,15 @@
 from typing import Annotated, Union
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 from pydantic import BaseModel
 
 
 @pytest.fixture(name="client")
 def client_fixture() -> TestClient:
-    from fastapi import Body
+    from astraapi import Body
     from pydantic import Discriminator, Tag
 
     class Cat(BaseModel):
@@ -31,7 +31,7 @@ def client_fixture() -> TestClient:
         Discriminator(get_pet_type),
     ]
 
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.post("/pet/assignment")
     async def create_pet_assignment(pet: Pet = Body()):
@@ -63,7 +63,7 @@ def test_openapi_schema(client: TestClient) -> None:
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/pet/assignment": {
                     "post": {

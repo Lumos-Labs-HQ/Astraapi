@@ -1,9 +1,9 @@
 from collections.abc import Callable
 from typing import Annotated
 
-from fastapi import Body, FastAPI, HTTPException, Request, Response
-from fastapi.exceptions import RequestValidationError
-from fastapi.routing import APIRoute
+from astraapi import Body, AstraAPI, HTTPException, Request, Response
+from astraapi.exceptions import RequestValidationError
+from astraapi.routing import APIRoute
 
 
 class ValidationErrorLoggingRoute(APIRoute):
@@ -21,7 +21,7 @@ class ValidationErrorLoggingRoute(APIRoute):
         return custom_route_handler
 
 
-app = FastAPI()
+app = AstraAPI()
 app.router.route_class = ValidationErrorLoggingRoute
 
 

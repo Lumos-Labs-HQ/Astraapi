@@ -1,10 +1,10 @@
-from fastapi import FastAPI, Request, WebSocket
-from fastapi.exceptions import (
+from astraapi import AstraAPI, Request, WebSocket
+from astraapi.exceptions import (
     RequestValidationError,
     ResponseValidationError,
     WebSocketRequestValidationError,
 )
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 
@@ -22,8 +22,8 @@ class ExceptionCapture:
         return exc
 
 
-app = FastAPI()
-sub_app = FastAPI()
+app = AstraAPI()
+sub_app = AstraAPI()
 captured_exception = ExceptionCapture()
 
 app.mount(path="/sub", app=sub_app)

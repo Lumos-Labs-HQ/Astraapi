@@ -1,8 +1,8 @@
 from typing import Annotated, Union
 
-from fastapi import Cookie, FastAPI
+from astraapi import Cookie, AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/")

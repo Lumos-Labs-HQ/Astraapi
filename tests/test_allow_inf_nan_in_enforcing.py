@@ -1,10 +1,10 @@
 from typing import Annotated
 
 import pytest
-from fastapi import Body, FastAPI, Query
-from fastapi.testclient import TestClient
+from astraapi import Body, AstraAPI, Query
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/")

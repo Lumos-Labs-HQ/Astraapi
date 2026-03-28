@@ -22,9 +22,9 @@ def get_module(request: pytest.FixtureRequest):
 
 def test_say_hi(module: ModuleType):
     with patch("builtins.print") as mock_print:
-        module.say_hi("FastAPI")
+        module.say_hi("AstraAPI")
 
-    mock_print.assert_called_once_with("Hey FastAPI!")
+    mock_print.assert_called_once_with("Hey AstraAPI!")
 
     with pytest.raises(
         TypeError,

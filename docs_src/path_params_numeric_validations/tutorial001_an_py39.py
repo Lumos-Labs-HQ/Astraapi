@@ -1,8 +1,8 @@
 from typing import Annotated, Union
 
-from fastapi import FastAPI, Path, Query
+from astraapi import AstraAPI, Path, Query
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/{item_id}")

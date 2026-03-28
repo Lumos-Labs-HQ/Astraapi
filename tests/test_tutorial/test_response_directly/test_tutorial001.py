@@ -1,7 +1,7 @@
 import importlib
 
 import pytest
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from ...utils import needs_py310
 
@@ -42,7 +42,7 @@ def test_openapi_schema_pv2(client: TestClient):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "info": {
-            "title": "FastAPI",
+            "title": "AstraAPI",
             "version": "0.1.0",
         },
         "openapi": "3.1.0",

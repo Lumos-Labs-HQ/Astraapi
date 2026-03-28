@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+from astraapi import AstraAPI
+from astraapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 
-app = FastAPI()
+app = AstraAPI()
 
 app.add_middleware(HTTPSRedirectMiddleware)
 

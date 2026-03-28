@@ -1,8 +1,8 @@
-from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI, Request
+from astraapi.responses import JSONResponse
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 router = APIRouter()
 
 

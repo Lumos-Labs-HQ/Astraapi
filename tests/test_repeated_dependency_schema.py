@@ -1,7 +1,7 @@
-from fastapi import Depends, FastAPI, Header, status
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Header, status
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def get_header(*, someheader: str = Header()):
@@ -51,7 +51,7 @@ schema = {
             },
         }
     },
-    "info": {"title": "FastAPI", "version": "0.1.0"},
+    "info": {"title": "AstraAPI", "version": "0.1.0"},
     "openapi": "3.1.0",
     "paths": {
         "/": {

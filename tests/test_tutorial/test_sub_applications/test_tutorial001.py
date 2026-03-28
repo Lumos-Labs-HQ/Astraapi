@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from docs_src.sub_applications.tutorial001_py39 import app
 
@@ -6,7 +6,7 @@ client = TestClient(app)
 
 openapi_schema_main = {
     "openapi": "3.1.0",
-    "info": {"title": "FastAPI", "version": "0.1.0"},
+    "info": {"title": "AstraAPI", "version": "0.1.0"},
     "paths": {
         "/app": {
             "get": {
@@ -24,7 +24,7 @@ openapi_schema_main = {
 }
 openapi_schema_sub = {
     "openapi": "3.1.0",
-    "info": {"title": "FastAPI", "version": "0.1.0"},
+    "info": {"title": "AstraAPI", "version": "0.1.0"},
     "paths": {
         "/sub": {
             "get": {

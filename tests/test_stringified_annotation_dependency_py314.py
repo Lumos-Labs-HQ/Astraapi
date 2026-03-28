@@ -1,7 +1,7 @@
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.testclient import TestClient
 
 from .utils import needs_py314
 
@@ -16,7 +16,7 @@ def test_stringified_annotation():
     async def get_current_user() -> DummyUser | None:
         return None
 
-    app = FastAPI()
+    app = AstraAPI()
 
     client = TestClient(app)
 

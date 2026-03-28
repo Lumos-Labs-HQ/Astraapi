@@ -2,10 +2,10 @@ import json
 from typing import Annotated, Any
 
 import pytest
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
-from fastapi.exceptions import FastAPIError
-from fastapi.responses import StreamingResponse
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, Depends, AstraAPI, HTTPException
+from astraapi.exceptions import AstraAPIError
+from astraapi.responses import StreamingResponse
+from astraapi.testclient import TestClient
 
 
 class Session:
@@ -67,7 +67,7 @@ RegularSessionsDep = Annotated[
     tuple[NamedSession, Session], Depends(get_named_regular_func_session)
 ]
 
-app = FastAPI()
+app = AstraAPI()
 router = APIRouter()
 
 
@@ -181,7 +181,7 @@ def test_sub() -> None:
 
 def test_broken_scope() -> None:
     with pytest.raises(
-        FastAPIError,
+        AstraAPIError,
         match='The dependency "get_named_func_session" has a scope of "request", it cannot depend on dependencies with scope "function"',
     ):
 
@@ -220,7 +220,7 @@ def test_router_level_dep_scope_request() -> None:
 
 
 def test_app_level_dep_scope_function() -> None:
-    app = FastAPI(dependencies=[Depends(raise_after_yield, scope="function")])
+    app = AstraAPI(dependencies=[Depends(raise_after_yield, scope="function")])
 
     @app.get("/app-scope-function")
     def get_app_scope_function():
@@ -233,7 +233,7 @@ def test_app_level_dep_scope_function() -> None:
 
 
 def test_app_level_dep_scope_request() -> None:
-    app = FastAPI(dependencies=[Depends(raise_after_yield, scope="request")])
+    app = AstraAPI(dependencies=[Depends(raise_after_yield, scope="request")])
 
     @app.get("/app-scope-request")
     def get_app_scope_request():

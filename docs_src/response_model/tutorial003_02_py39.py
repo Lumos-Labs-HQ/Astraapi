@@ -1,7 +1,7 @@
-from fastapi import FastAPI, Response
-from fastapi.responses import JSONResponse, RedirectResponse
+from astraapi import AstraAPI, Response
+from astraapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/portal")

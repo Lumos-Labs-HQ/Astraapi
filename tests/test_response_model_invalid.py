@@ -1,6 +1,6 @@
 import pytest
-from fastapi import FastAPI
-from fastapi.exceptions import FastAPIError
+from astraapi import AstraAPI
+from astraapi.exceptions import AstraAPIError
 
 
 class NonPydanticModel:
@@ -8,8 +8,8 @@ class NonPydanticModel:
 
 
 def test_invalid_response_model_raises():
-    with pytest.raises(FastAPIError):
-        app = FastAPI()
+    with pytest.raises(AstraAPIError):
+        app = AstraAPI()
 
         @app.get("/", response_model=NonPydanticModel)
         def read_root():
@@ -17,8 +17,8 @@ def test_invalid_response_model_raises():
 
 
 def test_invalid_response_model_sub_type_raises():
-    with pytest.raises(FastAPIError):
-        app = FastAPI()
+    with pytest.raises(AstraAPIError):
+        app = AstraAPI()
 
         @app.get("/", response_model=list[NonPydanticModel])
         def read_root():
@@ -26,8 +26,8 @@ def test_invalid_response_model_sub_type_raises():
 
 
 def test_invalid_response_model_in_responses_raises():
-    with pytest.raises(FastAPIError):
-        app = FastAPI()
+    with pytest.raises(AstraAPIError):
+        app = AstraAPI()
 
         @app.get("/", responses={"500": {"model": NonPydanticModel}})
         def read_root():
@@ -35,8 +35,8 @@ def test_invalid_response_model_in_responses_raises():
 
 
 def test_invalid_response_model_sub_type_in_responses_raises():
-    with pytest.raises(FastAPIError):
-        app = FastAPI()
+    with pytest.raises(AstraAPIError):
+        app = AstraAPI()
 
         @app.get("/", responses={"500": {"model": list[NonPydanticModel]}})
         def read_root():

@@ -1,8 +1,8 @@
-from fastapi import Body, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Body, AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 media_type = "application/vnd.api+json"
 
@@ -39,7 +39,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/products": {
                 "post": {

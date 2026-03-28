@@ -1,10 +1,10 @@
 from typing import Annotated
 
 import pytest
-from fastapi import APIRouter, FastAPI, Query
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI, Query
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/default")
@@ -74,7 +74,7 @@ def test_get(path, expected_status, expected_response):
 
 
 def test_multiple_path():
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/test1")
     @app.get("/test2")
@@ -100,7 +100,7 @@ def test_multiple_path():
 
 
 def test_nested_router():
-    app = FastAPI()
+    app = AstraAPI()
 
     router = APIRouter(prefix="/nested")
 
@@ -122,7 +122,7 @@ def test_openapi_schema():
     assert response.status_code == 200
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/default": {
                 "get": {

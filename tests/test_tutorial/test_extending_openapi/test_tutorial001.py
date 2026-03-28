@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from docs_src.extending_openapi.tutorial001_py39 import app
 
@@ -22,7 +22,7 @@ def test_openapi_schema():
             "description": "Here's a longer description of the custom **OpenAPI** schema",
             "version": "2.5.0",
             "x-logo": {
-                "url": "https://fastapi.tiangolo.com/img/logo-margin/logo-teal.png"
+                "url": "https://astraapi.tiangolo.com/img/logo-margin/logo-teal.png"
             },
         },
         "paths": {

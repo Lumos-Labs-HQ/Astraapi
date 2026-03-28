@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from astraapi import AstraAPI, Request
+from astraapi.responses import JSONResponse
 
 
 class UnicornException(Exception):
@@ -7,7 +7,7 @@ class UnicornException(Exception):
         self.name = name
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.exception_handler(UnicornException)

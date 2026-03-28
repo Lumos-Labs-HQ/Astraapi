@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from docs_src.custom_response import tutorial008_py39
 from docs_src.custom_response.tutorial008_py39 import app

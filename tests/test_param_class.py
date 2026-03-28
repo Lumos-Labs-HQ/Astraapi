@@ -1,10 +1,10 @@
 from typing import Optional
 
-from fastapi import FastAPI
-from fastapi.params import Param
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.params import Param
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/")

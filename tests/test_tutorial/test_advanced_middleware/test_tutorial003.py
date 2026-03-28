@@ -1,5 +1,5 @@
-from fastapi.responses import PlainTextResponse
-from fastapi.testclient import TestClient
+from astraapi.responses import PlainTextResponse
+from astraapi.testclient import TestClient
 
 from docs_src.advanced_middleware.tutorial003_py39 import app
 

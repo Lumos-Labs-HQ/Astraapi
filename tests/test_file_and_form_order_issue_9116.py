@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Annotated
 
 import pytest
-from fastapi import FastAPI, File, Form
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, File, Form
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/file_before_form")

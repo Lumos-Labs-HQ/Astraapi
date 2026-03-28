@@ -1,9 +1,9 @@
 from typing import Any
 
 import orjson
-from fastapi import FastAPI, Response
+from astraapi import AstraAPI, Response
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class CustomORJSONResponse(Response):

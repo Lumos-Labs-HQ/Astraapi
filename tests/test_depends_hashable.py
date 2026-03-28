@@ -2,7 +2,7 @@
 # as other tools that use them depend on that
 # Ref: https://github.com/fastapi/fastapi/pull/14320
 
-from fastapi import Depends, Security
+from astraapi import Depends, Security
 
 
 def dep():

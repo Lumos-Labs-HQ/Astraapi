@@ -1,4 +1,4 @@
-from fastapi import Header, HTTPException
+from astraapi import Header, HTTPException
 
 
 async def get_token_header(x_token: str = Header()):

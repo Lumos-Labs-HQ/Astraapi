@@ -15,7 +15,7 @@ def _patch_starlette_routing():
     Tests that do `from starlette.routing import Route` get the project's Route,
     so isinstance() checks pass without any starlette dependency in production code.
     """
-    import fastapi._routing_base as _rb
+    import astraapi._routing_base as _rb
     import starlette.routing as _sr
 
     _sr.BaseRoute = _rb.BaseRoute

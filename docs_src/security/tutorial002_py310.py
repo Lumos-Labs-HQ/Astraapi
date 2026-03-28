@@ -1,8 +1,8 @@
-from fastapi import Depends, FastAPI
-from fastapi.security import OAuth2PasswordBearer
+from astraapi import Depends, AstraAPI
+from astraapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 

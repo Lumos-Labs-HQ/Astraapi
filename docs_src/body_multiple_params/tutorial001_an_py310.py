@@ -1,9 +1,9 @@
 from typing import Annotated
 
-from fastapi import FastAPI, Path
+from astraapi import AstraAPI, Path
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Item(BaseModel):

@@ -3,8 +3,8 @@ from contextlib import contextmanager
 from typing import Annotated, Any
 
 import pytest
-from fastapi import Depends, FastAPI, WebSocket
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, WebSocket
+from astraapi.testclient import TestClient
 
 
 class Session:
@@ -43,7 +43,7 @@ def broken_dep_session() -> Any:
 SessionDep = Annotated[Session, Depends(dep_session)]
 BrokenSessionDep = Annotated[Session, Depends(broken_dep_session)]
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.websocket("/ws")

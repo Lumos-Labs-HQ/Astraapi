@@ -1,9 +1,9 @@
-from fastapi import Depends, FastAPI, Security
-from fastapi.security.open_id_connect_url import OpenIdConnect
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Security
+from astraapi.security.open_id_connect_url import OpenIdConnect
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 oid = OpenIdConnect(openIdConnectUrl="/openid")
 
@@ -49,7 +49,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/users/me": {
                 "get": {

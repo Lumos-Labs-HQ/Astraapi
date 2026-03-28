@@ -1,11 +1,11 @@
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import Depends, FastAPI
+from astraapi import Depends, AstraAPI
 
 from . import config
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @lru_cache

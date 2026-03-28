@@ -1,7 +1,7 @@
 import importlib
 
 import pytest
-from fastapi.exceptions import FastAPIError
+from astraapi.exceptions import AstraAPIError
 
 from ...utils import needs_py310
 
@@ -14,5 +14,5 @@ from ...utils import needs_py310
     ],
 )
 def test_invalid_response_model(module_name: str) -> None:
-    with pytest.raises(FastAPIError):
+    with pytest.raises(AstraAPIError):
         importlib.import_module(f"docs_src.response_model.{module_name}")

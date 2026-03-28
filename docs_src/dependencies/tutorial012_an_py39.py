@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from astraapi import Depends, AstraAPI, Header, HTTPException
 
 
 async def verify_token(x_token: Annotated[str, Header()]):
@@ -14,7 +14,7 @@ async def verify_key(x_key: Annotated[str, Header()]):
     return x_key
 
 
-app = FastAPI(dependencies=[Depends(verify_token), Depends(verify_key)])
+app = AstraAPI(dependencies=[Depends(verify_token), Depends(verify_key)])
 
 
 @app.get("/items/")

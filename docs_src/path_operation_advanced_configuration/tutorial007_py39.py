@@ -1,8 +1,8 @@
 import yaml
-from fastapi import FastAPI, HTTPException, Request
+from astraapi import AstraAPI, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Item(BaseModel):

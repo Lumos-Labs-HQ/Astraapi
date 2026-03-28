@@ -1,6 +1,6 @@
 import pytest
-from fastapi import Body, Depends, FastAPI, HTTPException
-from fastapi.testclient import TestClient
+from astraapi import Body, Depends, AstraAPI, HTTPException
+from astraapi.testclient import TestClient
 
 initial_fake_database = {"rick": "Rick Sanchez"}
 
@@ -10,7 +10,7 @@ initial_state = {"except": False, "finally": False}
 
 state = initial_state.copy()
 
-app = FastAPI()
+app = AstraAPI()
 
 
 async def get_database():

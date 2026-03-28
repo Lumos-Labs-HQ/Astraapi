@@ -1,7 +1,7 @@
 import importlib
 
 import pytest
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from ...utils import needs_py310
 
@@ -18,7 +18,7 @@ from ...utils import needs_py310
             marks=(
                 needs_py310,
                 pytest.mark.filterwarnings(
-                    "ignore:`regex` has been deprecated, please use `pattern` instead:fastapi.exceptions.FastAPIDeprecationWarning"
+                    "ignore:`regex` has been deprecated, please use `pattern` instead:astraapi.exceptions.AstraAPIDeprecationWarning"
                 ),
             ),
         ),
@@ -69,7 +69,7 @@ def test_openapi_schema(client: TestClient):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/": {
                 "get": {

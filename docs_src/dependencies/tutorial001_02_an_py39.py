@@ -1,8 +1,8 @@
 from typing import Annotated, Union
 
-from fastapi import Depends, FastAPI
+from astraapi import Depends, AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 async def common_parameters(

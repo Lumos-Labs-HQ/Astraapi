@@ -1,7 +1,7 @@
 from typing import Optional
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 from pydantic import BaseModel, computed_field
 
@@ -30,7 +30,7 @@ class WithComputedField(BaseModel):
 
 
 def get_app_client(separate_input_output_schemas: bool = True) -> TestClient:
-    app = FastAPI(separate_input_output_schemas=separate_input_output_schemas)
+    app = AstraAPI(separate_input_output_schemas=separate_input_output_schemas)
 
     @app.post("/items/", responses={402: {"model": Item}})
     def create_item(item: Item) -> Item:
@@ -165,7 +165,7 @@ def test_openapi_schema():
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/items/": {
                     "get": {
@@ -446,7 +446,7 @@ def test_openapi_schema_no_separate():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/": {
                 "get": {

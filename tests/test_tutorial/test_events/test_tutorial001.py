@@ -1,6 +1,6 @@
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 
 @pytest.fixture(name="app", scope="module")
@@ -10,20 +10,20 @@ def get_app():
     yield app
 
 
-def test_events(app: FastAPI):
+def test_events(app: AstraAPI):
     with TestClient(app) as client:
         response = client.get("/items/foo")
         assert response.status_code == 200, response.text
         assert response.json() == {"name": "Fighters"}
 
 
-def test_openapi_schema(app: FastAPI):
+def test_openapi_schema(app: AstraAPI):
     with TestClient(app) as client:
         response = client.get("/openapi.json")
         assert response.status_code == 200, response.text
         assert response.json() == {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/items/{item_id}": {
                     "get": {

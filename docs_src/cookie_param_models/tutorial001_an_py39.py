@@ -1,9 +1,9 @@
 from typing import Annotated, Union
 
-from fastapi import Cookie, FastAPI
+from astraapi import Cookie, AstraAPI
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Cookies(BaseModel):

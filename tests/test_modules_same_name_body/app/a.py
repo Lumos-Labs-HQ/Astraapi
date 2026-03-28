@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body
+from astraapi import APIRouter, Body
 
 router = APIRouter()
 

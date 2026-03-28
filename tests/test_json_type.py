@@ -1,11 +1,11 @@
 import json
 from typing import Annotated
 
-from fastapi import Cookie, FastAPI, Form, Header, Query
-from fastapi.testclient import TestClient
+from astraapi import Cookie, AstraAPI, Form, Header, Query
+from astraapi.testclient import TestClient
 from pydantic import Json
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/form-json-list")

@@ -1,7 +1,7 @@
-from fastapi import FastAPI, Path, Query
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Path, Query
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/int/{param:int}")

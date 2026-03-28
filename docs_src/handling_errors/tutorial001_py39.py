@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from astraapi import AstraAPI, HTTPException
 
-app = FastAPI()
+app = AstraAPI()
 
 items = {"foo": "The Foo Wrestlers"}
 

@@ -1,7 +1,7 @@
-from fastapi import FastAPI, Request
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Request
+from astraapi.testclient import TestClient
 
-app = FastAPI(openapi_prefix="/api/v1")
+app = AstraAPI(openapi_prefix="/api/v1")
 
 
 @app.get("/app")
@@ -23,7 +23,7 @@ def test_openapi():
     assert response.status_code == 200
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/app": {
                 "get": {

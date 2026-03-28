@@ -1,8 +1,8 @@
 import importlib
 
 import pytest
-from fastapi._compat import PYDANTIC_VERSION_MINOR_TUPLE
-from fastapi.testclient import TestClient
+from astraapi._compat import PYDANTIC_VERSION_MINOR_TUPLE
+from astraapi.testclient import TestClient
 
 from ...utils import needs_py310
 
@@ -67,7 +67,7 @@ def test_openapi_schema(client: TestClient):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/": {
                 "get": {
@@ -106,7 +106,7 @@ def test_openapi_schema(client: TestClient):
                                 ],
                                 "title": "Query string",
                                 "description": "Query string for the items to search in the database that have a good match",
-                                # See https://github.com/pydantic/pydantic/blob/80353c29a824c55dea4667b328ba8f329879ac9f/tests/test_fastapi.sh#L25-L34.
+                                # See https://github.com/pydantic/pydantic/blob/80353c29a824c55dea4667b328ba8f329879ac9f/tests/test_astraapi.sh#L25-L34.
                                 **(
                                     {"deprecated": True}
                                     if PYDANTIC_VERSION_MINOR_TUPLE >= (2, 10)

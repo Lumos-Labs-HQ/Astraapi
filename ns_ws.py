@@ -1,6 +1,6 @@
-from fastapi import FastAPI, WebSocket
+from astraapi import AstraAPI, WebSocket
 
-app = FastAPI()
+app = AstraAPI()
 
 @app.get("/")
 def root():

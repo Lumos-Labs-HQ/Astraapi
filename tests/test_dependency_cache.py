@@ -1,7 +1,7 @@
-from fastapi import Depends, FastAPI, Security
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Security
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 counter_holder = {"counter": 0}
 

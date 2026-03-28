@@ -2,10 +2,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @dataclass

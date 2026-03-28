@@ -1,5 +1,5 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 
@@ -19,7 +19,7 @@ class Model3(BaseModel):
     ref2: Model2
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get(

@@ -1,12 +1,12 @@
 from typing import Annotated
 
 import pytest
-from fastapi import FastAPI, File, UploadFile
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, File, UploadFile
+from astraapi.testclient import TestClient
 
 from .utils import get_body_model_name
 
-app = FastAPI()
+app = AstraAPI()
 
 # =====================================================================================
 # Without aliases

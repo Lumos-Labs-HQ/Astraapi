@@ -1,9 +1,9 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import PlainTextResponse
+from astraapi import AstraAPI, HTTPException
+from astraapi.exceptions import RequestValidationError
+from astraapi.responses import PlainTextResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.exception_handler(StarletteHTTPException)

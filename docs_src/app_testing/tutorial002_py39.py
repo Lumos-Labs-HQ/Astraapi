@@ -1,8 +1,8 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from fastapi.websockets import WebSocket
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
+from astraapi.websockets import WebSocket
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/")

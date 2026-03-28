@@ -1,10 +1,10 @@
 from typing import Annotated
 
 import pytest
-from fastapi import FastAPI, Path
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Path
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/required-str/{p}")

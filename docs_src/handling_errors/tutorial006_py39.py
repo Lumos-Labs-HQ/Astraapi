@@ -1,12 +1,12 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.exception_handlers import (
+from astraapi import AstraAPI, HTTPException
+from astraapi.exception_handlers import (
     http_exception_handler,
     request_validation_exception_handler,
 )
-from fastapi.exceptions import RequestValidationError
+from astraapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.exception_handler(StarletteHTTPException)

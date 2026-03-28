@@ -1,8 +1,8 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException
+from astraapi import Depends, AstraAPI, HTTPException
 
-app = FastAPI()
+app = AstraAPI()
 
 
 data = {

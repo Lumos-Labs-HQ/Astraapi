@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Response, status
+from astraapi import AstraAPI, Response, status
 
-app = FastAPI()
+app = AstraAPI()
 
 tasks = {"foo": "Listen to the Bar Fighters"}
 

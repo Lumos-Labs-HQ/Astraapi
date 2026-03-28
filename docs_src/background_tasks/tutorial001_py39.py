@@ -1,6 +1,6 @@
-from fastapi import BackgroundTasks, FastAPI
+from astraapi import BackgroundTasks, AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def write_notification(email: str, message=""):

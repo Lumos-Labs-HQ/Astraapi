@@ -1,7 +1,7 @@
-from fastapi import FastAPI, Header
+from astraapi import AstraAPI, Header
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class CommonHeaders(BaseModel):

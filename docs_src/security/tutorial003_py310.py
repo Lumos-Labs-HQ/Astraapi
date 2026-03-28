@@ -1,5 +1,5 @@
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from astraapi import Depends, AstraAPI, HTTPException, status
+from astraapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
 fake_users_db = {
@@ -19,7 +19,7 @@ fake_users_db = {
     },
 }
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def fake_hash_password(password: str):

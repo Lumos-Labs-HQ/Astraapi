@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import ORJSONResponse
+from astraapi import AstraAPI
+from astraapi.responses import ORJSONResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/", response_class=ORJSONResponse)

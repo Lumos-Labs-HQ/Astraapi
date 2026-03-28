@@ -1,22 +1,22 @@
 import functools
 
 import pytest
-from fastapi import (
+from astraapi import (
     APIRouter,
     Depends,
-    FastAPI,
+    AstraAPI,
     Header,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
-from fastapi.middleware import Middleware
-from fastapi.testclient import TestClient
+from astraapi.middleware import Middleware
+from astraapi.testclient import TestClient
 
 router = APIRouter()
 prefix_router = APIRouter()
 native_prefix_route = APIRouter(prefix="/native")
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.websocket_route("/")
@@ -105,7 +105,7 @@ async def router_ws_custom_error(websocket: WebSocket):
 
 
 def make_app(app=None, **kwargs):
-    app = app or FastAPI(**kwargs)
+    app = app or AstraAPI(**kwargs)
     app.include_router(router)
     app.include_router(prefix_router, prefix="/prefix")
     app.include_router(native_prefix_route)

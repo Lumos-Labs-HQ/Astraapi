@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from astraapi import AstraAPI
+from astraapi.responses import JSONResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/cookie/")

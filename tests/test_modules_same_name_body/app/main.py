@@ -1,8 +1,8 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
 from . import a, b
 
-app = FastAPI()
+app = AstraAPI()
 
 app.include_router(a.router, prefix="/a")
 app.include_router(b.router, prefix="/b")

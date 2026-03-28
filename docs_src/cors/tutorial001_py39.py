@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from astraapi import AstraAPI
+from astraapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
+app = AstraAPI()
 
 origins = [
     "http://localhost.tiangolo.com",

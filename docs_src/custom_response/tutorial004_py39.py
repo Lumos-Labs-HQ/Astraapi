@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from astraapi import AstraAPI
+from astraapi.responses import HTMLResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def generate_html_response():

@@ -1,7 +1,7 @@
 import pytest
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.exceptions import RequestValidationError
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, HTTPException
+from astraapi.exceptions import RequestValidationError
+from astraapi.testclient import TestClient
 from starlette.responses import JSONResponse
 
 
@@ -17,7 +17,7 @@ def server_error_exception_handler(request, exception):
     return JSONResponse(status_code=500, content={"exception": "server-error"})
 
 
-app = FastAPI(
+app = AstraAPI(
     exception_handlers={
         HTTPException: http_exception_handler,
         RequestValidationError: request_validation_exception_handler,

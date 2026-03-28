@@ -3,11 +3,11 @@ from typing import Optional
 
 import pytest
 
-from fastapi import APIRouter, FastAPI, File, UploadFile
-from fastapi.exceptions import HTTPException
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI, File, UploadFile
+from astraapi.exceptions import HTTPException
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 router = APIRouter()
 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic import BaseModel
 
 
@@ -9,7 +9,7 @@ class Item(BaseModel):
     tax: float | None = None
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.put("/items/{item_id}")

@@ -1,6 +1,6 @@
-from fastapi import BackgroundTasks, Depends, FastAPI
+from astraapi import BackgroundTasks, Depends, AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def write_log(message: str):

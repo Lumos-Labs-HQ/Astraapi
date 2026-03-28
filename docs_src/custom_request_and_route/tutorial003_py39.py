@@ -1,8 +1,8 @@
 import time
 from typing import Callable
 
-from fastapi import APIRouter, FastAPI, Request, Response
-from fastapi.routing import APIRoute
+from astraapi import APIRouter, AstraAPI, Request, Response
+from astraapi.routing import APIRoute
 
 
 class TimedRoute(APIRoute):
@@ -22,7 +22,7 @@ class TimedRoute(APIRoute):
         return custom_route_handler
 
 
-app = FastAPI()
+app = AstraAPI()
 router = APIRouter(route_class=TimedRoute)
 
 

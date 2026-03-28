@@ -1,7 +1,7 @@
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 async def user_exists(user_id: int):
@@ -26,7 +26,7 @@ def test_openapi_schema():
     data = response.json()
     assert data == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/users/{user_id}": {
                 "get": {

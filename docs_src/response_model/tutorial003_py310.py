@@ -1,9 +1,9 @@
 from typing import Any
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic import BaseModel, EmailStr
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class UserIn(BaseModel):

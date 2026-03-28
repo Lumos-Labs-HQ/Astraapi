@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Response
+from astraapi import AstraAPI, Response
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/legacy/")

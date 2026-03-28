@@ -1,7 +1,7 @@
 import importlib
 
 import pytest
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from ...utils import needs_py310
 
@@ -27,7 +27,7 @@ def get_client(request: pytest.FixtureRequest):
     [
         ("/items", None, 200, {"User-Agent": "testclient"}),
         ("/items", {"X-Header": "notvalid"}, 200, {"User-Agent": "testclient"}),
-        ("/items", {"User-Agent": "FastAPI test"}, 200, {"User-Agent": "FastAPI test"}),
+        ("/items", {"User-Agent": "AstraAPI test"}, 200, {"User-Agent": "AstraAPI test"}),
     ],
 )
 def test(path, headers, expected_status, expected_response, client: TestClient):
@@ -41,7 +41,7 @@ def test_openapi_schema(client: TestClient):
     assert response.status_code == 200
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/": {
                 "get": {

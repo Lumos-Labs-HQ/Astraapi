@@ -1,12 +1,12 @@
 # Test security scheme at the top level, including OpenAPI
 # Ref: https://github.com/fastapi/fastapi/discussions/14263
 # Ref: https://github.com/fastapi/fastapi/issues/14271
-from fastapi import Depends, FastAPI
-from fastapi.security import HTTPBearer
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.security import HTTPBearer
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 
-app = FastAPI()
+app = AstraAPI()
 
 bearer_scheme = HTTPBearer()
 
@@ -37,7 +37,7 @@ def test_openapi_schema():
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/": {
                     "get": {

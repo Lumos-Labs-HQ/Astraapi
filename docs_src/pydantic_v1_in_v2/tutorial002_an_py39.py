@@ -1,6 +1,6 @@
 from typing import Union
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic.v1 import BaseModel
 
 
@@ -10,7 +10,7 @@ class Item(BaseModel):
     size: float
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/items/")

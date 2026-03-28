@@ -1,8 +1,8 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 
-app = FastAPI(
+app = AstraAPI(
     servers=[
         {"url": "/", "description": "Default, relative server"},
         {
@@ -33,7 +33,7 @@ def test_openapi_schema():
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "servers": [
                 {"url": "/", "description": "Default, relative server"},
                 {

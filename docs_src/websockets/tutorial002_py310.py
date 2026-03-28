@@ -1,15 +1,15 @@
-from fastapi import (
+from astraapi import (
     Cookie,
     Depends,
-    FastAPI,
+    AstraAPI,
     Query,
     WebSocket,
     WebSocketException,
     status,
 )
-from fastapi.responses import HTMLResponse
+from astraapi.responses import HTMLResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 html = """
 <!DOCTYPE html>

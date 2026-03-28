@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/keyword-weights/", response_model=dict[str, float])

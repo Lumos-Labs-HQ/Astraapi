@@ -2,9 +2,9 @@ import io
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI, UploadFile
-from fastapi.datastructures import Default
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, UploadFile
+from astraapi.datastructures import Default
+from astraapi.testclient import TestClient
 
 
 def test_upload_file_invalid_pydantic_v2():
@@ -29,7 +29,7 @@ def test_default_placeholder_bool():
 def test_upload_file_is_closed(tmp_path: Path):
     path = tmp_path / "test.txt"
     path.write_bytes(b"<file content>")
-    app = FastAPI()
+    app = AstraAPI()
 
     testing_file_store: list[UploadFile] = []
 

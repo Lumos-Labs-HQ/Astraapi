@@ -1,10 +1,10 @@
 from typing import Optional
 
 import pytest
-from fastapi import APIRouter, Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, Depends, AstraAPI
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 router = APIRouter()
 

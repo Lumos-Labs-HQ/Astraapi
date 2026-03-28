@@ -1,8 +1,8 @@
 from typing import Annotated
 
-from fastapi import FastAPI, Form
+from astraapi import AstraAPI, Form
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/login/")

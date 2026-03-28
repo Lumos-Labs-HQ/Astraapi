@@ -1,8 +1,8 @@
 from typing import Annotated, Union
 
-from fastapi import Cookie, Depends, FastAPI
+from astraapi import Cookie, Depends, AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def query_extractor(q: Union[str, None] = None):

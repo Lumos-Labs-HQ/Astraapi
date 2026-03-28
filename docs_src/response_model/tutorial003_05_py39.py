@@ -1,9 +1,9 @@
 from typing import Union
 
-from fastapi import FastAPI, Response
-from fastapi.responses import RedirectResponse
+from astraapi import AstraAPI, Response
+from astraapi.responses import RedirectResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/portal", response_model=None)

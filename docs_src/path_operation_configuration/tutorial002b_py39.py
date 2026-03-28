@@ -1,8 +1,8 @@
 from enum import Enum
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Tags(Enum):

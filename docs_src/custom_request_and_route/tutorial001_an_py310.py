@@ -2,8 +2,8 @@ import gzip
 from collections.abc import Callable
 from typing import Annotated
 
-from fastapi import Body, FastAPI, Request, Response
-from fastapi.routing import APIRoute
+from astraapi import Body, AstraAPI, Request, Response
+from astraapi.routing import APIRoute
 
 
 class GzipRequest(Request):
@@ -27,7 +27,7 @@ class GzipRoute(APIRoute):
         return custom_route_handler
 
 
-app = FastAPI()
+app = AstraAPI()
 app.router.route_class = GzipRoute
 
 

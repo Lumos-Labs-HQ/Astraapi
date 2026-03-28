@@ -2,8 +2,8 @@ import importlib
 from types import ModuleType
 
 import pytest
-from fastapi.exceptions import FastAPIError
-from fastapi.testclient import TestClient
+from astraapi.exceptions import AstraAPIError
+from astraapi.testclient import TestClient
 
 
 @pytest.fixture(
@@ -33,9 +33,9 @@ def test_get(mod: ModuleType):
     assert response.json() == "plumbus"
 
 
-def test_fastapi_error(mod: ModuleType):
+def test_astraapi_error(mod: ModuleType):
     client = TestClient(mod.app)
-    with pytest.raises(FastAPIError) as exc_info:
+    with pytest.raises(AstraAPIError) as exc_info:
         client.get("/items/portal-gun")
     assert "raising an exception and a dependency with yield" in exc_info.value.args[0]
 

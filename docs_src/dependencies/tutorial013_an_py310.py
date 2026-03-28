@@ -1,8 +1,8 @@
 import time
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from astraapi import Depends, AstraAPI, HTTPException
+from astraapi.responses import StreamingResponse
 from sqlmodel import Field, Session, SQLModel, create_engine
 
 engine = create_engine("postgresql+psycopg://postgres:postgres@localhost/db")
@@ -13,7 +13,7 @@ class User(SQLModel, table=True):
     name: str
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def get_session():

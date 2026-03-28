@@ -1,10 +1,10 @@
 from typing import Union
 
 import pytest
-from fastapi import FastAPI
-from fastapi.exceptions import FastAPIError, ResponseValidationError
-from fastapi.responses import JSONResponse, Response
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.exceptions import AstraAPIError, ResponseValidationError
+from astraapi.responses import JSONResponse, Response
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 
@@ -25,7 +25,7 @@ class Item(BaseModel):
     price: float
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/no_response_model-no_annotation-return_model")
@@ -498,8 +498,8 @@ def test_no_response_model_annotation_json_response_class():
 
 
 def test_invalid_response_model_field():
-    app = FastAPI()
-    with pytest.raises(FastAPIError) as e:
+    app = AstraAPI()
+    with pytest.raises(AstraAPIError) as e:
 
         @app.get("/")
         def read_root() -> Union[Response, None]:
@@ -514,7 +514,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/no_response_model-no_annotation-return_model": {
                 "get": {

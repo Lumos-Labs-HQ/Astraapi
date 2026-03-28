@@ -1,8 +1,8 @@
 from typing import Annotated, Any
 
 import pytest
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, HTTPException
+from astraapi.testclient import TestClient
 
 
 class CustomError(Exception):
@@ -21,7 +21,7 @@ def broken_dep() -> Any:
     raise ValueError("Broken after yield")
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/catching")

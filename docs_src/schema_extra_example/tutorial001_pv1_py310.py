@@ -1,7 +1,7 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic.v1 import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Item(BaseModel):

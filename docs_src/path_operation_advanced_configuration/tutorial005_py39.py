@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/", openapi_extra={"x-aperture-labs-portal": "blue"})

@@ -1,9 +1,9 @@
 from typing import Any, Union
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Item(BaseModel):

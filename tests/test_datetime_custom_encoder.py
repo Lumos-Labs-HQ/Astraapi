@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 
@@ -15,7 +15,7 @@ def test_pydanticv2():
         def serialize_datetime(self, dt_field: datetime):
             return dt_field.replace(microsecond=0, tzinfo=timezone.utc).isoformat()
 
-    app = FastAPI()
+    app = AstraAPI()
     model = ModelWithDatetimeField(dt_field=datetime(2019, 1, 1, 8))
 
     @app.get("/model", response_model=ModelWithDatetimeField)

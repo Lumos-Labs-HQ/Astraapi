@@ -1,9 +1,9 @@
 import pytest
-from fastapi import APIRouter, FastAPI
-from fastapi.exceptions import FastAPIError
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI
+from astraapi.exceptions import AstraAPIError
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 router = APIRouter()
 
@@ -32,5 +32,5 @@ def test_use_empty():
 
 def test_include_empty():
     # if both include and router.path are empty - it should raise exception
-    with pytest.raises(FastAPIError):
+    with pytest.raises(AstraAPIError):
         app.include_router(router)

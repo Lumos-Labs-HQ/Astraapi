@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI(docs_url="/documentation", redoc_url=None)
+app = AstraAPI(docs_url="/documentation", redoc_url=None)
 
 
 @app.get("/items/")

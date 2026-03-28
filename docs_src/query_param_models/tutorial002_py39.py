@@ -1,9 +1,9 @@
 from typing import Literal
 
-from fastapi import FastAPI, Query
+from astraapi import AstraAPI, Query
 from pydantic import BaseModel, Field
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class FilterParams(BaseModel):

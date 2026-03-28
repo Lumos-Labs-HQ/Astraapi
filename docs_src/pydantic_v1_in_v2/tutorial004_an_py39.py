@@ -1,7 +1,7 @@
 from typing import Annotated, Union
 
-from fastapi import FastAPI
-from fastapi.temp_pydantic_v1_params import Body
+from astraapi import AstraAPI
+from astraapi.temp_pydantic_v1_params import Body
 from pydantic.v1 import BaseModel
 
 
@@ -11,7 +11,7 @@ class Item(BaseModel):
     size: float
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/items/")

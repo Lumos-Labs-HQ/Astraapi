@@ -1,8 +1,8 @@
 import importlib
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 
 @pytest.fixture(
@@ -19,7 +19,7 @@ def get_app(request: pytest.FixtureRequest):
 
 
 @pytest.fixture(name="client")
-def get_client(app: FastAPI):
+def get_client(app: AstraAPI):
     client = TestClient(app)
     return client
 
@@ -99,7 +99,7 @@ def test_post_body_json(client: TestClient):
     }
 
 
-def test_post_file_no_token(tmp_path, app: FastAPI):
+def test_post_file_no_token(tmp_path, app: AstraAPI):
     path = tmp_path / "test.txt"
     path.write_bytes(b"<file content>")
 
@@ -125,7 +125,7 @@ def test_post_file_no_token(tmp_path, app: FastAPI):
     }
 
 
-def test_post_files_and_token(tmp_path, app: FastAPI):
+def test_post_files_and_token(tmp_path, app: AstraAPI):
     patha = tmp_path / "test.txt"
     pathb = tmp_path / "testb.txt"
     patha.write_text("<file content>")
@@ -151,7 +151,7 @@ def test_openapi_schema(client: TestClient):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/files/": {
                 "post": {

@@ -1,10 +1,10 @@
 from collections.abc import AsyncGenerator, Generator
 
 import pytest
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class CallableDependency:

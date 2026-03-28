@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.openapi.utils import get_openapi
+from astraapi import AstraAPI
+from astraapi.openapi.utils import get_openapi
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/")
@@ -20,7 +20,7 @@ def custom_openapi():
         routes=app.routes,
     )
     openapi_schema["info"]["x-logo"] = {
-        "url": "https://fastapi.tiangolo.com/img/logo-margin/logo-teal.png"
+        "url": "https://astraapi.tiangolo.com/img/logo-margin/logo-teal.png"
     }
     app.openapi_schema = openapi_schema
     return app.openapi_schema

@@ -1,9 +1,9 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 swagger_ui_init_oauth = {"clientId": "the-foo-clients", "appName": "The Predendapp"}
 
-app = FastAPI(swagger_ui_init_oauth=swagger_ui_init_oauth)
+app = AstraAPI(swagger_ui_init_oauth=swagger_ui_init_oauth)
 
 
 @app.get("/items/")

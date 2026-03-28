@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from .app import app
 

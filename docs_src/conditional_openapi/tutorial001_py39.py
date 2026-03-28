@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic_settings import BaseSettings
 
 
@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-app = FastAPI(openapi_url=settings.openapi_url)
+app = AstraAPI(openapi_url=settings.openapi_url)
 
 
 @app.get("/")

@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Request
+from astraapi import AstraAPI, Request
 
-app = FastAPI(
+app = AstraAPI(
     servers=[
         {"url": "https://stag.example.com", "description": "Staging environment"},
         {"url": "https://prod.example.com", "description": "Production environment"},

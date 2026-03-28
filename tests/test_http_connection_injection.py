@@ -1,9 +1,9 @@
-from fastapi import Depends, FastAPI
-from fastapi.requests import HTTPConnection
-from fastapi.testclient import TestClient
-from fastapi import WebSocket
+from astraapi import Depends, AstraAPI
+from astraapi.requests import HTTPConnection
+from astraapi.testclient import TestClient
+from astraapi import WebSocket
 
-app = FastAPI()
+app = AstraAPI()
 app.state.value = 42
 
 

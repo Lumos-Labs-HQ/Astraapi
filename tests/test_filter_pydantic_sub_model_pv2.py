@@ -2,9 +2,9 @@ from typing import Optional
 
 import pytest
 from dirty_equals import HasRepr
-from fastapi import Depends, FastAPI
-from fastapi.exceptions import ResponseValidationError
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.exceptions import ResponseValidationError
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 
 
@@ -12,7 +12,7 @@ from inline_snapshot import snapshot
 def get_client():
     from pydantic import BaseModel, ValidationInfo, field_validator
 
-    app = FastAPI()
+    app = AstraAPI()
 
     class ModelB(BaseModel):
         username: str
@@ -79,7 +79,7 @@ def test_openapi_schema(client: TestClient):
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/model/{name}": {
                     "get": {

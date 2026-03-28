@@ -1,8 +1,8 @@
 import warnings
 
 import pytest
-from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.dependencies.utils import (
+from astraapi import AstraAPI, File, Form, UploadFile
+from astraapi.dependencies.utils import (
     multipart_incorrect_install_error,
     multipart_not_installed_error,
 )
@@ -14,7 +14,7 @@ def test_incorrect_multipart_installed_form(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.multipart.parse_options_header", raising=False)
     with pytest.raises(RuntimeError, match=multipart_incorrect_install_error):
-        app = FastAPI()
+        app = AstraAPI()
 
         @app.post("/")
         async def root(username: str = Form()):
@@ -27,7 +27,7 @@ def test_incorrect_multipart_installed_file_upload(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.multipart.parse_options_header", raising=False)
     with pytest.raises(RuntimeError, match=multipart_incorrect_install_error):
-        app = FastAPI()
+        app = AstraAPI()
 
         @app.post("/")
         async def root(f: UploadFile = File()):
@@ -40,7 +40,7 @@ def test_incorrect_multipart_installed_file_bytes(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.multipart.parse_options_header", raising=False)
     with pytest.raises(RuntimeError, match=multipart_incorrect_install_error):
-        app = FastAPI()
+        app = AstraAPI()
 
         @app.post("/")
         async def root(f: bytes = File()):
@@ -53,7 +53,7 @@ def test_incorrect_multipart_installed_multi_form(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.multipart.parse_options_header", raising=False)
     with pytest.raises(RuntimeError, match=multipart_incorrect_install_error):
-        app = FastAPI()
+        app = AstraAPI()
 
         @app.post("/")
         async def root(username: str = Form(), password: str = Form()):
@@ -66,7 +66,7 @@ def test_incorrect_multipart_installed_form_file(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.multipart.parse_options_header", raising=False)
     with pytest.raises(RuntimeError, match=multipart_incorrect_install_error):
-        app = FastAPI()
+        app = AstraAPI()
 
         @app.post("/")
         async def root(username: str = Form(), f: UploadFile = File()):
@@ -79,7 +79,7 @@ def test_no_multipart_installed(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.__version__", raising=False)
         with pytest.raises(RuntimeError, match=multipart_not_installed_error):
-            app = FastAPI()
+            app = AstraAPI()
 
             @app.post("/")
             async def root(username: str = Form()):
@@ -92,7 +92,7 @@ def test_no_multipart_installed_file(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.__version__", raising=False)
         with pytest.raises(RuntimeError, match=multipart_not_installed_error):
-            app = FastAPI()
+            app = AstraAPI()
 
             @app.post("/")
             async def root(f: UploadFile = File()):
@@ -105,7 +105,7 @@ def test_no_multipart_installed_file_bytes(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.__version__", raising=False)
         with pytest.raises(RuntimeError, match=multipart_not_installed_error):
-            app = FastAPI()
+            app = AstraAPI()
 
             @app.post("/")
             async def root(f: bytes = File()):
@@ -118,7 +118,7 @@ def test_no_multipart_installed_multi_form(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.__version__", raising=False)
         with pytest.raises(RuntimeError, match=multipart_not_installed_error):
-            app = FastAPI()
+            app = AstraAPI()
 
             @app.post("/")
             async def root(username: str = Form(), password: str = Form()):
@@ -131,7 +131,7 @@ def test_no_multipart_installed_form_file(monkeypatch):
         warnings.simplefilter("always")
         monkeypatch.delattr("multipart.__version__", raising=False)
         with pytest.raises(RuntimeError, match=multipart_not_installed_error):
-            app = FastAPI()
+            app = AstraAPI()
 
             @app.post("/")
             async def root(username: str = Form(), f: UploadFile = File()):
@@ -142,7 +142,7 @@ def test_old_multipart_installed(monkeypatch):
     monkeypatch.setattr("python_multipart.__version__", "0.0.12")
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
-        app = FastAPI()
+        app = AstraAPI()
 
         @app.post("/")
         async def root(username: str = Form()):

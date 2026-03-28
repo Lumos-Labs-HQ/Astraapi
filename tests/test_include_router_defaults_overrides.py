@@ -1,9 +1,9 @@
 import warnings
 
 import pytest
-from fastapi import APIRouter, Depends, FastAPI, Response
-from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, Depends, AstraAPI, Response
+from astraapi.responses import JSONResponse
+from astraapi.testclient import TestClient
 
 
 class ResponseLevel0(JSONResponse):
@@ -102,7 +102,7 @@ async def callback5(level5: str):
     pass  # pragma: nocover
 
 
-app = FastAPI(
+app = AstraAPI(
     dependencies=[Depends(dep0)],
     responses={
         400: {"description": "Client error level 0"},
@@ -444,7 +444,7 @@ def test_openapi():
         assert "Duplicate Operation ID" in str(w[-1].message)
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/override1": {
                 "get": {

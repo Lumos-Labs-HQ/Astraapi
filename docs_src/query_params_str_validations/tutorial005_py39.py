@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Query
+from astraapi import AstraAPI, Query
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/")

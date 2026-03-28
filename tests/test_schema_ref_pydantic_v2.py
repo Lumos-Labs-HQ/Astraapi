@@ -1,15 +1,15 @@
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 from pydantic import BaseModel, ConfigDict, Field
 
 
 @pytest.fixture(name="client")
 def get_client():
-    app = FastAPI()
+    app = AstraAPI()
 
     class ModelWithRef(BaseModel):
         ref: str = Field(validation_alias="$ref", serialization_alias="$ref")
@@ -33,7 +33,7 @@ def test_openapi_schema(client: TestClient):
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/": {
                     "get": {

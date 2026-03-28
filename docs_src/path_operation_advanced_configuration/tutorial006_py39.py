@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Request
+from astraapi import AstraAPI, Request
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def magic_data_reader(raw_body: bytes):

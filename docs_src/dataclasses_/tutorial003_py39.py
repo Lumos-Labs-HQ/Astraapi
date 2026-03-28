@@ -1,7 +1,7 @@
 from dataclasses import field  # (1)
 from typing import Union
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic.dataclasses import dataclass  # (2)
 
 
@@ -17,7 +17,7 @@ class Author:
     items: list[Item] = field(default_factory=list)  # (3)
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/authors/{author_id}/items/", response_model=Author)  # (4)

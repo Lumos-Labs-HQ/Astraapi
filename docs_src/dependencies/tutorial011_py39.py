@@ -1,6 +1,6 @@
-from fastapi import Depends, FastAPI
+from astraapi import Depends, AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class FixedContentQueryChecker:

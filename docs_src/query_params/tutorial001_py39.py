@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 fake_items_db = [{"item_name": "Foo"}, {"item_name": "Bar"}, {"item_name": "Baz"}]
 

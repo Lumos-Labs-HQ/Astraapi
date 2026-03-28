@@ -1,5 +1,5 @@
 import strawberry
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from strawberry.fastapi import GraphQLRouter
 
 
@@ -21,5 +21,5 @@ schema = strawberry.Schema(query=Query)
 
 graphql_app = GraphQLRouter(schema)
 
-app = FastAPI()
+app = AstraAPI()
 app.include_router(graphql_app, prefix="/graphql")

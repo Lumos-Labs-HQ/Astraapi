@@ -4,9 +4,9 @@ from collections.abc import AsyncGenerator, Generator
 from functools import wraps
 
 import pytest
-from fastapi import Depends, FastAPI
-from fastapi.concurrency import iterate_in_threadpool, run_in_threadpool
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.concurrency import iterate_in_threadpool, run_in_threadpool
+from astraapi.testclient import TestClient
 
 if sys.version_info >= (3, 13):  # pragma: no cover
     from inspect import iscoroutinefunction
@@ -175,7 +175,7 @@ class ClassInstanceAsyncWrappedGenAsyncDep:
 
 class_instance_async_wrapped_gen_async_dep = ClassInstanceAsyncWrappedGenAsyncDep()
 
-app = FastAPI()
+app = AstraAPI()
 
 # Sync wrapper
 

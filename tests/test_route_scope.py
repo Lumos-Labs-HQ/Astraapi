@@ -1,9 +1,9 @@
 import pytest
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.routing import APIRoute, APIWebSocketRoute
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Request, WebSocket, WebSocketDisconnect
+from astraapi.routing import APIRoute, APIWebSocketRoute
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/users/{user_id}")

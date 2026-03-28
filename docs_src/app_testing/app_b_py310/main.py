@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException
+from astraapi import AstraAPI, Header, HTTPException
 from pydantic import BaseModel
 
 fake_secret_token = "coneofsilence"
@@ -8,7 +8,7 @@ fake_db = {
     "bar": {"id": "bar", "title": "Bar", "description": "The bartenders"},
 }
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Item(BaseModel):

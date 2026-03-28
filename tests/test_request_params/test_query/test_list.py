@@ -2,11 +2,11 @@ from typing import Annotated
 
 import pytest
 from dirty_equals import IsOneOf
-from fastapi import FastAPI, Query
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Query
+from astraapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
-app = FastAPI()
+app = AstraAPI()
 
 # =====================================================================================
 # Without aliases

@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Request
+from astraapi import AstraAPI, Request
 
-app = FastAPI(root_path="/api/v1")
+app = AstraAPI(root_path="/api/v1")
 
 
 @app.get("/app")

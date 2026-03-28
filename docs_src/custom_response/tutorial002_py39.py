@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from astraapi import AstraAPI
+from astraapi.responses import HTMLResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/", response_class=HTMLResponse)

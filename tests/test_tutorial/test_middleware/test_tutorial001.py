@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from docs_src.middleware.tutorial001_py39 import app
 
@@ -17,7 +17,7 @@ def test_openapi_schema():
     assert response.json() == {
         "openapi": "3.1.0",
         "info": {
-            "title": "FastAPI",
+            "title": "AstraAPI",
             "version": "0.1.0",
         },
         "paths": {},

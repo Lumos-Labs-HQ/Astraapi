@@ -1,8 +1,8 @@
 import time
 
-from fastapi import FastAPI, Request
+from astraapi import AstraAPI, Request
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.middleware("http")

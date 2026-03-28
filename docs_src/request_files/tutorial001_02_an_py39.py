@@ -1,8 +1,8 @@
 from typing import Annotated, Union
 
-from fastapi import FastAPI, File, UploadFile
+from astraapi import AstraAPI, File, UploadFile
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/files/")

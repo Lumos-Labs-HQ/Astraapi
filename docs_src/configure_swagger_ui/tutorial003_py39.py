@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI(swagger_ui_parameters={"deepLinking": False})
+app = AstraAPI(swagger_ui_parameters={"deepLinking": False})
 
 
 @app.get("/users/{username}")

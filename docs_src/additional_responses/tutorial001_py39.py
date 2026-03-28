@@ -1,5 +1,5 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from astraapi import AstraAPI
+from astraapi.responses import JSONResponse
 from pydantic import BaseModel
 
 
@@ -12,7 +12,7 @@ class Message(BaseModel):
     message: str
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/{item_id}", response_model=Item, responses={404: {"model": Message}})

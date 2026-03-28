@@ -1,7 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from astraapi import AstraAPI, WebSocket, WebSocketDisconnect
+from astraapi.responses import HTMLResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 html = """
 <!DOCTYPE html>

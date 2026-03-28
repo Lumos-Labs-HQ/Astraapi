@@ -1,6 +1,6 @@
 import pytest
-from fastapi.testclient import TestClient
-from fastapi.websockets import WebSocketDisconnect
+from astraapi.testclient import TestClient
+from astraapi.websockets import WebSocketDisconnect
 
 from docs_src.websockets.tutorial001_py39 import app
 

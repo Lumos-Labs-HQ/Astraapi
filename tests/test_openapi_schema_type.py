@@ -1,7 +1,7 @@
 from typing import Optional, Union
 
 import pytest
-from fastapi.openapi.models import Schema, SchemaType
+from astraapi.openapi.models import Schema, SchemaType
 
 
 @pytest.mark.parametrize(

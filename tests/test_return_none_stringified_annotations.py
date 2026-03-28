@@ -1,11 +1,11 @@
 import http
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 
 def test_no_content():
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/no-content", status_code=http.HTTPStatus.NO_CONTENT)
     def return_no_content() -> "None":

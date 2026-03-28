@@ -1,6 +1,6 @@
 import importlib
 
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 
 def get_client() -> TestClient:
@@ -40,7 +40,7 @@ def test_default_openapi():
     response = client.get("/openapi.json")
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/": {
                 "get": {

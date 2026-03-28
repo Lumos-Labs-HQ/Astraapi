@@ -1,11 +1,11 @@
-from fastapi import APIRouter, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI
+from astraapi.testclient import TestClient
 
 router = APIRouter()
 
 sub_router = APIRouter()
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @sub_router.get("/")
@@ -31,7 +31,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/": {
                 "get": {

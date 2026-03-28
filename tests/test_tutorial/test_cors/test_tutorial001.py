@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from docs_src.cors.tutorial001_py39 import app
 

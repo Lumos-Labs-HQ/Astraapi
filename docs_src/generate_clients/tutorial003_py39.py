@@ -1,5 +1,5 @@
-from fastapi import FastAPI
-from fastapi.routing import APIRoute
+from astraapi import AstraAPI
+from astraapi.routing import APIRoute
 from pydantic import BaseModel
 
 
@@ -7,7 +7,7 @@ def custom_generate_unique_id(route: APIRoute):
     return f"{route.tags[0]}-{route.name}"
 
 
-app = FastAPI(generate_unique_id_function=custom_generate_unique_id)
+app = AstraAPI(generate_unique_id_function=custom_generate_unique_id)
 
 
 class Item(BaseModel):

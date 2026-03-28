@@ -1,5 +1,5 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 from .utils import needs_py310
 
@@ -13,7 +13,7 @@ def test_typing():
         tuple[int, ...]: [1, 2, 3],  # `tuple` is converted to `list`
     }
     for test_type, expect in types.items():
-        app = FastAPI()
+        app = AstraAPI()
 
         @app.post("/", response_model=test_type)
         def post_endpoint(input: test_type):

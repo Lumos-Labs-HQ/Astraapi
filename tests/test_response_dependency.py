@@ -1,19 +1,19 @@
 """Test using special types (Response, Request, BackgroundTasks) as dependency annotations.
 
-These tests verify that special FastAPI types can be used with Depends() annotations
+These tests verify that special AstraAPI types can be used with Depends() annotations
 and that the dependency injection system properly handles them.
 """
 
 from typing import Annotated
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Request, Response
-from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
+from astraapi import BackgroundTasks, Depends, AstraAPI, Request, Response
+from astraapi.responses import JSONResponse
+from astraapi.testclient import TestClient
 
 
 def test_response_with_depends_annotated():
     """Response type hint should work with Annotated[Response, Depends(...)]."""
-    app = FastAPI()
+    app = AstraAPI()
 
     def modify_response(response: Response) -> Response:
         response.headers["X-Custom"] = "modified"
@@ -33,7 +33,7 @@ def test_response_with_depends_annotated():
 
 def test_response_with_depends_default():
     """Response type hint should work with Response = Depends(...)."""
-    app = FastAPI()
+    app = AstraAPI()
 
     def modify_response(response: Response) -> Response:
         response.headers["X-Custom"] = "modified"
@@ -53,7 +53,7 @@ def test_response_with_depends_default():
 
 def test_response_without_depends():
     """Regular Response injection should still work."""
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/")
     def endpoint(response: Response):
@@ -70,7 +70,7 @@ def test_response_without_depends():
 
 def test_response_dependency_chain():
     """Response dependency should work in a chain of dependencies."""
-    app = FastAPI()
+    app = AstraAPI()
 
     def first_modifier(response: Response) -> Response:
         response.headers["X-First"] = "1"
@@ -101,7 +101,7 @@ def test_response_dependency_returns_different_response_instance():
     of modifying the injected one, the returned response should be used and any
     modifications to it in the endpoint should be preserved.
     """
-    app = FastAPI()
+    app = AstraAPI()
 
     def default_response() -> Response:
         response = JSONResponse(content={"status": "ok"})
@@ -124,7 +124,7 @@ def test_response_dependency_returns_different_response_instance():
 # Tests for Request type hint with Depends
 def test_request_with_depends_annotated():
     """Request type hint should work in dependency chain."""
-    app = FastAPI()
+    app = AstraAPI()
 
     def extract_request_info(request: Request) -> dict:
         return {
@@ -148,7 +148,7 @@ def test_request_with_depends_annotated():
 # Tests for BackgroundTasks type hint with Depends
 def test_background_tasks_with_depends_annotated():
     """BackgroundTasks type hint should work with Annotated[BackgroundTasks, Depends(...)]."""
-    app = FastAPI()
+    app = AstraAPI()
     task_results = []
 
     def background_task(message: str):

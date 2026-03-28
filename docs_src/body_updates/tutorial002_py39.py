@@ -1,10 +1,10 @@
 from typing import Union
 
-from fastapi import FastAPI
-from fastapi.encoders import jsonable_encoder
+from astraapi import AstraAPI
+from astraapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Item(BaseModel):

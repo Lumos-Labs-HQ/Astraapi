@@ -1,12 +1,12 @@
 from typing import Union
 
-from fastapi import FastAPI, UploadFile
-from fastapi._compat import (
+from astraapi import AstraAPI, UploadFile
+from astraapi._compat import (
     Undefined,
     is_uploadfile_sequence_annotation,
 )
-from fastapi._compat.shared import is_bytes_sequence_annotation
-from fastapi.testclient import TestClient
+from astraapi._compat.shared import is_bytes_sequence_annotation
+from astraapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 from pydantic.fields import FieldInfo
 
@@ -14,7 +14,7 @@ from .utils import needs_py310
 
 
 def test_model_field_default_required():
-    from fastapi._compat import v2
+    from astraapi._compat import v2
 
     # For coverage
     field_info = FieldInfo(annotation=str)
@@ -23,7 +23,7 @@ def test_model_field_default_required():
 
 
 def test_complex():
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.post("/")
     def foo(foo: Union[str, list[int]]):
@@ -41,7 +41,7 @@ def test_complex():
 
 
 def test_propagates_pydantic2_model_config():
-    app = FastAPI()
+    app = AstraAPI()
 
     class Missing:
         def __bool__(self):
@@ -102,7 +102,7 @@ def test_is_uploadfile_sequence_annotation():
 
 def test_serialize_sequence_value_with_optional_list():
     """Test that serialize_sequence_value handles optional lists correctly."""
-    from fastapi._compat import v2
+    from astraapi._compat import v2
 
     field_info = FieldInfo(annotation=Union[list[str], None])
     field = v2.ModelField(name="items", field_info=field_info)
@@ -114,7 +114,7 @@ def test_serialize_sequence_value_with_optional_list():
 @needs_py310
 def test_serialize_sequence_value_with_optional_list_pipe_union():
     """Test that serialize_sequence_value handles optional lists correctly (with new syntax)."""
-    from fastapi._compat import v2
+    from astraapi._compat import v2
 
     field_info = FieldInfo(annotation=list[str] | None)
     field = v2.ModelField(name="items", field_info=field_info)
@@ -125,7 +125,7 @@ def test_serialize_sequence_value_with_optional_list_pipe_union():
 
 def test_serialize_sequence_value_with_none_first_in_union():
     """Test that serialize_sequence_value handles Union[None, List[...]] correctly."""
-    from fastapi._compat import v2
+    from astraapi._compat import v2
 
     field_info = FieldInfo(annotation=Union[None, list[str]])
     field = v2.ModelField(name="items", field_info=field_info)

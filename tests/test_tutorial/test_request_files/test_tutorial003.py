@@ -1,8 +1,8 @@
 import importlib
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 
 @pytest.fixture(
@@ -19,12 +19,12 @@ def get_app(request: pytest.FixtureRequest):
 
 
 @pytest.fixture(name="client")
-def get_client(app: FastAPI):
+def get_client(app: AstraAPI):
     client = TestClient(app)
     return client
 
 
-def test_post_files(tmp_path, app: FastAPI):
+def test_post_files(tmp_path, app: AstraAPI):
     path = tmp_path / "test.txt"
     path.write_bytes(b"<file content>")
     path2 = tmp_path / "test2.txt"
@@ -43,7 +43,7 @@ def test_post_files(tmp_path, app: FastAPI):
     assert response.json() == {"file_sizes": [14, 15]}
 
 
-def test_post_upload_file(tmp_path, app: FastAPI):
+def test_post_upload_file(tmp_path, app: AstraAPI):
     path = tmp_path / "test.txt"
     path.write_bytes(b"<file content>")
     path2 = tmp_path / "test2.txt"
@@ -62,7 +62,7 @@ def test_post_upload_file(tmp_path, app: FastAPI):
     assert response.json() == {"filenames": ["test.txt", "test2.txt"]}
 
 
-def test_get_root(app: FastAPI):
+def test_get_root(app: AstraAPI):
     client = TestClient(app)
     response = client.get("/")
     assert response.status_code == 200, response.text
@@ -74,7 +74,7 @@ def test_openapi_schema(client: TestClient):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/files/": {
                 "post": {

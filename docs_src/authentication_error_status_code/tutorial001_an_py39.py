@@ -1,9 +1,9 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from astraapi import Depends, AstraAPI, HTTPException, status
+from astraapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class HTTPBearer403(HTTPBearer):

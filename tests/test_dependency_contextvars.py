@@ -2,14 +2,14 @@ from collections.abc import Awaitable
 from contextvars import ContextVar
 from typing import Any, Callable, Optional
 
-from fastapi import Depends, FastAPI, Request, Response
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Request, Response
+from astraapi.testclient import TestClient
 
 legacy_request_state_context_var: ContextVar[Optional[dict[str, Any]]] = ContextVar(
     "legacy_request_state_context_var", default=None
 )
 
-app = FastAPI()
+app = AstraAPI()
 
 
 async def set_up_request_state_dependency():

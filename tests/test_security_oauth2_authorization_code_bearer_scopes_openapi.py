@@ -2,9 +2,9 @@
 
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, Security
-from fastapi.security import OAuth2AuthorizationCodeBearer
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, Depends, AstraAPI, Security
+from astraapi.security import OAuth2AuthorizationCodeBearer
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 
 oauth2_scheme = OAuth2AuthorizationCodeBearer(
@@ -19,7 +19,7 @@ async def get_token(token: Annotated[str, Depends(oauth2_scheme)]) -> str:
     return token
 
 
-app = FastAPI(dependencies=[Depends(get_token)])
+app = AstraAPI(dependencies=[Depends(get_token)])
 
 
 @app.get("/")
@@ -102,7 +102,7 @@ def test_openapi_schema():
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/": {
                     "get": {

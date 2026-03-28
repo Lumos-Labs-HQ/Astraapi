@@ -1,14 +1,14 @@
 from typing import Union
 
 import pytest
-from fastapi import Body, Cookie, FastAPI, Header, Path, Query
-from fastapi.exceptions import FastAPIDeprecationWarning
-from fastapi.testclient import TestClient
+from astraapi import Body, Cookie, AstraAPI, Header, Path, Query
+from astraapi.exceptions import AstraAPIDeprecationWarning
+from astraapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 
 
 def create_app():
-    app = FastAPI()
+    app = AstraAPI()
 
     class Item(BaseModel):
         data: str
@@ -21,7 +21,7 @@ def create_app():
     def schema_extra(item: Item):
         return item
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.post("/example/")
         def example(item: Item = Body(example={"data": "Data in Body example"})):
@@ -38,7 +38,7 @@ def create_app():
     ):
         return item
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.post("/example_examples/")
         def example_examples(
@@ -83,7 +83,7 @@ def create_app():
     # ):
     #     return lastname
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/path_example/{item_id}")
         def path_example(
@@ -101,7 +101,7 @@ def create_app():
     ):
         return item_id
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/path_example_examples/{item_id}")
         def path_example_examples(
@@ -112,7 +112,7 @@ def create_app():
         ):
             return item_id
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/query_example/")
         def query_example(
@@ -132,7 +132,7 @@ def create_app():
     ):
         return data
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/query_example_examples/")
         def query_example_examples(
@@ -144,7 +144,7 @@ def create_app():
         ):
             return data
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/header_example/")
         def header_example(
@@ -167,7 +167,7 @@ def create_app():
     ):
         return data
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/header_example_examples/")
         def header_example_examples(
@@ -179,7 +179,7 @@ def create_app():
         ):
             return data
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/cookie_example/")
         def cookie_example(
@@ -199,7 +199,7 @@ def create_app():
     ):
         return data
 
-    with pytest.warns(FastAPIDeprecationWarning):
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/cookie_example_examples/")
         def cookie_example_examples(
@@ -265,7 +265,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/schema_extra/": {
                 "post": {

@@ -3,7 +3,7 @@ import warnings
 
 import pytest
 from dirty_equals import IsInt
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 from sqlalchemy import StaticPool
 from sqlmodel import SQLModel, create_engine
@@ -149,7 +149,7 @@ def test_openapi_schema(client: TestClient):
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/heroes/": {
                     "post": {

@@ -1,7 +1,7 @@
-from fastapi import Depends, FastAPI
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from astraapi import Depends, AstraAPI
+from astraapi.security import HTTPBasic, HTTPBasicCredentials
 
-app = FastAPI()
+app = AstraAPI()
 
 security = HTTPBasic()
 

@@ -1,6 +1,6 @@
-from fastapi import FastAPI, status
+from astraapi import AstraAPI, status
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/items/", status_code=status.HTTP_201_CREATED)

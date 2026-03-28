@@ -1,12 +1,12 @@
 from typing import Optional, Union
 
 import pytest
-from fastapi import FastAPI
-from fastapi.exceptions import ResponseValidationError
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.exceptions import ResponseValidationError
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Item(BaseModel):

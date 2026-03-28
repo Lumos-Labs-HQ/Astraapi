@@ -1,10 +1,10 @@
 from base64 import b64encode
 
-from fastapi import FastAPI, Security
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Security
+from astraapi.security import HTTPBasic, HTTPBasicCredentials
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 security = HTTPBasic(realm="simple")
 
@@ -53,7 +53,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/users/me": {
                 "get": {

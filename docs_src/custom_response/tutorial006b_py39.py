@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from astraapi import AstraAPI
+from astraapi.responses import RedirectResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/fastapi", response_class=RedirectResponse)

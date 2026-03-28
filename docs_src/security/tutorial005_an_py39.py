@@ -2,8 +2,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Union
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Security, status
-from fastapi.security import (
+from astraapi import Depends, AstraAPI, HTTPException, Security, status
+from astraapi.security import (
     OAuth2PasswordBearer,
     OAuth2PasswordRequestForm,
     SecurityScopes,
@@ -65,7 +65,7 @@ oauth2_scheme = OAuth2PasswordBearer(
     scopes={"me": "Read information about the current user.", "items": "Read items."},
 )
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def verify_password(plain_password, hashed_password):

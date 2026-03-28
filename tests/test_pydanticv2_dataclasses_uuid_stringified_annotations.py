@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from typing import Union
 
 from dirty_equals import IsUUID
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 
 
@@ -20,7 +20,7 @@ class Item:
     tax: Union[float, None] = None
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/item", response_model=Item)

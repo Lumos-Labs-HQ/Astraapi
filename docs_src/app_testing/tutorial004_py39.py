@@ -1,13 +1,13 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 items = {}
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: AstraAPI):
     items["foo"] = {"name": "Fighters"}
     items["bar"] = {"name": "Tenders"}
     yield
@@ -15,7 +15,7 @@ async def lifespan(app: FastAPI):
     items.clear()
 
 
-app = FastAPI(lifespan=lifespan)
+app = AstraAPI(lifespan=lifespan)
 
 
 @app.get("/items/{item_id}")

@@ -1,7 +1,7 @@
 from typing import Optional
 
 import pytest
-from fastapi import FastAPI, Query
+from astraapi import AstraAPI, Query
 from pydantic import BaseModel
 
 
@@ -10,7 +10,7 @@ def test_invalid_sequence():
         AssertionError,
         match="Query parameter 'q' must be one of the supported types",
     ):
-        app = FastAPI()
+        app = AstraAPI()
 
         class Item(BaseModel):
             title: str
@@ -25,7 +25,7 @@ def test_invalid_tuple():
         AssertionError,
         match="Query parameter 'q' must be one of the supported types",
     ):
-        app = FastAPI()
+        app = AstraAPI()
 
         class Item(BaseModel):
             title: str
@@ -40,7 +40,7 @@ def test_invalid_dict():
         AssertionError,
         match="Query parameter 'q' must be one of the supported types",
     ):
-        app = FastAPI()
+        app = AstraAPI()
 
         class Item(BaseModel):
             title: str
@@ -55,7 +55,7 @@ def test_invalid_simple_dict():
         AssertionError,
         match="Query parameter 'q' must be one of the supported types",
     ):
-        app = FastAPI()
+        app = AstraAPI()
 
         class Item(BaseModel):
             title: str

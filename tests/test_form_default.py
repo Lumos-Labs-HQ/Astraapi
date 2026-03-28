@@ -1,9 +1,9 @@
 from typing import Annotated, Optional
 
-from fastapi import FastAPI, File, Form
+from astraapi import AstraAPI, File, Form
 from starlette.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/urlencoded")

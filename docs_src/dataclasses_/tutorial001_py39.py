@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Union
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
 
 @dataclass
@@ -12,7 +12,7 @@ class Item:
     tax: Union[float, None] = None
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/items/")

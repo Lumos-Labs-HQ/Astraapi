@@ -2,8 +2,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Union
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from astraapi import Depends, AstraAPI, HTTPException, status
+from astraapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jwt.exceptions import InvalidTokenError
 from pwdlib import PasswordHash
 from pydantic import BaseModel
@@ -50,7 +50,7 @@ password_hash = PasswordHash.recommended()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def verify_password(plain_password, hashed_password):

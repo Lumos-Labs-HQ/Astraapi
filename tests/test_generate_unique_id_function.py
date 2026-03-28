@@ -1,8 +1,8 @@
 import warnings
 
-from fastapi import APIRouter, FastAPI
-from fastapi.routing import APIRoute
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI
+from astraapi.routing import APIRoute
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 
@@ -29,7 +29,7 @@ class Message(BaseModel):
 
 
 def test_top_level_generate_unique_id():
-    app = FastAPI(generate_unique_id_function=custom_generate_unique_id)
+    app = AstraAPI(generate_unique_id_function=custom_generate_unique_id)
     router = APIRouter()
 
     @app.post("/", response_model=list[Item], responses={404: {"model": list[Message]}})
@@ -48,7 +48,7 @@ def test_top_level_generate_unique_id():
     data = response.json()
     assert data == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/": {
                 "post": {
@@ -232,7 +232,7 @@ def test_top_level_generate_unique_id():
 
 
 def test_router_overrides_generate_unique_id():
-    app = FastAPI(generate_unique_id_function=custom_generate_unique_id)
+    app = AstraAPI(generate_unique_id_function=custom_generate_unique_id)
     router = APIRouter(generate_unique_id_function=custom_generate_unique_id2)
 
     @app.post("/", response_model=list[Item], responses={404: {"model": list[Message]}})
@@ -251,7 +251,7 @@ def test_router_overrides_generate_unique_id():
     data = response.json()
     assert data == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/": {
                 "post": {
@@ -435,7 +435,7 @@ def test_router_overrides_generate_unique_id():
 
 
 def test_router_include_overrides_generate_unique_id():
-    app = FastAPI(generate_unique_id_function=custom_generate_unique_id)
+    app = AstraAPI(generate_unique_id_function=custom_generate_unique_id)
     router = APIRouter(generate_unique_id_function=custom_generate_unique_id2)
 
     @app.post("/", response_model=list[Item], responses={404: {"model": list[Message]}})
@@ -454,7 +454,7 @@ def test_router_include_overrides_generate_unique_id():
     data = response.json()
     assert data == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/": {
                 "post": {
@@ -638,7 +638,7 @@ def test_router_include_overrides_generate_unique_id():
 
 
 def test_subrouter_top_level_include_overrides_generate_unique_id():
-    app = FastAPI(generate_unique_id_function=custom_generate_unique_id)
+    app = AstraAPI(generate_unique_id_function=custom_generate_unique_id)
     router = APIRouter()
     sub_router = APIRouter(generate_unique_id_function=custom_generate_unique_id2)
 
@@ -667,7 +667,7 @@ def test_subrouter_top_level_include_overrides_generate_unique_id():
     data = response.json()
     assert data == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/": {
                 "post": {
@@ -914,7 +914,7 @@ def test_subrouter_top_level_include_overrides_generate_unique_id():
 
 
 def test_router_path_operation_overrides_generate_unique_id():
-    app = FastAPI(generate_unique_id_function=custom_generate_unique_id)
+    app = AstraAPI(generate_unique_id_function=custom_generate_unique_id)
     router = APIRouter(generate_unique_id_function=custom_generate_unique_id2)
 
     @app.post("/", response_model=list[Item], responses={404: {"model": list[Message]}})
@@ -936,7 +936,7 @@ def test_router_path_operation_overrides_generate_unique_id():
     data = response.json()
     assert data == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/": {
                 "post": {
@@ -1120,7 +1120,7 @@ def test_router_path_operation_overrides_generate_unique_id():
 
 
 def test_app_path_operation_overrides_generate_unique_id():
-    app = FastAPI(generate_unique_id_function=custom_generate_unique_id)
+    app = AstraAPI(generate_unique_id_function=custom_generate_unique_id)
     router = APIRouter(generate_unique_id_function=custom_generate_unique_id2)
 
     @app.post(
@@ -1146,7 +1146,7 @@ def test_app_path_operation_overrides_generate_unique_id():
     data = response.json()
     assert data == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/": {
                 "post": {
@@ -1330,7 +1330,7 @@ def test_app_path_operation_overrides_generate_unique_id():
 
 
 def test_callback_override_generate_unique_id():
-    app = FastAPI(generate_unique_id_function=custom_generate_unique_id)
+    app = AstraAPI(generate_unique_id_function=custom_generate_unique_id)
     callback_router = APIRouter(generate_unique_id_function=custom_generate_unique_id2)
 
     @callback_router.post(
@@ -1365,7 +1365,7 @@ def test_callback_override_generate_unique_id():
     data = response.json()
     assert data == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/": {
                 "post": {
@@ -1621,7 +1621,7 @@ def test_warn_duplicate_operation_id():
     def broken_operation_id(route: APIRoute):
         return "foo"
 
-    app = FastAPI(generate_unique_id_function=broken_operation_id)
+    app = AstraAPI(generate_unique_id_function=broken_operation_id)
 
     @app.post("/")
     def post_root(item1: Item):

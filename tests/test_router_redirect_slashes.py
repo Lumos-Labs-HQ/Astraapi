@@ -1,9 +1,9 @@
-from fastapi import APIRouter, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI
+from astraapi.testclient import TestClient
 
 
 def test_redirect_slashes_enabled():
-    app = FastAPI()
+    app = AstraAPI()
     router = APIRouter()
 
     @router.get("/hello/")
@@ -22,7 +22,7 @@ def test_redirect_slashes_enabled():
 
 
 def test_redirect_slashes_disabled():
-    app = FastAPI(redirect_slashes=False)
+    app = AstraAPI(redirect_slashes=False)
     router = APIRouter()
 
     @router.get("/hello/")

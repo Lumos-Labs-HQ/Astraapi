@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from astraapi import APIRouter
 
 router = APIRouter()
 

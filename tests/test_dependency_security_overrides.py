@@ -1,8 +1,8 @@
-from fastapi import Depends, FastAPI, Security
-from fastapi.security import SecurityScopes
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Security
+from astraapi.security import SecurityScopes
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def get_user(required_scopes: SecurityScopes):

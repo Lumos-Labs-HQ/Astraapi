@@ -2,9 +2,9 @@ from contextvars import ContextVar
 from typing import Annotated, Any
 
 import pytest
-from fastapi import Depends, FastAPI, WebSocket
-from fastapi.exceptions import FastAPIError
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, WebSocket
+from astraapi.exceptions import AstraAPIError
+from astraapi.testclient import TestClient
 
 global_context: ContextVar[dict[str, Any]] = ContextVar("global_context", default={})  # noqa: B039
 
@@ -69,7 +69,7 @@ RegularSessionsDep = Annotated[
     tuple[NamedSession, Session], Depends(get_named_regular_func_session)
 ]
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.websocket("/function-scope")
@@ -168,7 +168,7 @@ def test_sub() -> None:
 
 def test_broken_scope() -> None:
     with pytest.raises(
-        FastAPIError,
+        AstraAPIError,
         match='The dependency "get_named_func_session" has a scope of "request", it cannot depend on dependencies with scope "function"',
     ):
 

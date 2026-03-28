@@ -1,8 +1,8 @@
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from astraapi import AstraAPI
+from astraapi.responses import FileResponse
 
 some_file_path = "large-video-file.mp4"
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/")

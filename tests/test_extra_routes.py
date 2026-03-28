@@ -1,11 +1,11 @@
 from typing import Optional
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.responses import JSONResponse
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Item(BaseModel):
@@ -100,7 +100,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/{item_id}": {
                 "get": {

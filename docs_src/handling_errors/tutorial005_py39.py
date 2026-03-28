@@ -1,10 +1,10 @@
-from fastapi import FastAPI, Request
-from fastapi.encoders import jsonable_encoder
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from astraapi import AstraAPI, Request
+from astraapi.encoders import jsonable_encoder
+from astraapi.exceptions import RequestValidationError
+from astraapi.responses import JSONResponse
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.exception_handler(RequestValidationError)

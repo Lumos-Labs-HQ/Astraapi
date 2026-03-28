@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import UJSONResponse
+from astraapi import AstraAPI
+from astraapi.responses import UJSONResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/", response_class=UJSONResponse)

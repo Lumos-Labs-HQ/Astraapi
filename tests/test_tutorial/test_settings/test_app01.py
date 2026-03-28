@@ -3,7 +3,7 @@ import sys
 
 import pytest
 from dirty_equals import IsAnyStr
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
@@ -60,7 +60,7 @@ def test_openapi_schema(client: TestClient):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/info": {
                 "get": {

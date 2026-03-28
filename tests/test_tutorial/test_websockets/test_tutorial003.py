@@ -2,7 +2,7 @@ import importlib
 from types import ModuleType
 
 import pytest
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 
 @pytest.fixture(

@@ -1,9 +1,9 @@
 from typing import Optional
 
-from fastapi import FastAPI, File
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, File
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/files")

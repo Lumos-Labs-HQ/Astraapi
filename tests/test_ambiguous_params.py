@@ -1,11 +1,11 @@
 from typing import Annotated
 
 import pytest
-from fastapi import Depends, FastAPI, Path
-from fastapi.param_functions import Query
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Path
+from astraapi.param_functions import Query
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def test_no_annotated_defaults():
@@ -53,7 +53,7 @@ def test_multiple_annotations():
     with pytest.raises(
         AssertionError,
         match=(
-            "Cannot specify a FastAPI annotation in `Annotated` and `Depends` as a"
+            "Cannot specify a AstraAPI annotation in `Annotated` and `Depends` as a"
             " default value together for 'foo'"
         ),
     ):

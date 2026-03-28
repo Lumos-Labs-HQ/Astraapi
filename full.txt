@@ -3,8 +3,8 @@ platform linux -- Python 3.14.3, pytest-8.4.2, pluggy-1.6.0
 codspeed: 4.3.0 (disabled, mode: walltime, callgraph: enabled, timer_resolution: 1.0ns)
 rootdir: /mnt/e/temp_git/fastapi-rust
 configfile: pyproject.toml
-plugins: anyio-4.12.1, inline-snapshot-0.32.3, codspeed-4.3.0
-collected 3741 items / 3 skipped
+plugins: anyio-4.13.0, inline-snapshot-0.32.5, codspeed-4.3.0
+collected 3737 items / 3 skipped
 
 tests/test_additional_properties.py ..                                   [  0%]
 tests/test_additional_properties_bool.py ...                             [  0%]
@@ -56,7 +56,6 @@ tests/test_empty_router.py ..                                            [  7%]
 tests/test_enforce_once_required_parameter.py .F.                        [  7%]
 tests/test_exception_handlers.py ..F.F                                   [  8%]
 tests/test_extra_routes.py ...FF.F.                                      [  8%]
-tests/test_fastapi_cli.py F.                                             [  8%]
 tests/test_file_and_form_order_issue_9116.py ....                        [  8%]
 tests/test_filter_pydantic_sub_model_pv2.py FF.                          [  8%]
 tests/test_form_default.py ..                                            [  8%]
@@ -74,7 +73,7 @@ tests/test_include_router_defaults_overrides.py ........................ [  9%]
 tests/test_infer_param_optionality.py .........                          [ 10%]
 tests/test_inherited_custom_class.py .                                   [ 10%]
 tests/test_invalid_path_param.py .......                                 [ 10%]
-tests/test_invalid_sequence_param.py ....                                [ 11%]
+tests/test_invalid_sequence_param.py ....                                [ 10%]
 tests/test_json_type.py ....                                             [ 11%]
 tests/test_jsonable_encoder.py ........................                  [ 11%]
 tests/test_local_docs.py .....                                           [ 11%]
@@ -138,7 +137,7 @@ tests/test_request_params/test_form/test_list.py ............F.......F.. [ 28%]
 tests/test_request_params/test_form/test_optional_list.py ............F. [ 28%]
 ......F.......F.F.                                                       [ 29%]
 tests/test_request_params/test_form/test_optional_str.py ............F.. [ 29%]
-.....F.......F.F.                                                        [ 30%]
+.....F.......F.F.                                                        [ 29%]
 tests/test_request_params/test_form/test_required_str.py ............F.. [ 30%]
 .....F.........F.                                                        [ 30%]
 tests/test_request_params/test_header/test_list.py .....F....F.FF....F.F [ 31%]
@@ -230,13 +229,13 @@ tests/test_stringified_annotation_dependency_py314.py F                  [ 45%]
 tests/test_stringified_annotations_simple.py .                           [ 45%]
 tests/test_sub_callbacks.py ..                                           [ 45%]
 tests/test_swagger_ui_init_oauth.py F.                                   [ 45%]
-tests/test_top_level_security_scheme_in_openapi.py ...                   [ 46%]
+tests/test_top_level_security_scheme_in_openapi.py ...                   [ 45%]
 tests/test_tuples.py .......                                             [ 46%]
 tests/test_tutorial/test_additional_responses/test_tutorial001.py ...    [ 46%]
-tests/test_tutorial/test_additional_responses/test_tutorial002.py ...... [ 46%]
+tests/test_tutorial/test_additional_responses/test_tutorial002.py ..FF.. [ 46%]
                                                                          [ 46%]
 tests/test_tutorial/test_additional_responses/test_tutorial003.py ...    [ 46%]
-tests/test_tutorial/test_additional_responses/test_tutorial004.py ...... [ 46%]
+tests/test_tutorial/test_additional_responses/test_tutorial004.py ..FF.. [ 46%]
                                                                          [ 46%]
 tests/test_tutorial/test_additional_status_codes/test_tutorial001.py ... [ 46%]
 .....                                                                    [ 46%]
@@ -311,7 +310,7 @@ tests/test_tutorial/test_custom_response/test_tutorial002_tutorial003_tutorial00
 .....                                                                    [ 59%]
 tests/test_tutorial/test_custom_response/test_tutorial005.py ..          [ 59%]
 tests/test_tutorial/test_custom_response/test_tutorial006.py ..          [ 59%]
-tests/test_tutorial/test_custom_response/test_tutorial006b.py ..         [ 59%]
+tests/test_tutorial/test_custom_response/test_tutorial006b.py FF         [ 59%]
 tests/test_tutorial/test_custom_response/test_tutorial006c.py ..         [ 59%]
 tests/test_tutorial/test_custom_response/test_tutorial007.py .           [ 59%]
 tests/test_tutorial/test_custom_response/test_tutorial008.py .           [ 59%]
@@ -321,7 +320,7 @@ tests/test_tutorial/test_custom_response/test_tutorial009c.py .          [ 59%]
 tests/test_tutorial/test_dataclasses/test_tutorial001.py ......          [ 59%]
 tests/test_tutorial/test_dataclasses/test_tutorial002.py ....            [ 59%]
 tests/test_tutorial/test_dataclasses/test_tutorial003.py ......          [ 60%]
-tests/test_tutorial/test_debugging/test_tutorial001.py ....              [ 60%]
+tests/test_tutorial/test_debugging/test_tutorial001.py ..                [ 60%]
 tests/test_tutorial/test_dependencies/test_tutorial001_tutorial001_02.py . [ 60%]
 ...................................                                      [ 61%]
 tests/test_tutorial/test_dependencies/test_tutorial002_tutorial003_tutorial004.py . [ 61%]
@@ -337,7 +336,7 @@ tests/test_tutorial/test_dependencies/test_tutorial008c.py ........      [ 64%]
 tests/test_tutorial/test_dependencies/test_tutorial008d.py ........      [ 64%]
 tests/test_tutorial/test_dependencies/test_tutorial008e.py ..            [ 64%]
 tests/test_tutorial/test_dependencies/test_tutorial010.py .              [ 64%]
-tests/test_tutorial/test_dependencies/test_tutorial011.py ........       [ 65%]
+tests/test_tutorial/test_dependencies/test_tutorial011.py ........       [ 64%]
 tests/test_tutorial/test_dependencies/test_tutorial012.py .............. [ 65%]
 ....                                                                     [ 65%]
 tests/test_tutorial/test_encoder/test_tutorial001.py ......              [ 65%]
@@ -378,7 +377,7 @@ tests/test_tutorial/test_header_params/test_tutorial003.py ............. [ 70%]
 tests/test_tutorial/test_metadata/test_tutorial001.py ..                 [ 70%]
 tests/test_tutorial/test_metadata/test_tutorial001_1.py ..               [ 70%]
 tests/test_tutorial/test_metadata/test_tutorial002.py ...                [ 70%]
-tests/test_tutorial/test_metadata/test_tutorial003.py .....              [ 71%]
+tests/test_tutorial/test_metadata/test_tutorial003.py .....              [ 70%]
 tests/test_tutorial/test_metadata/test_tutorial004.py ..                 [ 71%]
 tests/test_tutorial/test_middleware/test_tutorial001.py ..               [ 71%]
 tests/test_tutorial/test_openapi_callbacks/test_tutorial001.py ......    [ 71%]
@@ -393,7 +392,7 @@ tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial004
 ...                                                                      [ 71%]
 tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial005.py . [ 71%]
 .                                                                        [ 71%]
-tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial006.py . [ 71%]
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial006.py F [ 71%]
 .                                                                        [ 71%]
 tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial007.py . [ 71%]
 ...                                                                      [ 71%]
@@ -412,7 +411,7 @@ tests/test_tutorial/test_path_operation_configurations/test_tutorial006.py . [ 7
 tests/test_tutorial/test_path_params/test_tutorial001.py ...             [ 72%]
 tests/test_tutorial/test_path_params/test_tutorial002.py ...             [ 72%]
 tests/test_tutorial/test_path_params/test_tutorial003.py ...             [ 72%]
-tests/test_tutorial/test_path_params/test_tutorial003b.py ...            [ 73%]
+tests/test_tutorial/test_path_params/test_tutorial003b.py ...            [ 72%]
 tests/test_tutorial/test_path_params/test_tutorial004.py ...             [ 73%]
 tests/test_tutorial/test_path_params/test_tutorial005.py .....           [ 73%]
 tests/test_tutorial/test_path_params_numeric_validations/test_tutorial001.py . [ 73%]
@@ -441,7 +440,7 @@ tests/test_tutorial/test_python_types/test_tutorial010.py .              [ 75%]
 tests/test_tutorial/test_python_types/test_tutorial011.py ..             [ 75%]
 tests/test_tutorial/test_python_types/test_tutorial012.py .              [ 75%]
 tests/test_tutorial/test_python_types/test_tutorial013.py .              [ 75%]
-tests/test_tutorial/test_query_param_models/test_tutorial001.py ........ [ 76%]
+tests/test_tutorial/test_query_param_models/test_tutorial001.py ........ [ 75%]
 ............                                                             [ 76%]
 tests/test_tutorial/test_query_param_models/test_tutorial002.py ........ [ 76%]
 ............                                                             [ 76%]
@@ -595,7 +594,7 @@ _____________________________ test_openapi_schema ______________________________
         assert response.status_code == 200, response.text
 >       assert response.json() == {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/route1": {
                     "get": {
@@ -688,8 +687,8 @@ _______________________________ test_swagger_ui ________________________________
             "oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect'"
             in response.text
         )
-E       assert "oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect'" in '<!DOCTYPE html>\n<html>\n<head>\n<title>FastAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport" ...2RedirectUrl": window.location.origin + \'/docs/oauth2-redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>'
-E        +  where '<!DOCTYPE html>\n<html>\n<head>\n<title>FastAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport" ...2RedirectUrl": window.location.origin + \'/docs/oauth2-redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>' = <Response [200 OK]>.text
+E       assert "oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect'" in '<!DOCTYPE html>\n<html>\n<head>\n<title>AstraAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport"...2RedirectUrl": window.location.origin + \'/docs/oauth2-redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>'
+E        +  where '<!DOCTYPE html>\n<html>\n<head>\n<title>AstraAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport"...2RedirectUrl": window.location.origin + \'/docs/oauth2-redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>' = <Response [200 OK]>.text
 
 tests/test_application.py:28: AssertionError
 _______________________________ test_swagger_ui ________________________________
@@ -704,20 +703,20 @@ _______________________________ test_swagger_ui ________________________________
             f"oauth2RedirectUrl: window.location.origin + '{swagger_ui_oauth2_redirect_url}'"
             in response.text
         )
-E       assert "oauth2RedirectUrl: window.location.origin + '/docs/redirect'" in '<!DOCTYPE html>\n<html>\n<head>\n<title>FastAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport" ...n"oauth2RedirectUrl": window.location.origin + \'/docs/redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>'
-E        +  where '<!DOCTYPE html>\n<html>\n<head>\n<title>FastAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport" ...n"oauth2RedirectUrl": window.location.origin + \'/docs/redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>' = <Response [200 OK]>.text
+E       assert "oauth2RedirectUrl: window.location.origin + '/docs/redirect'" in '<!DOCTYPE html>\n<html>\n<head>\n<title>AstraAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport"...n"oauth2RedirectUrl": window.location.origin + \'/docs/redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>'
+E        +  where '<!DOCTYPE html>\n<html>\n<head>\n<title>AstraAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport"...n"oauth2RedirectUrl": window.location.origin + \'/docs/redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>' = <Response [200 OK]>.text
 
 tests/test_custom_swagger_ui_redirect.py:23: AssertionError
 ----------------------------- Captured stdout call -----------------------------
-http://127.0.0.1:41255
+http://127.0.0.1:52521
 __________________________ test_upload_file_is_closed __________________________
 
-tmp_path = PosixPath('/tmp/pytest-of-root/pytest-298/test_upload_file_is_closed0')
+tmp_path = PosixPath('/tmp/pytest-of-root/pytest-299/test_upload_file_is_closed0')
 
     def test_upload_file_is_closed(tmp_path: Path):
         path = tmp_path / "test.txt"
         path.write_bytes(b"<file content>")
-        app = FastAPI()
+        app = AstraAPI()
     
         testing_file_store: list[UploadFile] = []
     
@@ -735,8 +734,8 @@ tmp_path = PosixPath('/tmp/pytest-of-root/pytest-298/test_upload_file_is_closed0
         assert testing_file_store
 >       assert testing_file_store[0].file.closed
 E       AssertionError: assert False
-E        +  where False = <_io.BytesIO object at 0x7fd1a03908b0>.closed
-E        +    where <_io.BytesIO object at 0x7fd1a03908b0> = UploadFile(filename='test.txt', content_type='text/plain', size=None).file
+E        +  where False = <_io.BytesIO object at 0x7f3aa43dc130>.closed
+E        +    where <_io.BytesIO object at 0x7f3aa43dc130> = UploadFile(filename='test.txt', content_type='text/plain', size=None).file
 
 tests/test_datastructures.py:48: AssertionError
 ___________________________________ test_app ___________________________________
@@ -823,11 +822,11 @@ ____________________________ test_regular_no_stream ____________________________
 
 tests/test_dependency_after_yield_streaming.py:89: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:390: in get
+astraapi/_testclient.py:390: in get
     self._check_exc()
-fastapi/_testclient.py:371: in _check_exc
+astraapi/_testclient.py:371: in _check_exc
     raise exc
-fastapi/_cpp_server.py:2249: in _handle_async_di
+astraapi/_cpp_server.py:2249: in _handle_async_di
     async with exit_stack:
                ^^^^^^^^^^
 /usr/local/lib/python3.14/contextlib.py:768: in __aexit__
@@ -855,9 +854,9 @@ E       Failed: DID NOT RAISE any of (<class 'ValueError'>, <class 'Exception'>)
 
 tests/test_dependency_after_yield_streaming.py:117: Failed
 ------------------------------ Captured log call -------------------------------
-WARNING  fastapi:_cpp_server.py:1290 Streaming response error
+WARNING  astraapi:_cpp_server.py:1290 Streaming response error
 Traceback (most recent call last):
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 1283, in _write_chunked_streaming
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 1283, in _write_chunked_streaming
     for chunk in body_iter:
                  ^^^^^^^^^
   File "/mnt/e/temp_git/fastapi-rust/tests/test_dependency_after_yield_streaming.py", line 80, in iter_data
@@ -875,7 +874,7 @@ _________________ test_websocket_dependency_after_yield_broken _________________
 tests/test_dependency_after_yield_websockets.py:78: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-self = <fastapi._testclient.WebSocketTestSession object at 0x7fd1a06ef250>
+self = <astraapi._testclient.WebSocketTestSession object at 0x7f3aac9c6990>
 
     def __enter__(self) -> "WebSocketTestSession":
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -885,7 +884,7 @@ self = <fastapi._testclient.WebSocketTestSession object at 0x7fd1a06ef250>
         if self._error:
             try:
                 import websockets.exceptions as _wse
-                from fastapi._websocket import WebSocketDisconnect
+                from astraapi._websocket import WebSocketDisconnect
                 if isinstance(self._error, (_wse.ConnectionClosedOK, _wse.ConnectionClosedError)):
                     rcvd = getattr(self._error, "rcvd", None)
                     if rcvd is not None:
@@ -899,31 +898,31 @@ self = <fastapi._testclient.WebSocketTestSession object at 0x7fd1a06ef250>
                         code = getattr(proto, "close_code", 1006) if proto else 1006
                         reason = ""
 >                   raise WebSocketDisconnect(code=code, reason=reason)
-E                   fastapi._websocket.WebSocketDisconnect: WebSocket disconnect: code=1000, reason=
+E                   astraapi._websocket.WebSocketDisconnect: WebSocket disconnect: code=1000, reason=
 
-fastapi/_testclient.py:60: WebSocketDisconnect
+astraapi/_testclient.py:60: WebSocketDisconnect
 ------------------------------ Captured log call -------------------------------
-ERROR    fastapi:_cpp_server.py:2384 Unhandled exception in WebSocket endpoint
+ERROR    astraapi:_cpp_server.py:2384 Unhandled exception in WebSocket endpoint
 Traceback (most recent call last):
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2371, in _handle_websocket
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2371, in _handle_websocket
     await _dispatch(ws.scope, ws.receive, ws.send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_app_base.py", line 134, in __call__
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_app_base.py", line 134, in __call__
     await self.router(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_routing_base.py", line 906, in __call__
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_routing_base.py", line 906, in __call__
     await self.middleware_stack(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_routing_base.py", line 927, in app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_routing_base.py", line 927, in app
     await route.handle(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_routing_base.py", line 596, in handle
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_routing_base.py", line 596, in handle
     await self.app(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/routing.py", line 176, in app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/routing.py", line 176, in app
     await wrap_app_handling_exceptions(app, session)(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_exception_handler.py", line 92, in wrapped_app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_exception_handler.py", line 92, in wrapped_app
     raise exc
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_exception_handler.py", line 78, in wrapped_app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_exception_handler.py", line 78, in wrapped_app
     await app(scope, receive, sender)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/routing.py", line 173, in app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/routing.py", line 173, in app
     await func(session)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/routing.py", line 660, in app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/routing.py", line 660, in app
     await dependant.call(**solved_result.values)
   File "/mnt/e/temp_git/fastapi-rust/tests/test_dependency_after_yield_websockets.py", line 59, in websocket_endpoint_broken
     for item in session:
@@ -958,18 +957,18 @@ E         ?                    ++++ ^
 
 tests/test_dependency_contextmanager.py:277: AssertionError
 ------------------------------ Captured log call -------------------------------
-ERROR    fastapi:_cpp_server.py:1990 Unhandled exception in endpoint
+ERROR    astraapi:_cpp_server.py:1990 Unhandled exception in endpoint
 Traceback (most recent call last):
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2250, in _handle_async_di
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2250, in _handle_async_di
     raw = await _call_and_write()
           ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2174, in _call_and_write
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2174, in _call_and_write
     _raw = await endpoint(**kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/applications.py", line 1555, in _response_shim
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/applications.py", line 1555, in _response_shim
     result = await _call_with_exc_handling()
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/applications.py", line 1526, in _call_with_exc_handling
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/applications.py", line 1526, in _call_with_exc_handling
     _r = await original_endpoint(**kwargs)
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/mnt/e/temp_git/fastapi-rust/tests/test_dependency_contextmanager.py", line 132, in get_context_b_raise
@@ -1014,18 +1013,18 @@ E         ?                    ++++ ^
 
 tests/test_dependency_contextmanager.py:387: AssertionError
 ------------------------------ Captured log call -------------------------------
-ERROR    fastapi:_cpp_server.py:1990 Unhandled exception in endpoint
+ERROR    astraapi:_cpp_server.py:1990 Unhandled exception in endpoint
 Traceback (most recent call last):
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2250, in _handle_async_di
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2250, in _handle_async_di
     raw = await _call_and_write()
           ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2174, in _call_and_write
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2174, in _call_and_write
     _raw = await endpoint(**kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/applications.py", line 1555, in _response_shim
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/applications.py", line 1555, in _response_shim
     result = await _call_with_exc_handling()
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/applications.py", line 1528, in _call_with_exc_handling
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/applications.py", line 1528, in _call_with_exc_handling
     _r = original_endpoint(**kwargs)
   File "/mnt/e/temp_git/fastapi-rust/tests/test_dependency_contextmanager.py", line 190, in get_sync_context_b_raise
     raise OtherDependencyError()
@@ -1371,7 +1370,7 @@ tests/test_dependency_partial.py:250: AssertionError
 ________________________ test_pep695_type_dependencies _________________________
 
     def test_pep695_type_dependencies():
-        app = FastAPI()
+        app = AstraAPI()
     
         @app.get("/")
         async def get_with_dep(value: DependedValue) -> str:  # noqa
@@ -1394,17 +1393,17 @@ ________________________ test_dependency_gets_exception ________________________
 
 tests/test_dependency_yield_except_httpexception.py:56: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:406: in put
+astraapi/_testclient.py:406: in put
     self._check_exc()
-fastapi/_testclient.py:371: in _check_exc
+astraapi/_testclient.py:371: in _check_exc
     raise exc
-fastapi/_cpp_server.py:2250: in _handle_async_di
+astraapi/_cpp_server.py:2250: in _handle_async_di
     raw = await _call_and_write()
           ^^^^^^^^^^^^^^^^^^^^^^^
-fastapi/_cpp_server.py:2174: in _call_and_write
+astraapi/_cpp_server.py:2174: in _call_and_write
     _raw = await endpoint(**kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^
-fastapi/applications.py:1555: in _response_shim
+astraapi/applications.py:1555: in _response_shim
     result = await _call_with_exc_handling()
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
@@ -1418,20 +1417,20 @@ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 E               TypeError: put_invalid_user() got an unexpected keyword argument '__body__'
 
-fastapi/applications.py:1528: TypeError
+astraapi/applications.py:1528: TypeError
 ------------------------------ Captured log call -------------------------------
-ERROR    fastapi:_cpp_server.py:1990 Unhandled exception in endpoint
+ERROR    astraapi:_cpp_server.py:1990 Unhandled exception in endpoint
 Traceback (most recent call last):
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2250, in _handle_async_di
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2250, in _handle_async_di
     raw = await _call_and_write()
           ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2174, in _call_and_write
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2174, in _call_and_write
     _raw = await endpoint(**kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/applications.py", line 1555, in _response_shim
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/applications.py", line 1555, in _response_shim
     result = await _call_with_exc_handling()
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/applications.py", line 1528, in _call_with_exc_handling
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/applications.py", line 1528, in _call_with_exc_handling
     _r = original_endpoint(**kwargs)
 TypeError: put_invalid_user() got an unexpected keyword argument '__body__'
 _________________________ test_dependency_no_exception _________________________
@@ -1444,17 +1443,17 @@ _________________________ test_dependency_no_exception _________________________
 
 tests/test_dependency_yield_except_httpexception.py:67: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:406: in put
+astraapi/_testclient.py:406: in put
     self._check_exc()
-fastapi/_testclient.py:371: in _check_exc
+astraapi/_testclient.py:371: in _check_exc
     raise exc
-fastapi/_cpp_server.py:2250: in _handle_async_di
+astraapi/_cpp_server.py:2250: in _handle_async_di
     raw = await _call_and_write()
           ^^^^^^^^^^^^^^^^^^^^^^^
-fastapi/_cpp_server.py:2174: in _call_and_write
+astraapi/_cpp_server.py:2174: in _call_and_write
     _raw = await endpoint(**kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^
-fastapi/applications.py:1555: in _response_shim
+astraapi/applications.py:1555: in _response_shim
     result = await _call_with_exc_handling()
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
@@ -1468,20 +1467,20 @@ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 E               TypeError: put_user() got an unexpected keyword argument '__body__'
 
-fastapi/applications.py:1528: TypeError
+astraapi/applications.py:1528: TypeError
 ------------------------------ Captured log call -------------------------------
-ERROR    fastapi:_cpp_server.py:1990 Unhandled exception in endpoint
+ERROR    astraapi:_cpp_server.py:1990 Unhandled exception in endpoint
 Traceback (most recent call last):
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2250, in _handle_async_di
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2250, in _handle_async_di
     raw = await _call_and_write()
           ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2174, in _call_and_write
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2174, in _call_and_write
     _raw = await endpoint(**kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/applications.py", line 1555, in _response_shim
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/applications.py", line 1555, in _response_shim
     result = await _call_with_exc_handling()
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/applications.py", line 1528, in _call_with_exc_handling
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/applications.py", line 1528, in _call_with_exc_handling
     _r = original_endpoint(**kwargs)
 TypeError: put_user() got an unexpected keyword argument '__body__'
 _____________________________ test_function_scope ______________________________
@@ -1538,7 +1537,7 @@ tests/test_dependency_yield_scope.py:218: AssertionError
 _______________________ test_app_level_dep_scope_request _______________________
 
     def test_app_level_dep_scope_request() -> None:
-        app = FastAPI(dependencies=[Depends(raise_after_yield, scope="request")])
+        app = AstraAPI(dependencies=[Depends(raise_after_yield, scope="request")])
     
         @app.get("/app-scope-request")
         def get_app_scope_request():
@@ -1754,7 +1753,7 @@ The above exception was the direct cause of the following exception:
 
 tests/test_extra_routes.py:81: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:428: in options
+astraapi/_testclient.py:428: in options
     resp = self._client.options(url, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .venv/lib/python3.14/site-packages/httpx/_client.py:1082: in options
@@ -1816,33 +1815,9 @@ E       assert 405 == 200
 E        +  where 405 = <Response [405 Method Not Allowed]>.status_code
 
 tests/test_extra_routes.py:94: AssertionError
-_______________________________ test_fastapi_cli _______________________________
-
-    def test_fastapi_cli():
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "coverage",
-                "run",
-                "-m",
-                "fastapi",
-                "dev",
-                "non_existent_file.py",
-            ],
-            capture_output=True,
-            encoding="utf-8",
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-        )
-        assert result.returncode == 1, result.stdout
->       assert "Path does not exist non_existent_file.py" in result.stdout
-E       assert 'Path does not exist non_existent_file.py' in 'To use the fastapi command, please install "fastapi[standard]":\n\n\tpip install "fastapi[standard]"\n\n'
-E        +  where 'To use the fastapi command, please install "fastapi[standard]":\n\n\tpip install "fastapi[standard]"\n\n' = CompletedProcess(args=['/mnt/e/temp_git/fastapi-rust/.venv/bin/python3', '-m', 'coverage', 'run', '-m', 'fastapi', 'de...untimeError: To use the fastapi command, please install "fastapi[standard]":\n\n\tpip install "fastapi[standard]"\n\n').stdout
-
-tests/test_fastapi_cli.py:27: AssertionError
 ____________________________ test_filter_sub_model _____________________________
 
-client = <fastapi._testclient.TestClient object at 0x7fd1786175c0>
+client = <astraapi._testclient.TestClient object at 0x7f3a845e3980>
 
     def test_filter_sub_model(client: TestClient):
         response = client.get("/model/modelA")
@@ -1854,12 +1829,12 @@ E        +  where 500 = <Response [500 Internal Server Error]>.status_code
 tests/test_filter_pydantic_sub_model_pv2.py:53: AssertionError
 ___________________________ test_validator_is_cloned ___________________________
 
-client = <fastapi._testclient.TestClient object at 0x7fd1786167b0>
+client = <astraapi._testclient.TestClient object at 0x7f3aa41a5310>
 
     def test_validator_is_cloned(client: TestClient):
 >       with pytest.raises(ResponseValidationError) as err:
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E       Failed: DID NOT RAISE <class 'fastapi.exceptions.ResponseValidationError'>
+E       Failed: DID NOT RAISE <class 'astraapi.exceptions.ResponseValidationError'>
 
 tests/test_filter_pydantic_sub_model_pv2.py:63: Failed
 ______________________________ test_get_with_body ______________________________
@@ -1889,7 +1864,7 @@ _________________________ test_value_extracting_by_ws __________________________
 tests/test_http_connection_injection.py:38: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-self = <fastapi._testclient.WebSocketTestSession object at 0x7fd1546ce350>
+self = <astraapi._testclient.WebSocketTestSession object at 0x7f3a8435d650>
 
     def __enter__(self) -> "WebSocketTestSession":
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -1899,7 +1874,7 @@ self = <fastapi._testclient.WebSocketTestSession object at 0x7fd1546ce350>
         if self._error:
             try:
                 import websockets.exceptions as _wse
-                from fastapi._websocket import WebSocketDisconnect
+                from astraapi._websocket import WebSocketDisconnect
                 if isinstance(self._error, (_wse.ConnectionClosedOK, _wse.ConnectionClosedError)):
                     rcvd = getattr(self._error, "rcvd", None)
                     if rcvd is not None:
@@ -1913,37 +1888,37 @@ self = <fastapi._testclient.WebSocketTestSession object at 0x7fd1546ce350>
                         code = getattr(proto, "close_code", 1006) if proto else 1006
                         reason = ""
 >                   raise WebSocketDisconnect(code=code, reason=reason)
-E                   fastapi._websocket.WebSocketDisconnect: WebSocket disconnect: code=1000, reason=
+E                   astraapi._websocket.WebSocketDisconnect: WebSocket disconnect: code=1000, reason=
 
-fastapi/_testclient.py:60: WebSocketDisconnect
+astraapi/_testclient.py:60: WebSocketDisconnect
 ------------------------------ Captured log call -------------------------------
-ERROR    fastapi:_cpp_server.py:2384 Unhandled exception in WebSocket endpoint
+ERROR    astraapi:_cpp_server.py:2384 Unhandled exception in WebSocket endpoint
 Traceback (most recent call last):
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_cpp_server.py", line 2371, in _handle_websocket
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_cpp_server.py", line 2371, in _handle_websocket
     await _dispatch(ws.scope, ws.receive, ws.send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_app_base.py", line 134, in __call__
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_app_base.py", line 134, in __call__
     await self.router(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_routing_base.py", line 906, in __call__
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_routing_base.py", line 906, in __call__
     await self.middleware_stack(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_routing_base.py", line 927, in app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_routing_base.py", line 927, in app
     await route.handle(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_routing_base.py", line 596, in handle
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_routing_base.py", line 596, in handle
     await self.app(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/routing.py", line 176, in app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/routing.py", line 176, in app
     await wrap_app_handling_exceptions(app, session)(scope, receive, send)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_exception_handler.py", line 92, in wrapped_app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_exception_handler.py", line 92, in wrapped_app
     raise exc
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/_exception_handler.py", line 78, in wrapped_app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/_exception_handler.py", line 78, in wrapped_app
     await app(scope, receive, sender)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/routing.py", line 173, in app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/routing.py", line 173, in app
     await func(session)
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/routing.py", line 647, in app
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/routing.py", line 647, in app
     solved_result = await solve_dependencies(
                     ^^^^^^^^^^^^^^^^^^^^^^^^^
     ...<5 lines>...
     )
     ^
-  File "/mnt/e/temp_git/fastapi-rust/fastapi/dependencies/utils.py", line 690, in solve_dependencies
+  File "/mnt/e/temp_git/fastapi-rust/astraapi/dependencies/utils.py", line 690, in solve_dependencies
     solved = await call(**solved_result.values)
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/mnt/e/temp_git/fastapi-rust/tests/test_http_connection_injection.py", line 11, in extract_value_from_http_connection
@@ -1982,7 +1957,7 @@ E         ...Full output truncated (4 lines hidden), use '-vv' to show
 
 tests/test_no_swagger_ui_redirect.py:21: AssertionError
 ----------------------------- Captured stdout call -----------------------------
-http://127.0.0.1:43967
+http://127.0.0.1:39039
 ______________________ test_swagger_ui_no_oauth2_redirect ______________________
 
     def test_swagger_ui_no_oauth2_redirect():
@@ -2063,7 +2038,7 @@ _________________________ test_signatures_consistency __________________________
         base_sig = inspect.signature(APIRouter.get)
         for method_name in method_names:
             router_method = getattr(APIRouter, method_name)
-            app_method = getattr(FastAPI, method_name)
+            app_method = getattr(AstraAPI, method_name)
             router_sig = inspect.signature(router_method)
             app_sig = inspect.signature(app_method)
             param: inspect.Parameter
@@ -2186,11 +2161,11 @@ _________________________ test_cookie_pass_extra_list __________________________
 
 tests/test_query_cookie_header_model_extra_params.py:101: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:388: in get
+astraapi/_testclient.py:388: in get
     self._apply_cookies()
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-self = <fastapi._testclient.TestClient object at 0x7fd134197b60>
+self = <astraapi._testclient.TestClient object at 0x7f3a44170c80>
 
     def _apply_cookies(self) -> None:
         """Sync instance cookies to the underlying httpx client."""
@@ -2199,7 +2174,7 @@ self = <fastapi._testclient.TestClient object at 0x7fd134197b60>
                                ^^^^^^^^^^^^^^^^^^
 E           AttributeError: 'list' object has no attribute 'items'
 
-fastapi/_testclient.py:381: AttributeError
+astraapi/_testclient.py:381: AttributeError
 ___________________________ test_cookie_is_set_once ____________________________
 
     def test_cookie_is_set_once():
@@ -6603,7 +6578,7 @@ The above exception was the direct cause of the following exception:
 
 tests/test_response_code_no_body.py:48: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:389: in get
+astraapi/_testclient.py:389: in get
     resp = self._client.get(url, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .venv/lib/python3.14/site-packages/httpx/_client.py:1053: in get
@@ -6659,7 +6634,7 @@ _____________________ test_response_with_depends_annotated _____________________
 
     def test_response_with_depends_annotated():
         """Response type hint should work with Annotated[Response, Depends(...)]."""
-        app = FastAPI()
+        app = AstraAPI()
     
         def modify_response(response: Response) -> Response:
             response.headers["X-Custom"] = "modified"
@@ -6685,7 +6660,7 @@ ______________________ test_response_with_depends_default ______________________
 
     def test_response_with_depends_default():
         """Response type hint should work with Response = Depends(...)."""
-        app = FastAPI()
+        app = AstraAPI()
     
         def modify_response(response: Response) -> Response:
             response.headers["X-Custom"] = "modified"
@@ -6711,7 +6686,7 @@ ________________________ test_response_dependency_chain ________________________
 
     def test_response_dependency_chain():
         """Response dependency should work in a chain of dependencies."""
-        app = FastAPI()
+        app = AstraAPI()
     
         def first_modifier(response: Response) -> Response:
             response.headers["X-First"] = "1"
@@ -6744,19 +6719,19 @@ state = State(app_startup=True, app_shutdown=True, router_startup=True, router_s
 
     def test_router_nested_lifespan_state(state: State) -> None:
         @asynccontextmanager
-        async def lifespan(app: FastAPI) -> AsyncGenerator[dict[str, bool], None]:
+        async def lifespan(app: AstraAPI) -> AsyncGenerator[dict[str, bool], None]:
             state.app_startup = True
             yield {"app": True}
             state.app_shutdown = True
     
         @asynccontextmanager
-        async def router_lifespan(app: FastAPI) -> AsyncGenerator[dict[str, bool], None]:
+        async def router_lifespan(app: AstraAPI) -> AsyncGenerator[dict[str, bool], None]:
             state.router_startup = True
             yield {"router": True}
             state.router_shutdown = True
     
         @asynccontextmanager
-        async def subrouter_lifespan(app: FastAPI) -> AsyncGenerator[dict[str, bool], None]:
+        async def subrouter_lifespan(app: AstraAPI) -> AsyncGenerator[dict[str, bool], None]:
             state.sub_router_startup = True
             yield {"sub_router": True}
             state.sub_router_shutdown = True
@@ -6766,7 +6741,7 @@ state = State(app_startup=True, app_shutdown=True, router_startup=True, router_s
         router = APIRouter(lifespan=router_lifespan)
         router.include_router(sub_router)
     
-        app = FastAPI(lifespan=lifespan)
+        app = AstraAPI(lifespan=lifespan)
         app.include_router(router)
     
         @app.get("/")
@@ -6897,7 +6872,7 @@ The above exception was the direct cause of the following exception:
 
 tests/test_security_http_base.py:25: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:389: in get
+astraapi/_testclient.py:389: in get
     resp = self._client.get(url, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .venv/lib/python3.14/site-packages/httpx/_client.py:1053: in get
@@ -7028,7 +7003,7 @@ __________________________ test_strict_login_no_data ___________________________
 E       AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
 E         
 E         Differing items:
-E         {'detail': [{'input': None, 'loc': ['body', 'username'], 'msg': 'Field required', 'type': 'missing'}, {'input': None, ...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': None, 'loc': ['body', 'grant_type'], 'msg': 'Field required', 'type': 'missing'}, {'input': None...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]}
+E         {'detail': [{'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}, {'input': None, ...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'username'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': None, 'loc': ['body', 'grant_type'], 'msg': 'Field required', 'type': 'missing'}, {'input': None...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]}
 E         Use -v to get more diff
 
 tests/test_security_oauth2.py:66: AssertionError
@@ -7114,8 +7089,8 @@ _____________________ test_strict_login_correct_grant_type _____________________
             "client_id": None,
             "client_secret": None,
         }
-E       AssertionError: assert '<fastapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7fd05476cfc0>' == {'client_id': None, 'client_secret': None, 'grant_type': 'password', 'password': 'secret', ...}
-E        +  where '<fastapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7fd05476cfc0>' = json()
+E       AssertionError: assert '<astraapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7f398c394c30>' == {'client_id': None, 'client_secret': None, 'grant_type': 'password', 'password': 'secret', ...}
+E        +  where '<astraapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7f398c394c30>' = json()
 E        +    where json = <Response [200 OK]>.json
 
 tests/test_security_oauth2.py:138: AssertionError
@@ -7174,7 +7149,7 @@ The above exception was the direct cause of the following exception:
 
 tests/test_security_oauth2_authorization_code_bearer.py:41: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:389: in get
+astraapi/_testclient.py:389: in get
     resp = self._client.get(url, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .venv/lib/python3.14/site-packages/httpx/_client.py:1053: in get
@@ -7276,7 +7251,7 @@ __________________________ test_strict_login_no_data ___________________________
 E       AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
 E         
 E         Differing items:
-E         {'detail': [{'input': None, 'loc': ['body', 'username'], 'msg': 'Field required', 'type': 'missing'}, {'input': None, ...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': None, 'loc': ['body', 'grant_type'], 'msg': 'Field required', 'type': 'missing'}, {'input': None...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]}
+E         {'detail': [{'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}, {'input': None, ...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'username'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': None, 'loc': ['body', 'grant_type'], 'msg': 'Field required', 'type': 'missing'}, {'input': None...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]}
 E         Use -v to get more diff
 
 tests/test_security_oauth2_optional.py:69: AssertionError
@@ -7362,8 +7337,8 @@ ________________________ test_strict_login_correct_data ________________________
             "client_id": None,
             "client_secret": None,
         }
-E       AssertionError: assert '<fastapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7fd0542a8490>' == {'client_id': None, 'client_secret': None, 'grant_type': 'password', 'password': 'secret', ...}
-E        +  where '<fastapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7fd0542a8490>' = json()
+E       AssertionError: assert '<astraapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7f3964598380>' == {'client_id': None, 'client_secret': None, 'grant_type': 'password', 'password': 'secret', ...}
+E        +  where '<astraapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7f3964598380>' = json()
 E        +    where json = <Response [200 OK]>.json
 
 tests/test_security_oauth2_optional.py:141: AssertionError
@@ -7397,7 +7372,7 @@ ____________________________ test_strict_login_None ____________________________
 E       AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
 E         
 E         Differing items:
-E         {'detail': [{'input': None, 'loc': ['body', 'username'], 'msg': 'Field required', 'type': 'missing'}, {'input': None, ...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': None, 'loc': ['body', 'grant_type'], 'msg': 'Field required', 'type': 'missing'}, {'input': None...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]}
+E         {'detail': [{'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}, {'input': None, ...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'username'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': None, 'loc': ['body', 'grant_type'], 'msg': 'Field required', 'type': 'missing'}, {'input': None...quired', 'type': 'missing'}, {'input': None, 'loc': ['body', 'password'], 'msg': 'Field required', 'type': 'missing'}]}
 E         Use -v to get more diff
 
 tests/test_security_oauth2_optional_description.py:70: AssertionError
@@ -7483,14 +7458,14 @@ _________________ test_strict_login_correct_correct_grant_type _________________
             "client_id": None,
             "client_secret": None,
         }
-E       AssertionError: assert '<fastapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7fd05426b6b0>' == {'client_id': None, 'client_secret': None, 'grant_type': 'password', 'password': 'secret', ...}
-E        +  where '<fastapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7fd05426b6b0>' = json()
+E       AssertionError: assert '<astraapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7f39645747d0>' == {'client_id': None, 'client_secret': None, 'grant_type': 'password', 'password': 'secret', ...}
+E        +  where '<astraapi.security.oauth2.OAuth2PasswordRequestFormStrict object at 0x7f39645747d0>' = json()
 E        +    where json = <Response [200 OK]>.json
 
 tests/test_security_oauth2_optional_description.py:142: AssertionError
 _________________ test_security_scopes_sub_dependency_caching __________________
 
-client = <fastapi._testclient.TestClient object at 0x7fd054269d60>
+client = <astraapi._testclient.TestClient object at 0x7f396428f200>
 call_counts = {'get_current_user': 2, 'get_db_session': 1, 'get_user_items': 1, 'get_user_me': 2}
 
     def test_security_scopes_sub_dependency_caching(
@@ -7622,7 +7597,7 @@ The above exception was the direct cause of the following exception:
 
 tests/test_starlette_exception.py:74: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-fastapi/_testclient.py:389: in get
+astraapi/_testclient.py:389: in get
     resp = self._client.get(url, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .venv/lib/python3.14/site-packages/httpx/_client.py:1053: in get
@@ -7682,7 +7657,7 @@ _________________________ test_stringified_annotation __________________________
         async def get_current_user() -> DummyUser | None:
             return None
     
-        app = FastAPI()
+        app = AstraAPI()
     
         client = TestClient(app)
     
@@ -7705,15 +7680,15 @@ _______________________________ test_swagger_ui ________________________________
         assert response.status_code == 200, response.text
         print(response.text)
 >       assert "ui.initOAuth" in response.text
-E       assert 'ui.initOAuth' in '<!DOCTYPE html>\n<html>\n<head>\n<title>FastAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport" ...2RedirectUrl": window.location.origin + \'/docs/oauth2-redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>'
-E        +  where '<!DOCTYPE html>\n<html>\n<head>\n<title>FastAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport" ...2RedirectUrl": window.location.origin + \'/docs/oauth2-redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>' = <Response [200 OK]>.text
+E       assert 'ui.initOAuth' in '<!DOCTYPE html>\n<html>\n<head>\n<title>AstraAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport"...2RedirectUrl": window.location.origin + \'/docs/oauth2-redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>'
+E        +  where '<!DOCTYPE html>\n<html>\n<head>\n<title>AstraAPI - Swagger UI</title>\n<meta charset="utf-8"/>\n<meta name="viewport"...2RedirectUrl": window.location.origin + \'/docs/oauth2-redirect\',\n})\nwindow.ui = ui\n}\n</script>\n</body>\n</html>' = <Response [200 OK]>.text
 
 tests/test_swagger_ui_init_oauth.py:21: AssertionError
 ----------------------------- Captured stdout call -----------------------------
 <!DOCTYPE html>
 <html>
 <head>
-<title>FastAPI - Swagger UI</title>
+<title>AstraAPI - Swagger UI</title>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" >
@@ -7743,6 +7718,267 @@ window.ui = ui
 </script>
 </body>
 </html>
+__________________ test_path_operation_img[tutorial002_py39] ___________________
+
+client = <astraapi._testclient.TestClient object at 0x7f3964170c80>
+
+    def test_path_operation_img(client: TestClient):
+>       shutil.copy("./docs/en/docs/img/favicon.png", "./image.png")
+
+tests/test_tutorial/test_additional_responses/test_tutorial002.py:33: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.14/shutil.py:489: in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+src = './docs/en/docs/img/favicon.png', dst = './image.png'
+
+    def copyfile(src, dst, *, follow_symlinks=True):
+        """Copy data from src to dst in the most efficient way possible.
+    
+        If follow_symlinks is not set and src is a symbolic link, a new
+        symlink will be created instead of copying the file it points to.
+    
+        """
+        sys.audit("shutil.copyfile", src, dst)
+    
+        if _samefile(src, dst):
+            raise SameFileError("{!r} and {!r} are the same file".format(src, dst))
+    
+        file_size = 0
+        for i, fn in enumerate([src, dst]):
+            try:
+                st = _stat(fn)
+            except OSError:
+                # File most likely does not exist
+                pass
+            else:
+                # XXX What about other special files? (sockets, devices...)
+                if stat.S_ISFIFO(st.st_mode):
+                    fn = fn.path if isinstance(fn, os.DirEntry) else fn
+                    raise SpecialFileError("`%s` is a named pipe" % fn)
+                if _WINDOWS and i == 0:
+                    file_size = st.st_size
+    
+        if not follow_symlinks and _islink(src):
+            os.symlink(os.readlink(src), dst)
+        else:
+>           with open(src, 'rb') as fsrc:
+                 ^^^^^^^^^^^^^^^
+E           FileNotFoundError: [Errno 2] No such file or directory: './docs/en/docs/img/favicon.png'
+
+/usr/local/lib/python3.14/shutil.py:313: FileNotFoundError
+__________________ test_path_operation_img[tutorial002_py310] __________________
+
+client = <astraapi._testclient.TestClient object at 0x7f3964172f30>
+
+    def test_path_operation_img(client: TestClient):
+>       shutil.copy("./docs/en/docs/img/favicon.png", "./image.png")
+
+tests/test_tutorial/test_additional_responses/test_tutorial002.py:33: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.14/shutil.py:489: in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+src = './docs/en/docs/img/favicon.png', dst = './image.png'
+
+    def copyfile(src, dst, *, follow_symlinks=True):
+        """Copy data from src to dst in the most efficient way possible.
+    
+        If follow_symlinks is not set and src is a symbolic link, a new
+        symlink will be created instead of copying the file it points to.
+    
+        """
+        sys.audit("shutil.copyfile", src, dst)
+    
+        if _samefile(src, dst):
+            raise SameFileError("{!r} and {!r} are the same file".format(src, dst))
+    
+        file_size = 0
+        for i, fn in enumerate([src, dst]):
+            try:
+                st = _stat(fn)
+            except OSError:
+                # File most likely does not exist
+                pass
+            else:
+                # XXX What about other special files? (sockets, devices...)
+                if stat.S_ISFIFO(st.st_mode):
+                    fn = fn.path if isinstance(fn, os.DirEntry) else fn
+                    raise SpecialFileError("`%s` is a named pipe" % fn)
+                if _WINDOWS and i == 0:
+                    file_size = st.st_size
+    
+        if not follow_symlinks and _islink(src):
+            os.symlink(os.readlink(src), dst)
+        else:
+>           with open(src, 'rb') as fsrc:
+                 ^^^^^^^^^^^^^^^
+E           FileNotFoundError: [Errno 2] No such file or directory: './docs/en/docs/img/favicon.png'
+
+/usr/local/lib/python3.14/shutil.py:313: FileNotFoundError
+__________________ test_path_operation_img[tutorial004_py39] ___________________
+
+client = <astraapi._testclient.TestClient object at 0x7f3964173200>
+
+    def test_path_operation_img(client: TestClient):
+>       shutil.copy("./docs/en/docs/img/favicon.png", "./image.png")
+
+tests/test_tutorial/test_additional_responses/test_tutorial004.py:33: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.14/shutil.py:489: in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+src = './docs/en/docs/img/favicon.png', dst = './image.png'
+
+    def copyfile(src, dst, *, follow_symlinks=True):
+        """Copy data from src to dst in the most efficient way possible.
+    
+        If follow_symlinks is not set and src is a symbolic link, a new
+        symlink will be created instead of copying the file it points to.
+    
+        """
+        sys.audit("shutil.copyfile", src, dst)
+    
+        if _samefile(src, dst):
+            raise SameFileError("{!r} and {!r} are the same file".format(src, dst))
+    
+        file_size = 0
+        for i, fn in enumerate([src, dst]):
+            try:
+                st = _stat(fn)
+            except OSError:
+                # File most likely does not exist
+                pass
+            else:
+                # XXX What about other special files? (sockets, devices...)
+                if stat.S_ISFIFO(st.st_mode):
+                    fn = fn.path if isinstance(fn, os.DirEntry) else fn
+                    raise SpecialFileError("`%s` is a named pipe" % fn)
+                if _WINDOWS and i == 0:
+                    file_size = st.st_size
+    
+        if not follow_symlinks and _islink(src):
+            os.symlink(os.readlink(src), dst)
+        else:
+>           with open(src, 'rb') as fsrc:
+                 ^^^^^^^^^^^^^^^
+E           FileNotFoundError: [Errno 2] No such file or directory: './docs/en/docs/img/favicon.png'
+
+/usr/local/lib/python3.14/shutil.py:313: FileNotFoundError
+__________________ test_path_operation_img[tutorial004_py310] __________________
+
+client = <astraapi._testclient.TestClient object at 0x7f39641acaa0>
+
+    def test_path_operation_img(client: TestClient):
+>       shutil.copy("./docs/en/docs/img/favicon.png", "./image.png")
+
+tests/test_tutorial/test_additional_responses/test_tutorial004.py:33: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/usr/local/lib/python3.14/shutil.py:489: in copy
+    copyfile(src, dst, follow_symlinks=follow_symlinks)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+src = './docs/en/docs/img/favicon.png', dst = './image.png'
+
+    def copyfile(src, dst, *, follow_symlinks=True):
+        """Copy data from src to dst in the most efficient way possible.
+    
+        If follow_symlinks is not set and src is a symbolic link, a new
+        symlink will be created instead of copying the file it points to.
+    
+        """
+        sys.audit("shutil.copyfile", src, dst)
+    
+        if _samefile(src, dst):
+            raise SameFileError("{!r} and {!r} are the same file".format(src, dst))
+    
+        file_size = 0
+        for i, fn in enumerate([src, dst]):
+            try:
+                st = _stat(fn)
+            except OSError:
+                # File most likely does not exist
+                pass
+            else:
+                # XXX What about other special files? (sockets, devices...)
+                if stat.S_ISFIFO(st.st_mode):
+                    fn = fn.path if isinstance(fn, os.DirEntry) else fn
+                    raise SpecialFileError("`%s` is a named pipe" % fn)
+                if _WINDOWS and i == 0:
+                    file_size = st.st_size
+    
+        if not follow_symlinks and _islink(src):
+            os.symlink(os.readlink(src), dst)
+        else:
+>           with open(src, 'rb') as fsrc:
+                 ^^^^^^^^^^^^^^^
+E           FileNotFoundError: [Errno 2] No such file or directory: './docs/en/docs/img/favicon.png'
+
+/usr/local/lib/python3.14/shutil.py:313: FileNotFoundError
+_________________________ test_redirect_response_class _________________________
+
+    def test_redirect_response_class():
+        response = client.get("/fastapi", follow_redirects=False)
+        assert response.status_code == 307
+>       assert response.headers["location"] == "https://astraapi.tiangolo.com"
+E       AssertionError: assert 'https://fastapi.tiangolo.com' == 'https://astr....tiangolo.com'
+E         
+E         - https://astraapi.tiangolo.com
+E         ?            --
+E         + https://fastapi.tiangolo.com
+E         ?         +
+
+tests/test_tutorial/test_custom_response/test_tutorial006b.py:11: AssertionError
+_____________________________ test_openapi_schema ______________________________
+
+    def test_openapi_schema():
+        response = client.get("/openapi.json")
+        assert response.status_code == 200, response.text
+>       assert response.json() == {
+            "openapi": "3.1.0",
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
+            "paths": {
+                "/fastapi": {
+                    "get": {
+                        "summary": "Redirect Fastapi",
+                        "operationId": "redirect_astraapi_astraapi_get",
+                        "responses": {"307": {"description": "Successful Response"}},
+                    }
+                }
+            },
+        }
+E       AssertionError: assert {'info': {'ti...t Fastapi'}}}} == {'info': {'ti...t Fastapi'}}}}
+E         
+E         Omitting 2 identical items, use -vv to show
+E         Differing items:
+E         {'paths': {'/fastapi': {'get': {'operationId': 'redirect_fastapi_fastapi_get', 'responses': {'307': {'description': 'Successful Response'}}, 'summary': 'Redirect Fastapi'}}}} != {'paths': {'/fastapi': {'get': {'operationId': 'redirect_astraapi_astraapi_get', 'responses': {'307': {'description': 'Successful Response'}}, 'summary': 'Redirect Fastapi'}}}}
+E         Use -v to get more diff
+
+tests/test_tutorial/test_custom_response/test_tutorial006b.py:17: AssertionError
+__________________________________ test_post ___________________________________
+
+    def test_post():
+        response = client.post("/items/", content=b"this is actually not validated")
+        assert response.status_code == 200, response.text
+>       assert response.json() == {
+            "size": 30,
+            "content": {
+                "name": "Maaaagic",
+                "price": 42,
+                "description": "Just kiddin', no magic here. ✨",
+            },
+        }
+E       AssertionError: assert {'content': {...2}, 'size': 0} == {'content': {...}, 'size': 30}
+E         
+E         Omitting 1 identical items, use -vv to show
+E         Differing items:
+E         {'size': 0} != {'size': 30}
+E         Use -v to get more diff
+
+tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial006.py:11: AssertionError
 ___________ test_request_validation_error_includes_endpoint_context ____________
 
     def test_request_validation_error_includes_endpoint_context():
@@ -7769,7 +8005,7 @@ ___________ test_response_validation_error_includes_endpoint_context ___________
     
 >       assert captured_exception.exception is not None
 E       assert None is not None
-E        +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7fd1aa3792b0>.exception
+E        +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7f3aacd03230>.exception
 
 tests/test_validation_error_context.py:107: AssertionError
 _______ test_subapp_websocket_validation_error_includes_endpoint_context _______
@@ -7784,7 +8020,7 @@ _______ test_subapp_websocket_validation_error_includes_endpoint_context _______
     
 >       assert captured_exception.exception is not None
 E       assert None is not None
-E        +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7fd1aa3792b0>.exception
+E        +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7f3aacd03230>.exception
 
 tests/test_validation_error_context.py:148: AssertionError
 =========================== short test summary info ============================
@@ -7839,7 +8075,6 @@ FAILED tests/test_exception_handlers.py::test_traceback_for_dependency_with_yiel
 FAILED tests/test_extra_routes.py::test_head - KeyError: 'x-fastapi-item-id'
 FAILED tests/test_extra_routes.py::test_options - httpx.RemoteProtocolError: ...
 FAILED tests/test_extra_routes.py::test_trace - AssertionError: {"detail":"Me...
-FAILED tests/test_fastapi_cli.py::test_fastapi_cli - assert 'Path does not ex...
 FAILED tests/test_filter_pydantic_sub_model_pv2.py::test_filter_sub_model - A...
 FAILED tests/test_filter_pydantic_sub_model_pv2.py::test_validator_is_cloned
 FAILED tests/test_get_request_body.py::test_get_with_body - AssertionError: a...
@@ -8088,7 +8323,14 @@ FAILED tests/test_serialize_response_dataclass.py::test_no_response_model_object
 FAILED tests/test_starlette_exception.py::test_no_body_status_code_with_detail_exception_handlers
 FAILED tests/test_stringified_annotation_dependency_py314.py::test_stringified_annotation
 FAILED tests/test_swagger_ui_init_oauth.py::test_swagger_ui - assert 'ui.init...
+FAILED tests/test_tutorial/test_additional_responses/test_tutorial002.py::test_path_operation_img[tutorial002_py39]
+FAILED tests/test_tutorial/test_additional_responses/test_tutorial002.py::test_path_operation_img[tutorial002_py310]
+FAILED tests/test_tutorial/test_additional_responses/test_tutorial004.py::test_path_operation_img[tutorial004_py39]
+FAILED tests/test_tutorial/test_additional_responses/test_tutorial004.py::test_path_operation_img[tutorial004_py310]
+FAILED tests/test_tutorial/test_custom_response/test_tutorial006b.py::test_redirect_response_class
+FAILED tests/test_tutorial/test_custom_response/test_tutorial006b.py::test_openapi_schema
+FAILED tests/test_tutorial/test_path_operation_advanced_configurations/test_tutorial006.py::test_post
 FAILED tests/test_validation_error_context.py::test_request_validation_error_includes_endpoint_context
 FAILED tests/test_validation_error_context.py::test_response_validation_error_includes_endpoint_context
 FAILED tests/test_validation_error_context.py::test_subapp_websocket_validation_error_includes_endpoint_context
-===== 303 failed, 3429 passed, 3 skipped, 9 xfailed in 1358.07s (0:22:38) ======
+===== 309 failed, 3419 passed, 3 skipped, 9 xfailed in 1626.62s (0:27:06) ======

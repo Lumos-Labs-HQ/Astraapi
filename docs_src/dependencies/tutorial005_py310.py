@@ -1,6 +1,6 @@
-from fastapi import Cookie, Depends, FastAPI
+from astraapi import Cookie, Depends, AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def query_extractor(q: str | None = None):

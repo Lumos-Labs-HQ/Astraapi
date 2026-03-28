@@ -3,9 +3,9 @@ from contextlib import contextmanager
 from typing import Annotated, Any
 
 import pytest
-from fastapi import Depends, FastAPI
-from fastapi.responses import StreamingResponse
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.responses import StreamingResponse
+from astraapi.testclient import TestClient
 
 
 class Session:
@@ -44,7 +44,7 @@ def broken_dep_session() -> Any:
 SessionDep = Annotated[Session, Depends(dep_session)]
 BrokenSessionDep = Annotated[Session, Depends(broken_dep_session)]
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/data")

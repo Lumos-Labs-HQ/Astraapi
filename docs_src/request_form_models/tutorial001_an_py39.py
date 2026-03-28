@@ -1,9 +1,9 @@
 from typing import Annotated
 
-from fastapi import FastAPI, Form
+from astraapi import AstraAPI, Form
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class FormData(BaseModel):

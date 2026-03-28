@@ -1,7 +1,7 @@
 import functools
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 from .forward_reference_type import forwardref_method
 
@@ -21,7 +21,7 @@ def test_wrapped_method_type_inference():
     then the types are still processed correctly, including dereferencing of forward
     references.
     """
-    app = FastAPI()
+    app = AstraAPI()
     client = TestClient(app)
     app.post("/endpoint")(passthrough(forwardref_method))
     app.post("/endpoint2")(passthrough(passthrough(forwardref_method)))

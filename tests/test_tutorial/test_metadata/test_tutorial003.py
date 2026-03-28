@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from docs_src.metadata.tutorial003_py39 import app
 
@@ -17,7 +17,7 @@ def test_openapi_schema():
     assert response.json() == {
         "openapi": "3.1.0",
         "info": {
-            "title": "FastAPI",
+            "title": "AstraAPI",
             "version": "0.1.0",
         },
         "paths": {
@@ -45,7 +45,7 @@ def test_swagger_ui_default_url():
 def test_swagger_ui_custom_url():
     response = client.get("/documentation")
     assert response.status_code == 200, response.text
-    assert "<title>FastAPI - Swagger UI</title>" in response.text
+    assert "<title>AstraAPI - Swagger UI</title>" in response.text
 
 
 def test_redoc_ui_default_url():

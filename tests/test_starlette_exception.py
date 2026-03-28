@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, HTTPException
+from astraapi.testclient import TestClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-app = FastAPI()
+app = AstraAPI()
 
 items = {"foo": "The Foo Wrestlers"}
 
@@ -81,7 +81,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/http-no-body-statuscode-exception": {
                 "get": {

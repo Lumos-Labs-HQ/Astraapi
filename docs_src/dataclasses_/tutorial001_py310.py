@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
 
 @dataclass
@@ -11,7 +11,7 @@ class Item:
     tax: float | None = None
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/items/")

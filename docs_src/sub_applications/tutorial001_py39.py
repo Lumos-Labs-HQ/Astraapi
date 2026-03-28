@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/app")
@@ -8,7 +8,7 @@ def read_main():
     return {"message": "Hello World from main app"}
 
 
-subapi = FastAPI()
+subapi = AstraAPI()
 
 
 @subapi.get("/sub")

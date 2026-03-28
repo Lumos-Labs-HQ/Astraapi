@@ -1,8 +1,8 @@
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, WebSocket
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, Depends, AstraAPI, WebSocket
+from astraapi.testclient import TestClient
 
 
 def dependency_list() -> list[str]:
@@ -21,7 +21,7 @@ def create_dependency(name: str):
 
 router = APIRouter(dependencies=[create_dependency("router")])
 prefix_router = APIRouter(dependencies=[create_dependency("prefix_router")])
-app = FastAPI(dependencies=[create_dependency("app")])
+app = AstraAPI(dependencies=[create_dependency("app")])
 
 
 @app.websocket("/", dependencies=[create_dependency("index")])

@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
-app = FastAPI(swagger_ui_oauth2_redirect_url=None)
+app = AstraAPI(swagger_ui_oauth2_redirect_url=None)
 
 
 @app.get("/items/")

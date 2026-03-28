@@ -9,8 +9,8 @@ from tests.utils import skip_module_if_py_gte_314
 if sys.version_info >= (3, 14):
     skip_module_if_py_gte_314()
 
-from fastapi import FastAPI
-from fastapi.exceptions import PydanticV1NotSupportedError
+from astraapi import AstraAPI
+from astraapi.exceptions import PydanticV1NotSupportedError
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore", UserWarning)
@@ -21,7 +21,7 @@ def test_raises_pydantic_v1_model_in_endpoint_param() -> None:
     class ParamModelV1(BaseModel):
         name: str
 
-    app = FastAPI()
+    app = AstraAPI()
 
     with pytest.raises(PydanticV1NotSupportedError):
 
@@ -34,7 +34,7 @@ def test_raises_pydantic_v1_model_in_return_type() -> None:
     class ReturnModelV1(BaseModel):
         name: str
 
-    app = FastAPI()
+    app = AstraAPI()
 
     with pytest.raises(PydanticV1NotSupportedError):
 
@@ -47,7 +47,7 @@ def test_raises_pydantic_v1_model_in_response_model() -> None:
     class ResponseModelV1(BaseModel):
         name: str
 
-    app = FastAPI()
+    app = AstraAPI()
 
     with pytest.raises(PydanticV1NotSupportedError):
 
@@ -60,7 +60,7 @@ def test_raises_pydantic_v1_model_in_additional_responses_model() -> None:
     class ErrorModelV1(BaseModel):
         detail: str
 
-    app = FastAPI()
+    app = AstraAPI()
 
     with pytest.raises(PydanticV1NotSupportedError):
 
@@ -75,7 +75,7 @@ def test_raises_pydantic_v1_model_in_union() -> None:
     class ModelV1A(BaseModel):
         name: str
 
-    app = FastAPI()
+    app = AstraAPI()
 
     with pytest.raises(PydanticV1NotSupportedError):
 
@@ -88,7 +88,7 @@ def test_raises_pydantic_v1_model_in_sequence() -> None:
     class ModelV1A(BaseModel):
         name: str
 
-    app = FastAPI()
+    app = AstraAPI()
 
     with pytest.raises(PydanticV1NotSupportedError):
 

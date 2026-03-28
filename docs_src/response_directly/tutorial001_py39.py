@@ -1,9 +1,9 @@
 from datetime import datetime
 from typing import Union
 
-from fastapi import FastAPI
-from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from astraapi import AstraAPI
+from astraapi.encoders import jsonable_encoder
+from astraapi.responses import JSONResponse
 from pydantic import BaseModel
 
 
@@ -13,7 +13,7 @@ class Item(BaseModel):
     description: Union[str, None] = None
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.put("/items/{id}")

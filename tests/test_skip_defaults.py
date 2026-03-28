@@ -1,10 +1,10 @@
 from typing import Optional
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class SubModel(BaseModel):

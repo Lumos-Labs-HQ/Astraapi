@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
 description = """
 ChimichangApp API helps you do awesome stuff. 🚀
@@ -15,7 +15,7 @@ You will be able to:
 * **Read users** (_not implemented_).
 """
 
-app = FastAPI(
+app = AstraAPI(
     title="ChimichangApp",
     description=description,
     summary="Deadpool's favorite app. Nuff said.",

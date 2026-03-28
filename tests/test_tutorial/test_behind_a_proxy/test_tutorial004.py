@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 
 from docs_src.behind_a_proxy.tutorial004_py39 import app
@@ -18,7 +18,7 @@ def test_openapi_schema():
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "servers": [
                 {
                     "url": "https://stag.example.com",

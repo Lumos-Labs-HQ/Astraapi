@@ -1,7 +1,7 @@
-from fastapi import Depends, FastAPI, Response
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Response
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def set_cookie(*, response: Response):

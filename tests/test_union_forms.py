@@ -1,10 +1,10 @@
 from typing import Annotated, Union
 
-from fastapi import FastAPI, Form
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Form
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class UserForm(BaseModel):
@@ -64,7 +64,7 @@ def test_openapi_schema():
 
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/form-union/": {
                 "post": {

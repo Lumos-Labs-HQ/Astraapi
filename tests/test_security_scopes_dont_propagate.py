@@ -2,9 +2,9 @@
 
 from typing import Annotated, Any
 
-from fastapi import FastAPI, Security
-from fastapi.security import SecurityScopes
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Security
+from astraapi.security import SecurityScopes
+from astraapi.testclient import TestClient
 
 
 async def security1(scopes: SecurityScopes):
@@ -22,7 +22,7 @@ async def dep3(
     return {"dep1": dep1, "dep2": dep2}
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/scopes")

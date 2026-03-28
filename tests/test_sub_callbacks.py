@@ -1,10 +1,10 @@
 from typing import Optional
 
-from fastapi import APIRouter, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel, HttpUrl
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Invoice(BaseModel):
@@ -88,7 +88,7 @@ def test_openapi_schema():
         response = client.get("/openapi.json")
         assert response.json() == {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/invoices/": {
                     "post": {

@@ -1,7 +1,7 @@
 from typing import Any
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 
 
@@ -25,7 +25,7 @@ def test_read_with_orm_mode() -> None:
 
         model_config = {"from_attributes": True}
 
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.post("/people/", response_model=PersonRead)
     def create_person(person: PersonCreate) -> Any:

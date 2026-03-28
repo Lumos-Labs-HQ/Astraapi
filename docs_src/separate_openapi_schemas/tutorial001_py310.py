@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic import BaseModel
 
 
@@ -7,7 +7,7 @@ class Item(BaseModel):
     description: str | None = None
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/items/")

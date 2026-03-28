@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.routing import APIRoute
+from astraapi import AstraAPI
+from astraapi.routing import APIRoute
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/items/")
@@ -9,7 +9,7 @@ async def read_items():
     return [{"item_id": "Foo"}]
 
 
-def use_route_names_as_operation_ids(app: FastAPI) -> None:
+def use_route_names_as_operation_ids(app: AstraAPI) -> None:
     """
     Simplify operation IDs so that generated API clients have simpler function
     names.

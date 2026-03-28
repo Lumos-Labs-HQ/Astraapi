@@ -1,9 +1,9 @@
 from typing import Annotated
 
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import HTMLResponse
+from astraapi import AstraAPI, File, UploadFile
+from astraapi.responses import HTMLResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/files/")

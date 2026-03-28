@@ -1,16 +1,16 @@
 from typing import Annotated
 
 import pytest
-from fastapi import FastAPI, Query
-from fastapi.exceptions import FastAPIDeprecationWarning
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Query
+from astraapi.exceptions import AstraAPIDeprecationWarning
+from astraapi.testclient import TestClient
 
 from .utils import needs_py310
 
 
 def get_client():
-    app = FastAPI()
-    with pytest.warns(FastAPIDeprecationWarning):
+    app = AstraAPI()
+    with pytest.warns(AstraAPIDeprecationWarning):
 
         @app.get("/items/")
         async def read_items(
@@ -67,7 +67,7 @@ def test_openapi_schema():
     # insert_assert(response.json())
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/": {
                 "get": {

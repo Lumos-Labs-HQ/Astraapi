@@ -80,7 +80,7 @@ extern PyObject* g_500_body;              // pre-built 500 body dict
 // Fast integer-to-buffer (no snprintf overhead)
 int fast_i64_to_buf(char* buf, long long val);
 
-// Initialize all constants — call once from PyInit__fastapi_core
+// Initialize all constants — call once from PyInit__astraapi_core
 int init_asgi_constants();
 
 // Clean up all constants — call from module m_free

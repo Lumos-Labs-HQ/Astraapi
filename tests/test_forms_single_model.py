@@ -1,10 +1,10 @@
 from typing import Annotated, Optional
 
-from fastapi import FastAPI, Form
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Form
+from astraapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class FormModel(BaseModel):

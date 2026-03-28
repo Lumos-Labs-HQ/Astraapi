@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from docs_src.using_request_directly.tutorial001_py39 import app
 
@@ -16,7 +16,7 @@ def test_openapi():
     assert response.status_code == 200
     assert response.json() == {
         "info": {
-            "title": "FastAPI",
+            "title": "AstraAPI",
             "version": "0.1.0",
         },
         "openapi": "3.1.0",

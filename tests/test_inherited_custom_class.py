@@ -1,8 +1,8 @@
 import uuid
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 
@@ -27,7 +27,7 @@ class MyUuid:
 def test_pydanticv2():
     from pydantic import field_serializer
 
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/fast_uuid")
     def return_fast_uuid():

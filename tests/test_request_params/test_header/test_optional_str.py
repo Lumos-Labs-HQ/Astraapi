@@ -1,11 +1,11 @@
 from typing import Annotated, Optional
 
 import pytest
-from fastapi import FastAPI, Header
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Header
+from astraapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
-app = FastAPI()
+app = AstraAPI()
 
 # =====================================================================================
 # Without aliases

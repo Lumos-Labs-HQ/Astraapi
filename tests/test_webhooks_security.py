@@ -1,12 +1,12 @@
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import FastAPI, Security
-from fastapi.security import HTTPBearer
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Security
+from astraapi.security import HTTPBearer
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 bearer_scheme = HTTPBearer()
 
@@ -41,7 +41,7 @@ def test_openapi_schema():
     # insert_assert(response.json())
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {},
         "webhooks": {
             "new-subscription": {

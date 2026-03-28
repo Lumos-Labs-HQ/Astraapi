@@ -3,8 +3,8 @@ from contextlib import asynccontextmanager
 from typing import Union
 
 import pytest
-from fastapi import APIRouter, FastAPI, Request
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI, Request
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 
@@ -26,7 +26,7 @@ def state() -> State:
     r"ignore:\s*on_event is deprecated, use lifespan event handlers instead.*:DeprecationWarning"
 )
 def test_router_events(state: State) -> None:
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/")
     def main() -> dict[str, str]:
@@ -89,12 +89,12 @@ def test_router_events(state: State) -> None:
 
 def test_app_lifespan_state(state: State) -> None:
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    async def lifespan(app: AstraAPI) -> AsyncGenerator[None, None]:
         state.app_startup = True
         yield
         state.app_shutdown = True
 
-    app = FastAPI(lifespan=lifespan)
+    app = AstraAPI(lifespan=lifespan)
 
     @app.get("/")
     def main() -> dict[str, str]:
@@ -114,19 +114,19 @@ def test_app_lifespan_state(state: State) -> None:
 
 def test_router_nested_lifespan_state(state: State) -> None:
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncGenerator[dict[str, bool], None]:
+    async def lifespan(app: AstraAPI) -> AsyncGenerator[dict[str, bool], None]:
         state.app_startup = True
         yield {"app": True}
         state.app_shutdown = True
 
     @asynccontextmanager
-    async def router_lifespan(app: FastAPI) -> AsyncGenerator[dict[str, bool], None]:
+    async def router_lifespan(app: AstraAPI) -> AsyncGenerator[dict[str, bool], None]:
         state.router_startup = True
         yield {"router": True}
         state.router_shutdown = True
 
     @asynccontextmanager
-    async def subrouter_lifespan(app: FastAPI) -> AsyncGenerator[dict[str, bool], None]:
+    async def subrouter_lifespan(app: AstraAPI) -> AsyncGenerator[dict[str, bool], None]:
         state.sub_router_startup = True
         yield {"sub_router": True}
         state.sub_router_shutdown = True
@@ -136,7 +136,7 @@ def test_router_nested_lifespan_state(state: State) -> None:
     router = APIRouter(lifespan=router_lifespan)
     router.include_router(sub_router)
 
-    app = FastAPI(lifespan=lifespan)
+    app = AstraAPI(lifespan=lifespan)
     app.include_router(router)
 
     @app.get("/")
@@ -175,7 +175,7 @@ def test_router_nested_lifespan_state(state: State) -> None:
 def test_router_nested_lifespan_state_overriding_by_parent() -> None:
     @asynccontextmanager
     async def lifespan(
-        app: FastAPI,
+        app: AstraAPI,
     ) -> AsyncGenerator[dict[str, Union[str, bool]], None]:
         yield {
             "app_specific": True,
@@ -184,7 +184,7 @@ def test_router_nested_lifespan_state_overriding_by_parent() -> None:
 
     @asynccontextmanager
     async def router_lifespan(
-        app: FastAPI,
+        app: AstraAPI,
     ) -> AsyncGenerator[dict[str, Union[str, bool]], None]:
         yield {
             "router_specific": True,
@@ -192,7 +192,7 @@ def test_router_nested_lifespan_state_overriding_by_parent() -> None:
         }
 
     router = APIRouter(lifespan=router_lifespan)
-    app = FastAPI(lifespan=lifespan)
+    app = AstraAPI(lifespan=lifespan)
     app.include_router(router)
 
     with TestClient(app) as client:
@@ -205,15 +205,15 @@ def test_router_nested_lifespan_state_overriding_by_parent() -> None:
 
 def test_merged_no_return_lifespans_return_none() -> None:
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    async def lifespan(app: AstraAPI) -> AsyncGenerator[None, None]:
         yield
 
     @asynccontextmanager
-    async def router_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    async def router_lifespan(app: AstraAPI) -> AsyncGenerator[None, None]:
         yield
 
     router = APIRouter(lifespan=router_lifespan)
-    app = FastAPI(lifespan=lifespan)
+    app = AstraAPI(lifespan=lifespan)
     app.include_router(router)
 
     with TestClient(app) as client:
@@ -222,20 +222,20 @@ def test_merged_no_return_lifespans_return_none() -> None:
 
 def test_merged_mixed_state_lifespans() -> None:
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    async def lifespan(app: AstraAPI) -> AsyncGenerator[None, None]:
         yield
 
     @asynccontextmanager
-    async def router_lifespan(app: FastAPI) -> AsyncGenerator[dict[str, bool], None]:
+    async def router_lifespan(app: AstraAPI) -> AsyncGenerator[dict[str, bool], None]:
         yield {"router": True}
 
     @asynccontextmanager
-    async def sub_router_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    async def sub_router_lifespan(app: AstraAPI) -> AsyncGenerator[None, None]:
         yield
 
     sub_router = APIRouter(lifespan=sub_router_lifespan)
     router = APIRouter(lifespan=router_lifespan)
-    app = FastAPI(lifespan=lifespan)
+    app = AstraAPI(lifespan=lifespan)
     router.include_router(sub_router)
     app.include_router(router)
 
@@ -248,7 +248,7 @@ def test_merged_mixed_state_lifespans() -> None:
 )
 def test_router_async_shutdown_handler(state: State) -> None:
     """Test that async on_shutdown event handlers are called correctly, for coverage."""
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/")
     def main() -> dict[str, str]:
@@ -270,12 +270,12 @@ def test_router_sync_generator_lifespan(state: State) -> None:
     """Test that a sync generator lifespan works via _wrap_gen_lifespan_context."""
     from collections.abc import Generator
 
-    def lifespan(app: FastAPI) -> Generator[None, None, None]:
+    def lifespan(app: AstraAPI) -> Generator[None, None, None]:
         state.app_startup = True
         yield
         state.app_shutdown = True
 
-    app = FastAPI(lifespan=lifespan)  # type: ignore[arg-type]
+    app = AstraAPI(lifespan=lifespan)  # type: ignore[arg-type]
 
     @app.get("/")
     def main() -> dict[str, str]:
@@ -296,12 +296,12 @@ def test_router_sync_generator_lifespan(state: State) -> None:
 def test_router_async_generator_lifespan(state: State) -> None:
     """Test that an async generator lifespan (not wrapped) works."""
 
-    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    async def lifespan(app: AstraAPI) -> AsyncGenerator[None, None]:
         state.app_startup = True
         yield
         state.app_shutdown = True
 
-    app = FastAPI(lifespan=lifespan)  # type: ignore[arg-type]
+    app = AstraAPI(lifespan=lifespan)  # type: ignore[arg-type]
 
     @app.get("/")
     def main() -> dict[str, str]:

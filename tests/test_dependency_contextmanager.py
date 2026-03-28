@@ -1,11 +1,11 @@
 import json
 
 import pytest
-from fastapi import BackgroundTasks, Depends, FastAPI
-from fastapi.responses import StreamingResponse
-from fastapi.testclient import TestClient
+from astraapi import BackgroundTasks, Depends, AstraAPI
+from astraapi.responses import StreamingResponse
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 state = {
     "/async": "asyncgen not started",
     "/sync": "generator not started",

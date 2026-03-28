@@ -1,7 +1,7 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.testclient import TestClient
 from typing_extensions import TypeAliasType
 
 
@@ -15,7 +15,7 @@ DependedValue = TypeAliasType(
 
 
 def test_pep695_type_dependencies():
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/")
     async def get_with_dep(value: DependedValue) -> str:  # noqa

@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated
 
 import pytest
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -30,7 +30,7 @@ Client = Annotated[DummyClient, Depends(get_client)]
 
 @pytest.fixture(name="client")
 def client_fixture() -> TestClient:
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/")
     async def get_people(client: Client) -> list:
@@ -52,7 +52,7 @@ def test_openapi_schema(client: TestClient):
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/": {
                     "get": {

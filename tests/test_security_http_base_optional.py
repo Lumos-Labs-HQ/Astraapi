@@ -1,10 +1,10 @@
 from typing import Optional
 
-from fastapi import FastAPI, Security
-from fastapi.security.http import HTTPAuthorizationCredentials, HTTPBase
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Security
+from astraapi.security.http import HTTPAuthorizationCredentials, HTTPBase
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 security = HTTPBase(scheme="Other", auto_error=False)
 
@@ -38,7 +38,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/users/me": {
                 "get": {

@@ -1,11 +1,11 @@
-from fastapi import FastAPI
-from fastapi.openapi.docs import (
+from astraapi import AstraAPI
+from astraapi.openapi.docs import (
     get_redoc_html,
     get_swagger_ui_html,
     get_swagger_ui_oauth2_redirect_html,
 )
 
-app = FastAPI(docs_url=None, redoc_url=None)
+app = AstraAPI(docs_url=None, redoc_url=None)
 
 
 @app.get("/docs", include_in_schema=False)

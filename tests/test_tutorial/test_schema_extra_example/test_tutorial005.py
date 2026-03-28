@@ -1,7 +1,7 @@
 import importlib
 
 import pytest
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from ...utils import needs_py310
 
@@ -40,7 +40,7 @@ def test_openapi_schema(client: TestClient) -> None:
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/items/{item_id}": {
                 "put": {
@@ -71,7 +71,7 @@ def test_openapi_schema(client: TestClient) -> None:
                                     },
                                     "converted": {
                                         "summary": "An example with converted data",
-                                        "description": "FastAPI can convert price `strings` to actual `numbers` automatically",
+                                        "description": "AstraAPI can convert price `strings` to actual `numbers` automatically",
                                         "value": {"name": "Bar", "price": "35.4"},
                                     },
                                     "invalid": {

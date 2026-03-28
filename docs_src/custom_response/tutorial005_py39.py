@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from astraapi import AstraAPI
+from astraapi.responses import PlainTextResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/", response_class=PlainTextResponse)

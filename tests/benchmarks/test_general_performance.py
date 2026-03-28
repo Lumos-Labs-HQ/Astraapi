@@ -4,8 +4,8 @@ from collections.abc import Iterator
 from typing import Annotated, Any
 
 import pytest
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 if "--codspeed" not in sys.argv:
@@ -67,7 +67,7 @@ class LargeOut(BaseModel):
     metadata: dict[str, Any]
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/sync/validated", response_model=ItemOut)

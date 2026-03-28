@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Request
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Request
+from astraapi.testclient import TestClient
 
 from .utils import needs_py310
 
@@ -15,7 +15,7 @@ class Dep:
 
 @needs_py310
 def test_stringified_annotations():
-    app = FastAPI()
+    app = AstraAPI()
 
     client = TestClient(app)
 

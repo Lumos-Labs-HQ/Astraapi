@@ -1,7 +1,7 @@
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from astraapi import AstraAPI
+from astraapi.responses import StreamingResponse
 
-app = FastAPI()
+app = AstraAPI()
 
 
 async def fake_video_streamer():

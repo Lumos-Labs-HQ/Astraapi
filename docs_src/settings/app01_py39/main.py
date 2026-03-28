@@ -1,8 +1,8 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
 from .config import settings
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/info")

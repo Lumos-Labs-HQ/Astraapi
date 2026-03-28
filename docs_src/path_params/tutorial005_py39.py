@@ -1,6 +1,6 @@
 from enum import Enum
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
 
 class ModelName(str, Enum):
@@ -9,7 +9,7 @@ class ModelName(str, Enum):
     lenet = "lenet"
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/models/{model_name}")

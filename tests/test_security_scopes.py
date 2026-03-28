@@ -1,8 +1,8 @@
 from typing import Annotated
 
 import pytest
-from fastapi import Depends, FastAPI, Security
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Security
+from astraapi.testclient import TestClient
 
 
 @pytest.fixture(name="call_counter")
@@ -19,7 +19,7 @@ def app_fixture(call_counter: dict[str, int]):
     def get_user(db: Annotated[str, Depends(get_db)]):
         return "user"
 
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/")
     def endpoint(
@@ -32,7 +32,7 @@ def app_fixture(call_counter: dict[str, int]):
 
 
 @pytest.fixture(name="client")
-def client_fixture(app: FastAPI):
+def client_fixture(app: AstraAPI):
     return TestClient(app)
 
 

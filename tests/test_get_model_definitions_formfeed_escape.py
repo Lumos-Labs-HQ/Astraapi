@@ -1,6 +1,6 @@
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 
 
@@ -23,7 +23,7 @@ def client_fixture() -> TestClient:
         id: str
         address: Address
 
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/facilities/{facility_id}")
     def get_facility(facility_id: str) -> Facility:
@@ -116,7 +116,7 @@ def test_openapi_schema(client: TestClient):
                     },
                 }
             },
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "openapi": "3.1.0",
             "paths": {
                 "/facilities/{facility_id}": {

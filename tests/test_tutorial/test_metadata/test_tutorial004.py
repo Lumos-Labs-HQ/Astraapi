@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from docs_src.metadata.tutorial004_py39 import app
 
@@ -17,7 +17,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/users/": {
                 "get": {
@@ -56,7 +56,7 @@ def test_openapi_schema():
                 "description": "Manage items. So _fancy_ they have their own docs.",
                 "externalDocs": {
                     "description": "Items external docs",
-                    "url": "https://fastapi.tiangolo.com/",
+                    "url": "https://astraapi.tiangolo.com/",
                 },
             },
         ],

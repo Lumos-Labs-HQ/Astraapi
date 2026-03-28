@@ -1,7 +1,7 @@
-from fastapi import FastAPI, Form
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI, Form
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.post("/form/python-list")

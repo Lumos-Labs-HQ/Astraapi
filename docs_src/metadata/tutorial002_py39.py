@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI(openapi_url="/api/v1/openapi.json")
+app = AstraAPI(openapi_url="/api/v1/openapi.json")
 
 
 @app.get("/items/")

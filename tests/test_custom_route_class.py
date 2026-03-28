@@ -1,10 +1,10 @@
 import pytest
-from fastapi import APIRouter, FastAPI
-from fastapi.routing import APIRoute
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI
+from astraapi.routing import APIRoute
+from astraapi.testclient import TestClient
 from starlette.routing import Route
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class APIRouteA(APIRoute):
@@ -76,7 +76,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/a/": {
                 "get": {

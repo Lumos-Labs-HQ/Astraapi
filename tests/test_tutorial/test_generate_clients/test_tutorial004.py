@@ -118,7 +118,7 @@ def test_remove_tags(tmp_path: pathlib.Path):
             },
         },
         "info": {
-            "title": "FastAPI",
+            "title": "AstraAPI",
             "version": "0.1.0",
         },
         "openapi": "3.1.0",

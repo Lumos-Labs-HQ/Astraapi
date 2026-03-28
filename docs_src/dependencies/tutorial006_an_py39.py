@@ -1,8 +1,8 @@
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from astraapi import Depends, AstraAPI, Header, HTTPException
 
-app = FastAPI()
+app = AstraAPI()
 
 
 async def verify_token(x_token: Annotated[str, Header()]):

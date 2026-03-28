@@ -1,7 +1,7 @@
 import importlib
 
 import pytest
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 
 @pytest.fixture(
@@ -20,7 +20,7 @@ def get_client(request: pytest.FixtureRequest):
 def test_post_body(client: TestClient):
     data = [
         {"url": "http://example.com/", "name": "Example"},
-        {"url": "http://fastapi.tiangolo.com/", "name": "FastAPI"},
+        {"url": "http://astraapi.tiangolo.com/", "name": "AstraAPI"},
     ]
     response = client.post("/images/multiple", json=data)
     assert response.status_code == 200, response.text
@@ -68,7 +68,7 @@ def test_openapi_schema(client: TestClient):
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/images/multiple/": {
                 "post": {

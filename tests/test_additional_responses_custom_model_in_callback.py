@@ -1,5 +1,5 @@
-from fastapi import APIRouter, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import APIRouter, AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 from pydantic import BaseModel, HttpUrl
 from starlette.responses import JSONResponse
@@ -9,7 +9,7 @@ class CustomModel(BaseModel):
     a: int
 
 
-app = FastAPI()
+app = AstraAPI()
 
 callback_router = APIRouter(default_response_class=JSONResponse)
 
@@ -35,7 +35,7 @@ def test_openapi_schema():
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/": {
                     "post": {

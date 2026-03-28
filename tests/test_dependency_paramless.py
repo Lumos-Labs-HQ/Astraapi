@@ -1,13 +1,13 @@
 from typing import Annotated, Union
 
-from fastapi import FastAPI, HTTPException, Security
-from fastapi.security import (
+from astraapi import AstraAPI, HTTPException, Security
+from astraapi.security import (
     OAuth2PasswordBearer,
     SecurityScopes,
 )
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -18,7 +18,7 @@ def process_auth(
 ):
     # This is an incorrect way of using it, this is not checking if the scopes are
     # provided by the token, only if the endpoint is requesting them, but the test
-    # here is just to check if FastAPI is indeed registering and passing the scopes
+    # here is just to check if AstraAPI is indeed registering and passing the scopes
     # correctly when using Security with parameterless dependencies.
     if "a" not in security_scopes.scopes or "b" not in security_scopes.scopes:
         raise HTTPException(detail="a or b not in scopes", status_code=401)

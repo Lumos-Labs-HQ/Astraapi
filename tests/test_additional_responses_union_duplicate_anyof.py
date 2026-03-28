@@ -6,8 +6,8 @@ See https://github.com/fastapi/fastapi/pull/14463
 
 from typing import Union
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
 
@@ -19,7 +19,7 @@ class ModelB(BaseModel):
     b: str
 
 
-app = FastAPI(
+app = AstraAPI(
     responses={
         500: {
             "model": Union[ModelA, ModelB],
@@ -47,7 +47,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/route1": {
                 "get": {

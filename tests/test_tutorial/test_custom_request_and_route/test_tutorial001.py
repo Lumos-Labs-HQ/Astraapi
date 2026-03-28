@@ -3,8 +3,8 @@ import importlib
 import json
 
 import pytest
-from fastapi import Request
-from fastapi.testclient import TestClient
+from astraapi import Request
+from astraapi.testclient import TestClient
 
 from tests.utils import needs_py310
 

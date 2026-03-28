@@ -1,8 +1,8 @@
 from functools import partial
 from typing import Optional
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 
 
 def main(some_arg, q: Optional[str] = None):
@@ -11,7 +11,7 @@ def main(some_arg, q: Optional[str] = None):
 
 endpoint = partial(main, "foo")
 
-app = FastAPI()
+app = AstraAPI()
 
 app.get("/")(endpoint)
 

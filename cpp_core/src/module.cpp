@@ -242,8 +242,8 @@ static void module_free(void* /*module*/) {
 
 static struct PyModuleDef module_def = {
     PyModuleDef_HEAD_INIT,
-    "_fastapi_core",           // C++ core module
-    "FastAPI C++ Core — Direct CPython C API (zero overhead)",
+    "_astraapi_core",           // C++ core module
+    "AstraAPI C++ Core — Direct CPython C API (zero overhead)",
     -1,
     module_methods,
     nullptr,                   // m_slots
@@ -252,7 +252,7 @@ static struct PyModuleDef module_def = {
     (freefunc)module_free,     // m_free — clean up statics on shutdown
 };
 
-PyMODINIT_FUNC PyInit__fastapi_core(void) {
+PyMODINIT_FUNC PyInit__astraapi_core(void) {
     PyObject* m = PyModule_Create(&module_def);
     if (!m) return nullptr;
 

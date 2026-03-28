@@ -1,6 +1,6 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
-app = FastAPI(swagger_ui_parameters={"syntaxHighlight": {"theme": "obsidian"}})
+app = AstraAPI(swagger_ui_parameters={"syntaxHighlight": {"theme": "obsidian"}})
 
 
 @app.get("/users/{username}")

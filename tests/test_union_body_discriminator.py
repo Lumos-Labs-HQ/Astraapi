@@ -1,7 +1,7 @@
 from typing import Annotated, Any, Union
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 from pydantic import BaseModel, Field
 from typing_extensions import Literal
@@ -10,7 +10,7 @@ from typing_extensions import Literal
 def test_discriminator_pydantic_v2() -> None:
     from pydantic import Tag
 
-    app = FastAPI()
+    app = AstraAPI()
 
     class FirstItem(BaseModel):
         value: Literal["first"]
@@ -45,7 +45,7 @@ def test_discriminator_pydantic_v2() -> None:
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "FastAPI", "version": "0.1.0"},
+            "info": {"title": "AstraAPI", "version": "0.1.0"},
             "paths": {
                 "/items/": {
                     "post": {

@@ -1,9 +1,9 @@
 from dirty_equals import IsPartialDict
-from fastapi import Cookie, FastAPI, Header, Query
-from fastapi.testclient import TestClient
+from astraapi import Cookie, AstraAPI, Header, Query
+from astraapi.testclient import TestClient
 from pydantic import BaseModel, Field
 
-app = FastAPI()
+app = AstraAPI()
 
 
 class Model(BaseModel):

@@ -1,1 +1,1 @@
-# FastAPI doesn't currently support non-scalar Path parameters
+# AstraAPI doesn't currently support non-scalar Path parameters

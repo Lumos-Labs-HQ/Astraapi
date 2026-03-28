@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(_fastapi_core LANGUAGES C CXX)
+project(_astraapi_core LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,9 +46,9 @@ set(THIRD_PARTY_C_SOURCES
 set_source_files_properties(${THIRD_PARTY_C_SOURCES} PROPERTIES LANGUAGE C)
 
 # ── Build the extension module ───────────────────────────────────────────────
-Python3_add_library(_fastapi_core MODULE ${SOURCES} ${THIRD_PARTY_C_SOURCES})
+Python3_add_library(_astraapi_core MODULE ${SOURCES} ${THIRD_PARTY_C_SOURCES})
 
-target_include_directories(_fastapi_core PRIVATE
+target_include_directories(_astraapi_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ryu
@@ -58,14 +58,14 @@ target_include_directories(_fastapi_core PRIVATE
 
 # ── Compiler flags ───────────────────────────────────────────────────────────
 if(MSVC)
-    target_compile_options(_fastapi_core PRIVATE
+    target_compile_options(_astraapi_core PRIVATE
         /O2 /GL /GS- /fp:fast /Oi /Gy
         /W3 /wd4100 /wd4127 /wd4201
     )
-    target_link_options(_fastapi_core PRIVATE /LTCG)
+    target_link_options(_astraapi_core PRIVATE /LTCG)
 else()
     # GCC / Clang (Linux, macOS)
-    target_compile_options(_fastapi_core PRIVATE
+    target_compile_options(_astraapi_core PRIVATE
         -O3
         -march=native
         -flto
@@ -75,12 +75,12 @@ else()
         -ftree-vectorize
         -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-cast-function-type
     )
-    target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
-    target_compile_options(_fastapi_core PRIVATE -fvisibility=hidden)
-    target_compile_options(_fastapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>)
+    target_compile_options(_astraapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
+    target_compile_options(_astraapi_core PRIVATE -fvisibility=hidden)
+    target_compile_options(_astraapi_core PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>)
 
     # -Wno-free-nonheap-object: suppress GCC 14 false positive in LTO-inlined vector::push_back
-    target_link_options(_fastapi_core PRIVATE -flto -Wno-free-nonheap-object)
+    target_link_options(_astraapi_core PRIVATE -flto -Wno-free-nonheap-object)
 endif()
 
 
@@ -92,35 +92,35 @@ find_library(BROTLI_DEC brotlidec)
 
 if(MSVC)
     find_package(ZLIB REQUIRED)
-    target_link_libraries(_fastapi_core PRIVATE ZLIB::ZLIB ws2_32)
+    target_link_libraries(_astraapi_core PRIVATE ZLIB::ZLIB ws2_32)
 else()
-    target_link_libraries(_fastapi_core PRIVATE z)
+    target_link_libraries(_astraapi_core PRIVATE z)
 endif()
 
 if(LIBDEFLATE)
-    target_link_libraries(_fastapi_core PRIVATE ${LIBDEFLATE})
-    target_compile_definitions(_fastapi_core PRIVATE HAS_LIBDEFLATE=1)
+    target_link_libraries(_astraapi_core PRIVATE ${LIBDEFLATE})
+    target_compile_definitions(_astraapi_core PRIVATE HAS_LIBDEFLATE=1)
     message(STATUS "libdeflate found — using fast single-shot gzip compression")
 else()
     message(STATUS "libdeflate not found — using zlib for gzip compression")
 endif()
 
 if(BROTLI_ENC AND BROTLI_DEC)
-    target_link_libraries(_fastapi_core PRIVATE ${BROTLI_ENC} ${BROTLI_DEC})
-    target_compile_definitions(_fastapi_core PRIVATE HAS_BROTLI=1)
+    target_link_libraries(_astraapi_core PRIVATE ${BROTLI_ENC} ${BROTLI_DEC})
+    target_compile_definitions(_astraapi_core PRIVATE HAS_BROTLI=1)
 else()
     message(STATUS "Brotli not found — compression will fall back to gzip only")
 endif()
 
 # ── yyjson optimization: strict JSON mode + SIMD (implied by -march=native) ──
-target_compile_definitions(_fastapi_core PRIVATE
+target_compile_definitions(_astraapi_core PRIVATE
     YYJSON_DISABLE_NON_STANDARD=1
 )
 
 # ── Output name: match Python's expected module name ─────────────────────────
-# Linux:   _fastapi_core.cpython-311-x86_64-linux-gnu.so
-# Windows: _fastapi_core.pyd
-set_target_properties(_fastapi_core PROPERTIES
+# Linux:   _astraapi_core.cpython-311-x86_64-linux-gnu.so
+# Windows: _astraapi_core.pyd
+set_target_properties(_astraapi_core PROPERTIES
     PREFIX ""
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )

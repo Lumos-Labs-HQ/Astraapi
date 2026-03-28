@@ -1,10 +1,10 @@
 import pytest
-from fastapi import Depends, FastAPI, Security
-from fastapi.security import OAuth2, OAuth2PasswordRequestFormStrict
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Security
+from astraapi.security import OAuth2, OAuth2PasswordRequestFormStrict
+from astraapi.testclient import TestClient
 from pydantic import BaseModel
 
-app = FastAPI()
+app = AstraAPI()
 
 reusable_oauth2 = OAuth2(
     flows={
@@ -150,7 +150,7 @@ def test_openapi_schema():
     assert response.status_code == 200, response.text
     assert response.json() == {
         "openapi": "3.1.0",
-        "info": {"title": "FastAPI", "version": "0.1.0"},
+        "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
             "/login": {
                 "post": {

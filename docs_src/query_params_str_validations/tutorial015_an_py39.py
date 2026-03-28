@@ -1,10 +1,10 @@
 import random
 from typing import Annotated, Union
 
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from pydantic import AfterValidator
 
-app = FastAPI()
+app = AstraAPI()
 
 data = {
     "isbn-9781529046137": "The Hitchhiker's Guide to the Galaxy",

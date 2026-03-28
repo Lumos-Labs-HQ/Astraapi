@@ -3,10 +3,10 @@ from functools import partial
 from typing import Annotated
 
 import pytest
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.testclient import TestClient
 
-app = FastAPI()
+app = AstraAPI()
 
 
 def function_dependency(value: str) -> str:

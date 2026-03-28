@@ -2,7 +2,7 @@ import importlib
 
 import pytest
 from dirty_equals import IsOneOf
-from fastapi.testclient import TestClient
+from astraapi.testclient import TestClient
 
 from tests.utils import needs_py310
 

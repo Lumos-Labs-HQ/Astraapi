@@ -1,5 +1,5 @@
 from a2wsgi import WSGIMiddleware
-from fastapi import FastAPI
+from astraapi import AstraAPI
 from flask import Flask, request
 from markupsafe import escape
 
@@ -12,7 +12,7 @@ def flask_main():
     return f"Hello, {escape(name)} from Flask!"
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.get("/v2")

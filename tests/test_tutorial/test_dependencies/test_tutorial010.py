@@ -1,14 +1,14 @@
 from typing import Annotated, Any
 from unittest.mock import Mock, patch
 
-from fastapi import Depends, FastAPI
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI
+from astraapi.testclient import TestClient
 
 from docs_src.dependencies.tutorial010_py39 import get_db
 
 
 def test_get_db():
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/")
     def read_root(c: Annotated[Any, Depends(get_db)]):

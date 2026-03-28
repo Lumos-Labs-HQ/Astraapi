@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI, HTTPException, Query
+from astraapi import Depends, AstraAPI, HTTPException, Query
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 
@@ -25,7 +25,7 @@ def get_session():
         yield session
 
 
-app = FastAPI()
+app = AstraAPI()
 
 
 @app.on_event("startup")

@@ -4,9 +4,9 @@
 from typing import Annotated
 
 import pytest
-from fastapi import Depends, FastAPI, Security
-from fastapi.security import SecurityScopes
-from fastapi.testclient import TestClient
+from astraapi import Depends, AstraAPI, Security
+from astraapi.security import SecurityScopes
+from astraapi.testclient import TestClient
 
 
 @pytest.fixture(name="call_counts")
@@ -54,7 +54,7 @@ def app_fixture(call_counts: dict[str, int]):
             "user_me": user_me,
         }
 
-    app = FastAPI()
+    app = AstraAPI()
 
     @app.get("/")
     def path_operation(
@@ -70,7 +70,7 @@ def app_fixture(call_counts: dict[str, int]):
 
 
 @pytest.fixture(name="client")
-def client_fixture(app: FastAPI):
+def client_fixture(app: AstraAPI):
     return TestClient(app)
 
 

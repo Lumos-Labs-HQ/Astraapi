@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from astraapi import AstraAPI
 
 tags_metadata = [
     {
@@ -10,12 +10,12 @@ tags_metadata = [
         "description": "Manage items. So _fancy_ they have their own docs.",
         "externalDocs": {
             "description": "Items external docs",
-            "url": "https://fastapi.tiangolo.com/",
+            "url": "https://astraapi.tiangolo.com/",
         },
     },
 ]
 
-app = FastAPI(openapi_tags=tags_metadata)
+app = AstraAPI(openapi_tags=tags_metadata)
 
 
 @app.get("/users/", tags=["users"])

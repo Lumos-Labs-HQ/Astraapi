@@ -4,8 +4,8 @@
 # https://github.com/fastapi/fastapi/issues/14247
 from enum import Enum
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from astraapi import AstraAPI
+from astraapi.testclient import TestClient
 from inline_snapshot import snapshot
 from pydantic import BaseModel, Field
 
@@ -30,7 +30,7 @@ class Message(BaseModel):
     output: MessageOutput
 
 
-app = FastAPI(title="Minimal FastAPI App", version="1.0.0")
+app = AstraAPI(title="Minimal AstraAPI App", version="1.0.0")
 
 
 @app.post("/messages", response_model=Message)
@@ -59,7 +59,7 @@ def test_openapi_schema():
     assert response.json() == snapshot(
         {
             "openapi": "3.1.0",
-            "info": {"title": "Minimal FastAPI App", "version": "1.0.0"},
+            "info": {"title": "Minimal AstraAPI App", "version": "1.0.0"},
             "paths": {
                 "/messages": {
                     "post": {
