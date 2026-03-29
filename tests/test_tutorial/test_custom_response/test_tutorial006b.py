@@ -6,7 +6,7 @@ client = TestClient(app)
 
 
 def test_redirect_response_class():
-    response = client.get("/fastapi", follow_redirects=False)
+    response = client.get("/astraapi", follow_redirects=False)
     assert response.status_code == 307
     assert response.headers["location"] == "https://astraapi.tiangolo.com"
 
@@ -18,9 +18,9 @@ def test_openapi_schema():
         "openapi": "3.1.0",
         "info": {"title": "AstraAPI", "version": "0.1.0"},
         "paths": {
-            "/fastapi": {
+            "/astraapi": {
                 "get": {
-                    "summary": "Redirect Fastapi",
+                    "summary": "Redirect Astraapi",
                     "operationId": "redirect_astraapi_astraapi_get",
                     "responses": {"307": {"description": "Successful Response"}},
                 }

@@ -2027,7 +2027,21 @@ class AstraAPI(AppBase):
                 _is_coro = True  # shim is always async
             elif not _has_custom_route_class and getattr(route, 'response_field', None) is not None:
                 # Fast-path route with response_model: wrap to apply model filtering.
-                _registered_endpoint = self._make_response_model_shim(route)
+                # If route also has a dep_solver (Depends), use response_class_shim so
+                # dependencies are resolved before the endpoint is called.
+                _has_dep_solver_rm = getattr(route, '_dep_solver', None) is not None
+                if _has_dep_solver_rm or _has_asgi_middleware:
+                    try:
+                        from astraapi.exception_handlers import http_exception_handler as _dh, request_validation_exception_handler as _dvh
+                        _default_exc_handlers = {_dh, _dvh}
+                    except ImportError:
+                        _default_exc_handlers = set()
+                    _type_exc_handlers = {k: v for k, v in self.exception_handlers.items() if isinstance(k, type) and v not in _default_exc_handlers}
+                    if _type_exc_handlers:
+                        route._app_exception_handlers = _type_exc_handlers
+                    _registered_endpoint = self._make_response_class_shim(route)
+                else:
+                    _registered_endpoint = self._make_response_model_shim(route)
                 _is_coro = True  # shim is always async
                 # Update dependant.call and endpoint so C++ fast path uses the shim
                 route.dependant.call = _registered_endpoint
