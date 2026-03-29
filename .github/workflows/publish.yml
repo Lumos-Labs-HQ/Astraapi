@@ -107,7 +107,7 @@ jobs:
           merge-multiple: true
 
       - name: Install twine
-        run: pip install twine
+        run: pip install --upgrade twine
 
       - name: Publish to PyPI
         env:

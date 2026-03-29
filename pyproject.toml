@@ -7,8 +7,7 @@ name = "astraapi"
 version = "0.1.0"
 description = "AstraAPI framework, high performance, easy to learn, fast to code, ready for production"
 readme = "README.md"
-license = "MIT"
-license-files = ["LICENSE"]
+license = {text = "MIT"}
 requires-python = ">=3.12"
 authors = [
     { name = "Rana718", email = "ranadolui718@gmail.com" },
