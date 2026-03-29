@@ -46,7 +46,7 @@ jobs:
 
       - name: Install zlib (Windows)
         if: matrix.os == 'windows'
-        run: vcpkg install zlib:x64-windows
+        run: vcpkg install zlib:x64-windows-static
 
       - name: Install cibuildwheel
         run: pip install cibuildwheel==3.1.2
@@ -71,7 +71,7 @@ jobs:
           # Windows: pass vcpkg toolchain
           CIBW_CONFIG_SETTINGS_WINDOWS: >
             cmake.define.CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
-            cmake.define.VCPKG_TARGET_TRIPLET=x64-windows
+            cmake.define.VCPKG_TARGET_TRIPLET=x64-windows-static
 
           CIBW_BUILD_VERBOSITY: 1
 

@@ -114,9 +114,16 @@ find_library(BROTLI_DEC brotlidec)
 
 if(MSVC)
     target_link_libraries(_astraapi_core PRIVATE ws2_32)
+    # Link zlib statically to avoid missing zlib1.dll on user machines
     find_package(ZLIB QUIET)
     if(ZLIB_FOUND)
-        target_link_libraries(_astraapi_core PRIVATE ZLIB::ZLIB)
+        # Force static linking by using the static lib directly
+        find_library(ZLIB_STATIC_LIB zlibstatic HINTS ${ZLIB_INCLUDE_DIRS}/../lib)
+        if(ZLIB_STATIC_LIB)
+            target_link_libraries(_astraapi_core PRIVATE ${ZLIB_STATIC_LIB})
+        else()
+            target_link_libraries(_astraapi_core PRIVATE ZLIB::ZLIB)
+        endif()
     endif()
 else()
     target_link_libraries(_astraapi_core PRIVATE z)
