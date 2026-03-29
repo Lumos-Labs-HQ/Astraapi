@@ -3,6 +3,11 @@
 #include "buffer_pool.hpp"
 
 static thread_local std::vector<std::vector<char>> pool;
+static thread_local size_t tl_pool_max = BUFFER_POOL_MAX;
+
+void set_buffer_pool_max(size_t n) {
+    tl_pool_max = (n > 0) ? n : 1;
+}
 
 std::vector<char> acquire_buffer() {
     if (!pool.empty()) {
@@ -17,7 +22,7 @@ std::vector<char> acquire_buffer() {
 }
 
 void release_buffer(std::vector<char> buf) {
-    if (pool.size() < BUFFER_POOL_MAX) {
+    if (pool.size() < tl_pool_max) {
         if (buf.capacity() > BUFFER_INITIAL_CAPACITY * 4) {
             // Replace oversized buffer with a fresh right-sized one (single alloc)
             std::vector<char> fresh;
@@ -32,7 +37,7 @@ void release_buffer(std::vector<char> buf) {
 }
 
 void prewarm_buffer_pool(int count) {
-    for (int i = 0; i < count && pool.size() < BUFFER_POOL_MAX; i++) {
+    for (int i = 0; i < count && pool.size() < tl_pool_max; i++) {
         std::vector<char> buf;
         buf.reserve(BUFFER_INITIAL_CAPACITY);
         pool.push_back(std::move(buf));
@@ -44,5 +49,16 @@ PyObject* py_prewarm_buffer_pool(PyObject* /*self*/, PyObject* args) {
     int count = 4;
     if (!PyArg_ParseTuple(args, "|i", &count)) return nullptr;
     prewarm_buffer_pool(count);
+    Py_RETURN_NONE;
+}
+
+PyObject* py_set_buffer_pool_max(PyObject* /*self*/, PyObject* args) {
+    int n = 0;
+    if (!PyArg_ParseTuple(args, "i", &n)) return nullptr;
+    if (n <= 0) {
+        PyErr_SetString(PyExc_ValueError, "buffer pool max must be > 0");
+        return nullptr;
+    }
+    set_buffer_pool_max((size_t)n);
     Py_RETURN_NONE;
 }

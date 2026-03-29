@@ -7,6 +7,10 @@
 #include <cstring>
 #include <vector>
 
+#ifndef HAS_LIBDEFLATE
+#define HAS_LIBDEFLATE 0
+#endif
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Forward declarations for module-level functions (implemented in other files)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -28,6 +32,7 @@ extern PyObject* py_http_buf_commit_write(PyObject* self, PyObject* args);
 
 // buffer_pool.cpp
 extern PyObject* py_prewarm_buffer_pool(PyObject* self, PyObject* args);
+extern PyObject* py_set_buffer_pool_max(PyObject* self, PyObject* args);
 
 // ws_ring_buffer.cpp
 extern void init_ws_opcode_cache();
@@ -198,6 +203,7 @@ static PyMethodDef module_methods[] = {
     // Warm-up / eager initialization
     {"init_cached_refs", (PyCFunction)py_init_cached_refs, METH_NOARGS, nullptr},
     {"prewarm_buffer_pool", (PyCFunction)py_prewarm_buffer_pool, METH_VARARGS, nullptr},
+    {"set_buffer_pool_max", (PyCFunction)py_set_buffer_pool_max, METH_VARARGS, nullptr},
 
     // Response building helpers
     {"build_response_from_parts", (PyCFunction)py_build_response_from_parts, METH_VARARGS, nullptr},
@@ -276,6 +282,11 @@ PyMODINIT_FUNC PyInit__astraapi_core(void) {
 
     // Pre-cache WebSocket opcode PyLong objects
     init_ws_opcode_cache();
+
+    if (PyModule_AddIntConstant(m, "HAS_LIBDEFLATE", HAS_LIBDEFLATE) < 0) {
+        Py_DECREF(m);
+        return nullptr;
+    }
 
     return m;
 }

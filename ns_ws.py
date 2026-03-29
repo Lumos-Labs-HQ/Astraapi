@@ -20,4 +20,4 @@ async def ws_endpoint(websocket: WebSocket):
     except Exception:
         pass
 
-app.run(host="127.0.0.1", port=8002, workers=1)
+app.run(host="127.0.0.1", port=8002, workers=3)

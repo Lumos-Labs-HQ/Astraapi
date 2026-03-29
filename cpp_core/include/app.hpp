@@ -157,7 +157,7 @@ struct RouteInfo {
 };
 
 // ── Rate limiter shard count (outside struct — can't have static constexpr in unnamed struct)
-constexpr int RATE_LIMIT_SHARDS = 16;
+constexpr int RATE_LIMIT_SHARDS = 64;
 
 
 // std::atomic<std::shared_ptr<T>> is not supported by libc++ (Apple Clang) or MSVC.
@@ -223,7 +223,10 @@ struct CoreAppObject {
     bool rate_limit_enabled = false;
     int rate_limit_max_requests = 100;
     int rate_limit_window_seconds = 60;
-    struct RateLimitEntry { int count; int64_t window_start_ns; };
+    struct RateLimitEntry {
+        double tokens;
+        double last_refill_ns;
+    };
     // Transparent hash allows string_view lookups without copying the key string,
     // avoiding a per-request std::string hash+copy for the client IP.
     // (No alignas — Python tp_alloc doesn't guarantee 64-byte alignment.)

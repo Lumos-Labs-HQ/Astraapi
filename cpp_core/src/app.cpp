@@ -3416,8 +3416,11 @@ static PyObject* dispatch_one_request(
 
     // ── Rate limiting (C++ native, per client IP) — sharded for low contention
     if (UNLIKELY(self->rate_limit_enabled && !self->current_client_ip.empty())) {
-        auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
-        int64_t window_ns = (int64_t)self->rate_limit_window_seconds * 1'000'000'000LL;
+        const double now_ns = (double)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double window_ns = (double)self->rate_limit_window_seconds * 1'000'000'000.0;
+        const double max_tokens = (double)self->rate_limit_max_requests;
+        const double refill_rate = max_tokens / (double)std::max(1, self->rate_limit_window_seconds);
         size_t shard_idx = self->current_shard_idx;  // cached at connection time
         auto& shard = self->rate_limit_shards[shard_idx];
         std::lock_guard<std::mutex> rl_lock(shard.mutex);
@@ -3426,16 +3429,19 @@ static PyObject* dispatch_one_request(
         std::string_view ip_sv(self->current_client_ip);
         auto it = shard.counters.find(ip_sv);
         if (it == shard.counters.end()) {
-            it = shard.counters.try_emplace(self->current_client_ip).first;
+            it = shard.counters.try_emplace(
+                self->current_client_ip,
+                CoreAppObject::RateLimitEntry{max_tokens, now_ns}
+            ).first;
         }
         auto& entry = it->second;
-        if (now_ns - entry.window_start_ns > window_ns) {
-            entry.count = 1;
-            entry.window_start_ns = now_ns;
-        } else {
-            entry.count++;
+        const double elapsed_s = (now_ns - entry.last_refill_ns) / 1'000'000'000.0;
+        if (elapsed_s > 0.0) {
+            entry.tokens = std::min(max_tokens, entry.tokens + elapsed_s * refill_rate);
+            entry.last_refill_ns = now_ns;
         }
-        if (entry.count > self->rate_limit_max_requests) {
+
+        if (entry.tokens < 1.0) {
             // Unlock route lock before writing response
             --self->counters.active_requests;
             PyRef resp(build_http_error_response(429, "Rate limit exceeded", req.keep_alive,
@@ -3443,12 +3449,14 @@ static PyObject* dispatch_one_request(
             if (resp) write_response_direct(sock_fd, transport, resp.get());
             return make_consumed_true(self, req.total_consumed);
         }
+        entry.tokens -= 1.0;
+
         // Periodic cleanup: sweep stale entries every 10K requests
         static thread_local uint32_t rl_cleanup_counter = 0;
         if (++rl_cleanup_counter >= 10000) {
             rl_cleanup_counter = 0;
             for (auto it = shard.counters.begin(); it != shard.counters.end(); ) {
-                if (now_ns - it->second.window_start_ns > 2 * window_ns)
+                if (now_ns - it->second.last_refill_ns > 2.0 * window_ns)
                     it = shard.counters.erase(it);
                 else
                     ++it;

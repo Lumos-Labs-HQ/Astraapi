@@ -49,6 +49,15 @@ logger = logging.getLogger("astraapi")
 _HAS_QUICKACK = hasattr(socket, "TCP_QUICKACK") or sys.platform == "linux"
 _TCP_QUICKACK = 12  # constant for TCP_QUICKACK
 
+# Hot-path byte constants to avoid recreating literals in data_received().
+_CRLF = b'\r\n'
+_CRLFCRLF = b'\r\n\r\n'
+_SPACE = b' '
+_QUESTION = b'?'
+_COLON = b':'
+
+_WS_HEARTBEAT_INTERVAL = float(os.environ.get("ASTRAAPI_WS_PING_INTERVAL", "30.0"))
+
 # ── Zero-overhead awaitable for sync send methods ────────────────────────────
 class _NoopAwaitable:
     """Awaitable that completes immediately with no overhead.
@@ -1494,28 +1503,28 @@ class CppHttpProtocol(asyncio.Protocol):
         # request processing — no new TCP data, must not clobber _current_body).
         if self._needs_req_ctx and data:
             _qs = b''
-            _nl = data.find(b'\r\n')
+            _nl = data.find(_CRLF)
             if _nl > 0:
                 _req_line = data[:_nl]
-                _q = _req_line.find(b'?')
+                _q = _req_line.find(_QUESTION)
                 if _q >= 0:
-                    _sp = _req_line.find(b' ', _q)
+                    _sp = _req_line.find(_SPACE, _q)
                     _qs = _req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:]
             _current_query_string.set(_qs)
             try:
-                _hdrs_end = data.find(b'\r\n\r\n')
+                _hdrs_end = data.find(_CRLFCRLF)
                 if _hdrs_end <= 0:
                     _current_body.set(b'')
                 if _hdrs_end > 0:
                     _hdr_block = data[:_hdrs_end]
-                    _hdr_lines = _hdr_block.split(b'\r\n')
-                    _req_parts = _hdr_lines[0].split(b' ') if _hdr_lines else []
+                    _hdr_lines = _hdr_block.split(_CRLF)
+                    _req_parts = _hdr_lines[0].split(_SPACE) if _hdr_lines else []
                     _method = _req_parts[0].decode('latin-1') if len(_req_parts) > 0 else 'GET'
                     _full_path = _req_parts[1].decode('latin-1') if len(_req_parts) > 1 else '/'
                     _path_only = _full_path.split('?')[0]
                     _parsed_hdrs = []
                     for _hl in _hdr_lines[1:]:
-                        _colon = _hl.find(b':')
+                        _colon = _hl.find(_COLON)
                         if _colon > 0:
                             _parsed_hdrs.append((_hl[:_colon].strip().lower(), _hl[_colon+1:].strip()))
                     _current_raw_headers.set(_parsed_hdrs)
@@ -1865,7 +1874,7 @@ class CppHttpProtocol(asyncio.Protocol):
 
     # ── WebSocket heartbeat (PING/PONG) ───────────────────────────────────
 
-    def _start_ws_heartbeat(self, interval: float = 30.0) -> None:
+    def _start_ws_heartbeat(self, interval: float = _WS_HEARTBEAT_INTERVAL) -> None:
         """Start periodic PING frames to detect dead connections."""
         self._ws_pong_received = True
         self._ws_ping_handle = self._loop.call_later(interval, self._send_ws_ping, interval)
@@ -2940,6 +2949,16 @@ async def run_server(
     # Detect reload worker for fast shutdown
     _is_reload_worker = os.environ.get("_ASTRAAPI_RELOAD_WORKER") == "1"
 
+    try:
+        from astraapi._astraapi_core import HAS_LIBDEFLATE
+        if not HAS_LIBDEFLATE:
+            logger.warning(
+                "[astraapi] libdeflate not found; using zlib (2-3x slower compression). "
+                "For max performance: install libdeflate dev package then rebuild."
+            )
+    except Exception:
+        pass
+
     # ── Track active connections for graceful shutdown ──────────────────
     active_connections: set[CppHttpProtocol] = set()
     active_count = [0]  # mutable int via list — faster than len(set) in hot path
@@ -2948,7 +2967,7 @@ async def run_server(
     # Protocol pool prewarm: enough to absorb the first burst without allocation.
     # Keep it modest — each protocol holds a 16 KB C++ http_buf.
     # 64 covers typical burst; OS will handle the rest via pool reuse.
-    _PREWARM = int(os.environ.get("ASTRAAPI_PREWARM_CONNS", "64" if _is_worker else "128"))
+    _PREWARM = int(os.environ.get("ASTRAAPI_PREWARM_CONNS", "512" if _is_worker else "1024"))
     for _ in range(_PREWARM if _MAX_CONNECTIONS == 0 else min(_PREWARM, _MAX_CONNECTIONS)):
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
@@ -2974,6 +2993,7 @@ async def run_server(
     # Safety net: if RSS grows >100MB since last check under sustained load,
     # do a fast gen0 collection to catch cyclic refs from user code.
     _last_rss = [0]
+    _gc_interval = [30.0]
     try:
         import resource as _resource
         _last_rss[0] = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
@@ -2981,11 +3001,15 @@ async def run_server(
         pass  # Windows — fall back to no RSS tracking
 
     def _gc_maintenance():
-        if active_count[0] == 0:
+        conns = active_count[0]
+        if conns == 0:
             gc.collect(1)
+            _gc_interval[0] = 30.0
+        elif conns < 50:
+            gc.collect(0)
+            _gc_interval[0] = 60.0
         else:
-            # Safety net: prevent unbounded memory growth from cyclic user code.
-            # RSS threshold lowered to 50 MB (was 100 MB) for faster detection.
+            # Under heavy load, avoid forced sweeps unless RSS grows.
             try:
                 import resource as _resource
                 current_rss = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
@@ -2994,9 +3018,10 @@ async def run_server(
                 _last_rss[0] = current_rss
             except (ImportError, AttributeError):
                 pass
-        loop.call_later(30.0, _gc_maintenance)  # 30s instead of 600s — catches cycles sooner
+            _gc_interval[0] = min(300.0, _gc_interval[0] * 1.5)
+        loop.call_later(_gc_interval[0], _gc_maintenance)
 
-    loop.call_later(30.0, _gc_maintenance)
+    loop.call_later(_gc_interval[0], _gc_maintenance)
 
     def _protocol_factory() -> asyncio.Protocol:
         # Optional connection limit (disabled by default — no cap like uWS/Fiber/Bun)
@@ -3120,9 +3145,11 @@ async def run_server(
     # ── Idle pool trim: reclaim memory when connections drop ─────────────
     async def _pool_trim() -> None:
         while not stop_event.is_set():
-            await asyncio.sleep(60.0)
-            target = max(256, active_count[0] // 2)
-            _protocol_pool.trim(target)
+            await asyncio.sleep(120.0)
+            target = max(64, active_count[0] // 2)
+            freed = _protocol_pool.trim(target)
+            if freed > 0:
+                gc.collect(0)
 
     trim_task = loop.create_task(_pool_trim())
 

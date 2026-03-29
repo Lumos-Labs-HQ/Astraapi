@@ -67,9 +67,29 @@ def _create_listen_socket(host: str, port: int) -> _socket.socket:
     return sock
 
 
+def _apply_win_cpu_affinity(worker_id: int) -> None:
+    """Pin a Windows worker process to a single logical CPU."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        cpu_count = os.cpu_count() or 1
+        core = worker_id % cpu_count
+        mask = ctypes.c_size_t(1 << core)
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetCurrentProcess()
+        kernel32.SetProcessAffinityMask(handle, mask)
+    except Exception:
+        pass
+
+
 def _run_worker_fork(app: Any, host: str, port: int, unix_sock: Any) -> None:
     """Worker entry point after os.fork() — receives connections via unix socket."""
     import asyncio
+
+    _worker_id = int(os.environ.get(_WORKER_ID_ENV, "0"))
+    _apply_win_cpu_affinity(_worker_id)
 
     try:
         import uvloop
@@ -89,6 +109,9 @@ def _run_worker_reuseport(app: Any, host: str, port: int) -> None:
     eliminating the master accept thread and IPC overhead entirely.
     """
     import asyncio
+
+    _worker_id = int(os.environ.get(_WORKER_ID_ENV, "0"))
+    _apply_win_cpu_affinity(_worker_id)
 
     try:
         import uvloop
@@ -149,18 +172,19 @@ def _master_accept_loop(
         fds_data[0] = conn.fileno()
         target_sock = None
 
-        with worker_lock:
-            n = len(worker_socks)
-            if n == 0:
-                conn.close()
-                continue
-            for _ in range(n):
-                target = idx % n
-                idx += 1
-                s = worker_socks[target]
-                if s is not None:
-                    target_sock = s
-                    break
+        # Fast path: lock-free snapshot read. worker_socks updates are rare and
+        # done under the GIL, so this avoids per-connection lock contention.
+        _ws = worker_socks
+        n = len(_ws)
+        if n == 0:
+            conn.close()
+            continue
+        for _ in range(n):
+            s = _ws[idx % n]
+            idx += 1
+            if s is not None:
+                target_sock = s
+                break
 
         if target_sock is not None:
             try:
@@ -254,6 +278,8 @@ def _run_fork_supervisor(
     guaranteed even distribution (Node.js cluster SCHED_RR pattern).
     """
     children: dict[int, int] = {}  # pid → worker_id
+    restart_streak: dict[int, int] = {i: 0 for i in range(workers)}
+    worker_started_at: dict[int, float] = {}
     _shutdown = False
 
     def _handle_signal(signum: int, frame: Any) -> None:
@@ -332,6 +358,7 @@ def _run_fork_supervisor(
                 os._exit(0)
         else:
             children[pid] = worker_id
+            worker_started_at[worker_id] = time.monotonic()
             mode = "reuseport" if use_reuseport else "master-accept"
             print(f"  Worker {worker_id} started (pid {pid}, {mode})")
 
@@ -363,6 +390,21 @@ def _run_fork_supervisor(
             if _shutdown:
                 break
 
+            now = time.monotonic()
+            started = worker_started_at.get(worker_id, now)
+            if (now - started) >= 10.0:
+                restart_streak[worker_id] = 0
+            else:
+                restart_streak[worker_id] = restart_streak.get(worker_id, 0) + 1
+
+            delay = 0.0
+            streak = restart_streak[worker_id]
+            if streak >= 5:
+                delay = min(2.0, 0.1 * (2 ** (streak - 5)))
+            if delay > 0.0:
+                print(f"  Worker {worker_id} crash-loop detected (streak={streak}), backoff {delay:.1f}s")
+                time.sleep(delay)
+
             print(f"  Worker {worker_id} exited (code {exit_code}), restarting...")
 
             if use_reuseport:
@@ -390,6 +432,7 @@ def _run_fork_supervisor(
                         os._exit(0)
                 else:
                     children[new_pid] = worker_id
+                    worker_started_at[worker_id] = time.monotonic()
                     print(f"  Worker {worker_id} restarted (pid {new_pid}, reuseport)")
             else:
                 # Master-accept: close old socketpair, create new one
@@ -427,9 +470,10 @@ def _run_fork_supervisor(
                     with worker_lock:
                         parent_socks[worker_id] = new_p
                     children[new_pid] = worker_id
+                    worker_started_at[worker_id] = time.monotonic()
                     print(f"  Worker {worker_id} restarted (pid {new_pid})")
         else:
-            time.sleep(1.0)
+            time.sleep(0.1)
 
     # ── Shutdown ──
     print("\nShutting down workers...")
@@ -483,6 +527,8 @@ def _run_subprocess_supervisor(
     listen_sock.close()
 
     procs: dict[int, tuple[subprocess.Popen, int]] = {}
+    restart_streak: dict[int, int] = {i: 0 for i in range(workers)}
+    worker_started_at: dict[int, float] = {}
     _shutdown = False
 
     def _handle_signal(signum: int, frame: Any) -> None:
@@ -496,6 +542,7 @@ def _run_subprocess_supervisor(
     for worker_id in range(workers):
         proc = _spawn_worker_reuseaddr(worker_id)
         procs[id(proc)] = (proc, worker_id)
+        worker_started_at[worker_id] = time.monotonic()
         print(f"  Worker {worker_id} started (pid {proc.pid})")
 
     # Monitor and restart crashed workers
@@ -506,16 +553,30 @@ def _run_subprocess_supervisor(
             if ret is not None:
                 del procs[key]
                 if not _shutdown:
+                    now = time.monotonic()
+                    started = worker_started_at.get(worker_id, now)
+                    if (now - started) >= 10.0:
+                        restart_streak[worker_id] = 0
+                    else:
+                        restart_streak[worker_id] = restart_streak.get(worker_id, 0) + 1
                     print(f"  Worker {worker_id} exited (code {ret}), restarting...")
                     to_restart.append(worker_id)
 
         for worker_id in to_restart:
+            delay = 0.0
+            streak = restart_streak.get(worker_id, 0)
+            if streak >= 5:
+                delay = min(2.0, 0.1 * (2 ** (streak - 5)))
+            if delay > 0.0:
+                print(f"  Worker {worker_id} crash-loop detected (streak={streak}), backoff {delay:.1f}s")
+                time.sleep(delay)
             proc = _spawn_worker_reuseaddr(worker_id)
             procs[id(proc)] = (proc, worker_id)
+            worker_started_at[worker_id] = time.monotonic()
             print(f"  Worker {worker_id} restarted (pid {proc.pid})")
 
         if not _shutdown:
-            time.sleep(1.0)
+            time.sleep(0.1)
 
     # Shutdown
     print("\nShutting down workers...")
