@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "astraapi"
-version = "0.1.16"
+version = "0.1.17"
 description = "AstraAPI framework, high performance, easy to learn, fast to code, ready for production"
 readme = "README.md"
 license = {text = "MIT"}
