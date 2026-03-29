@@ -97,7 +97,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -107,10 +106,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Install twine
+        run: pip install twine
+
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_TOKEN }}
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: twine upload dist/*
 
       - name: Attach release notes to GitHub release
         uses: softprops/action-gh-release@v2
