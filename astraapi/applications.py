@@ -5991,4 +5991,8 @@ class AstraAPI(AppBase):
             import uvloop
             uvloop.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
         except ImportError:
-            asyncio.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
+            try:
+                import winloop
+                winloop.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
+            except ImportError:
+                asyncio.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
