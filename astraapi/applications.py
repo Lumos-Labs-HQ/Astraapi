@@ -5975,24 +5975,12 @@ class AstraAPI(AppBase):
 
         self._sync_routes_to_core()
 
-        # Workers receive either a dispatch socket (master-accept mode) or
-        # a shared listen socket (fallback) from the supervisor via stdin.
-        shared_sock = None
-        dispatch_sock = None
-        from astraapi._multiworker import has_shared_socket, has_dispatch_socket
-        if has_dispatch_socket():
-            from astraapi._multiworker import receive_dispatch_socket
-            dispatch_sock = receive_dispatch_socket()
-        elif has_shared_socket():
-            from astraapi._multiworker import receive_shared_socket
-            shared_sock = receive_shared_socket()
-
         try:
             import uvloop
-            uvloop.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
+            uvloop.run(run_server(self, host, port))
         except ImportError:
             try:
                 import winloop
-                winloop.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
+                winloop.run(run_server(self, host, port))
             except ImportError:
-                asyncio.run(run_server(self, host, port, sock=shared_sock, unix_sock=dispatch_sock))
+                asyncio.run(run_server(self, host, port))

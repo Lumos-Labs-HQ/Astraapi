@@ -28,8 +28,6 @@ from typing import Any
 
 _WORKER_ENV = "_ASTRAAPI_WORKER"
 _WORKER_ID_ENV = "_ASTRAAPI_WORKER_ID"
-_SHARED_SOCKET_ENV = "_ASTRAAPI_SHARED_SOCK"
-_DISPATCH_SOCK_ENV = "_ASTRAAPI_DISPATCH_SOCK"
 
 _HAS_FORK = hasattr(os, "fork")
 _HAS_REUSEPORT = hasattr(_socket, "SO_REUSEPORT")
@@ -38,42 +36,6 @@ _HAS_REUSEPORT = hasattr(_socket, "SO_REUSEPORT")
 def is_worker() -> bool:
     """Return True if running inside a worker process."""
     return os.environ.get(_WORKER_ENV) == "1"
-
-
-def has_shared_socket() -> bool:
-    """Return True if this worker should receive a shared socket from parent."""
-    return os.environ.get(_SHARED_SOCKET_ENV) == "1"
-
-
-def has_dispatch_socket() -> bool:
-    """Return True if this worker should receive a dispatch socket from parent."""
-    return os.environ.get(_DISPATCH_SOCK_ENV) == "1"
-
-
-def receive_dispatch_socket() -> _socket.socket:
-    """Receive dispatch socketpair end from parent via stdin (Windows).
-
-    The parent sends: 4-byte little-endian length + socket share data.
-    We reconstruct with socket.fromshare(). Socket stays blocking for
-    the reader thread that will consume dispatched connections.
-    """
-    length = int.from_bytes(sys.stdin.buffer.read(4), "little")
-    share_data = sys.stdin.buffer.read(length)
-    sock = _socket.fromshare(share_data)
-    return sock
-
-
-def receive_shared_socket() -> _socket.socket:
-    """Receive a shared listening socket from parent via stdin (Windows).
-
-    The parent sends: 4-byte little-endian length + socket share data.
-    We reconstruct with socket.fromshare() and set non-blocking.
-    """
-    length = int.from_bytes(sys.stdin.buffer.read(4), "little")
-    share_data = sys.stdin.buffer.read(length)
-    sock = _socket.fromshare(share_data)
-    sock.setblocking(False)
-    return sock
 
 
 def _try_tune_sysctl() -> None:
@@ -208,79 +170,18 @@ def _master_accept_loop(
         conn.close()
 
 
-def _spawn_worker_with_dispatch(
-    worker_id: int, dispatch_child: _socket.socket,
-) -> subprocess.Popen:
-    """Spawn a worker subprocess and share the dispatch socketpair end (Windows).
+def _spawn_worker_reuseaddr(worker_id: int) -> subprocess.Popen:
+    """Spawn a worker subprocess that binds its own socket (Windows).
 
-    Uses socket.share(pid) + stdin pipe to send the dispatch socket to the
-    child. The child reconstructs it with socket.fromshare() and uses it to
-    receive round-robin dispatched connections from the master accept thread.
+    Each worker calls bind()+listen() with SO_REUSEADDR independently.
+    Windows allows multiple processes to bind the same port this way.
+    No socket sharing or dispatch needed.
     """
-    env = {
-        **os.environ,
-        _WORKER_ENV: "1",
-        _WORKER_ID_ENV: str(worker_id),
-        _DISPATCH_SOCK_ENV: "1",
-    }
-    args = [sys.executable] + sys.argv
-    proc = subprocess.Popen(
-        args, env=env, stdin=subprocess.PIPE,
+    env = {**os.environ, _WORKER_ENV: "1", _WORKER_ID_ENV: str(worker_id)}
+    return subprocess.Popen(
+        [sys.executable] + sys.argv, env=env,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
     )
-    share_data = dispatch_child.share(proc.pid)
-    proc.stdin.write(len(share_data).to_bytes(4, "little"))
-    proc.stdin.write(share_data)
-    proc.stdin.flush()
-    proc.stdin.close()
-    return proc
-
-
-def _master_accept_loop_win(
-    listen_sock: _socket.socket,
-    dispatch_info: list,
-    lock: threading.Lock,
-) -> None:
-    """Master accept thread for Windows — round-robin with socket.share().
-
-    Accepts connections on the listen socket and dispatches them to workers
-    by calling conn.share(worker_pid) and sending the share data over the
-    dispatch socketpair. Workers reconstruct with socket.fromshare().
-    """
-    listen_sock.setblocking(True)
-    idx = 0
-
-    while True:
-        try:
-            conn, _ = listen_sock.accept()
-        except OSError:
-            break
-
-        sent = False
-        with lock:
-            n = len(dispatch_info)
-            if n == 0:
-                conn.close()
-                continue
-            for _ in range(n):
-                target = idx % n
-                idx += 1
-                info = dispatch_info[target]
-                if info is not None:
-                    master_sock, worker_pid = info
-                    try:
-                        share_data = conn.share(worker_pid)
-                        master_sock.sendall(len(share_data).to_bytes(4, "little"))
-                        master_sock.sendall(share_data)
-                        sent = True
-                        break
-                    except OSError:
-                        continue
-
-        if not sent:
-            conn.close()
-            continue
-        conn.close()
 
 
 def _signal_child(pid: int) -> None:
@@ -572,15 +473,16 @@ def _run_subprocess_supervisor(
     host: str, port: int, workers: int,
     listen_sock: _socket.socket,
 ) -> None:
-    """Subprocess-based supervisor with master-accept (Windows).
+    """Subprocess-based supervisor for Windows.
 
-    Master does all accept(), round-robins accepted connections to workers
-    via socket.share(pid)/fromshare() over AF_INET socketpairs.
-    Workers never call accept() — zero contention, even distribution.
+    Each worker binds its own socket with SO_REUSEADDR — Windows allows
+    multiple processes to bind the same port. No master-accept, no
+    socket.share() overhead. Workers are fully independent.
     """
+    # Close parent socket — each worker creates its own
+    listen_sock.close()
+
     procs: dict[int, tuple[subprocess.Popen, int]] = {}
-    dispatch_info: list = [None] * workers
-    lock = threading.Lock()
     _shutdown = False
 
     def _handle_signal(signum: int, frame: Any) -> None:
@@ -590,25 +492,11 @@ def _run_subprocess_supervisor(
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    # Spawn workers with dispatch socketpairs
-    print("  [MASTER] Using master-accept dispatch mode")
+    print("  [MASTER] Using SO_REUSEADDR multi-bind mode (Windows)")
     for worker_id in range(workers):
-        master_end, child_end = _socket.socketpair(
-            _socket.AF_INET, _socket.SOCK_STREAM)
-        proc = _spawn_worker_with_dispatch(worker_id, child_end)
-        child_end.close()
-        with lock:
-            dispatch_info[worker_id] = (master_end, proc.pid)
+        proc = _spawn_worker_reuseaddr(worker_id)
         procs[id(proc)] = (proc, worker_id)
         print(f"  Worker {worker_id} started (pid {proc.pid})")
-
-    # Start master accept thread — round-robins connections to workers
-    accept_thread = threading.Thread(
-        target=_master_accept_loop_win,
-        args=(listen_sock, dispatch_info, lock),
-        daemon=True,
-    )
-    accept_thread.start()
 
     # Monitor and restart crashed workers
     while not _shutdown and procs:
@@ -619,23 +507,10 @@ def _run_subprocess_supervisor(
                 del procs[key]
                 if not _shutdown:
                     print(f"  Worker {worker_id} exited (code {ret}), restarting...")
-                    with lock:
-                        old = dispatch_info[worker_id]
-                        if old is not None:
-                            try:
-                                old[0].close()
-                            except OSError:
-                                pass
-                            dispatch_info[worker_id] = None
                     to_restart.append(worker_id)
 
         for worker_id in to_restart:
-            master_end, child_end = _socket.socketpair(
-                _socket.AF_INET, _socket.SOCK_STREAM)
-            proc = _spawn_worker_with_dispatch(worker_id, child_end)
-            child_end.close()
-            with lock:
-                dispatch_info[worker_id] = (master_end, proc.pid)
+            proc = _spawn_worker_reuseaddr(worker_id)
             procs[id(proc)] = (proc, worker_id)
             print(f"  Worker {worker_id} restarted (pid {proc.pid})")
 
@@ -655,12 +530,4 @@ def _run_subprocess_supervisor(
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    # Clean up dispatch sockets
-    with lock:
-        for i, info in enumerate(dispatch_info):
-            if info is not None:
-                try:
-                    info[0].close()
-                except OSError:
-                    pass
-                dispatch_info[i] = None
+
