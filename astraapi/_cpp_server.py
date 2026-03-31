@@ -1542,10 +1542,9 @@ class CppHttpProtocol(asyncio.Protocol):
             # Single C++ call: appends data + dispatches
             # Returns: 0=done+empty, 1=done+partial, -1=need-more, -2=error, -3=overflow, tuple=async
             result = core_ad(http_buf, data, transport, sock_fd)
-            if type(result) is int:
+            if result.__class__ is int:
                 if result >= 0:
-                    if result == 0:
-                        self._ka_needs_reset = True  # lazy: sweep updates actual deadline
+                    self._ka_needs_reset = True  # lazy: sweep updates actual deadline
                     return  # sync batch done (0=empty, 1=partial pending)
                 if result == -1:
                     return  # need more data
@@ -1568,10 +1567,9 @@ class CppHttpProtocol(asyncio.Protocol):
                 return
             core_batch = self._core_batch
             result = core_batch(http_buf, transport, sock_fd)
-            if type(result) is int:
+            if result.__class__ is int:
                 if result >= 0:
-                    if result == 0:
-                        self._ka_needs_reset = True  # lazy: sweep updates actual deadline
+                    self._ka_needs_reset = True
                     return
                 if result == -2:
                     transport.close()
@@ -1716,7 +1714,7 @@ class CppHttpProtocol(asyncio.Protocol):
 
             # Fetch next pipelined request (most often returns int = no more data)
             result = core_batch(http_buf, transport, sock_fd)
-            if type(result) is int:
+            if result.__class__ is int:
                 if result == 0:
                     self._ka_needs_reset = True  # lazy ka deadline update
                 elif result == -2:

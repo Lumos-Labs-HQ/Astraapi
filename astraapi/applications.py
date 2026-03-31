@@ -1089,44 +1089,49 @@ class AstraAPI(AppBase):
         if self.openapi_url:
             urls = (server_data.get("url") for server_data in self.servers)
             server_urls = {url for url in urls if url}
+            # OPT: No Request param - read root_path from _server_root_path module var.
+            # Prevents internal docs routes from forcing _needs_request_context=True
+            # on ALL requests (adds 3-4us Python header parse per request).
+            _app_ref = self
 
-            async def openapi(req: Request) -> Response:
-                root_path = req.scope.get("root_path", "").rstrip("/")
+            async def openapi() -> Response:
+                from astraapi._cpp_server import _server_root_path
+                root_path = _server_root_path.rstrip("/")
                 if root_path not in server_urls:
-                    if root_path and self.root_path_in_servers:
-                        self.servers.insert(0, {"url": root_path})
+                    if root_path and _app_ref.root_path_in_servers:
+                        _app_ref.servers.insert(0, {"url": root_path})
                         server_urls.add(root_path)
-                        # Invalidate cached schema so it's rebuilt with new server
-                        self.openapi_schema = None
-                        self._openapi_bytes = None
-                self.openapi()  # ensure schema + bytes are built
+                        _app_ref.openapi_schema = None
+                        _app_ref._openapi_bytes = None
+                _app_ref.openapi()
                 return Response(
-                    content=self._openapi_bytes,
+                    content=_app_ref._openapi_bytes,
                     media_type="application/json",
                 )
 
             self.add_route(self.openapi_url, openapi, include_in_schema=False)
         if self.openapi_url and self.docs_url:
 
-            async def swagger_ui_html(req: Request) -> HTMLResponse:
-                root_path = req.scope.get("root_path", "").rstrip("/")
-                openapi_url = root_path + self.openapi_url
-                oauth2_redirect_url = self.swagger_ui_oauth2_redirect_url
+            async def swagger_ui_html() -> HTMLResponse:
+                from astraapi._cpp_server import _server_root_path
+                root_path = _server_root_path.rstrip("/")
+                openapi_url = root_path + _app_ref.openapi_url
+                oauth2_redirect_url = _app_ref.swagger_ui_oauth2_redirect_url
                 if oauth2_redirect_url:
                     oauth2_redirect_url = root_path + oauth2_redirect_url
                 return get_swagger_ui_html(
                     openapi_url=openapi_url,
-                    title=f"{self.title} - Swagger UI",
+                    title=f"{_app_ref.title} - Swagger UI",
                     oauth2_redirect_url=oauth2_redirect_url,
-                    init_oauth=self.swagger_ui_init_oauth,
-                    swagger_ui_parameters=self.swagger_ui_parameters,
+                    init_oauth=_app_ref.swagger_ui_init_oauth,
+                    swagger_ui_parameters=_app_ref.swagger_ui_parameters,
                 )
 
             self.add_route(self.docs_url, swagger_ui_html, include_in_schema=False)
 
             if self.swagger_ui_oauth2_redirect_url:
 
-                async def swagger_ui_redirect(req: Request) -> HTMLResponse:
+                async def swagger_ui_redirect() -> HTMLResponse:
                     return get_swagger_ui_oauth2_redirect_html()
 
                 self.add_route(
@@ -1136,15 +1141,15 @@ class AstraAPI(AppBase):
                 )
         if self.openapi_url and self.redoc_url:
 
-            async def redoc_html(req: Request) -> HTMLResponse:
-                root_path = req.scope.get("root_path", "").rstrip("/")
-                openapi_url = root_path + self.openapi_url
+            async def redoc_html() -> HTMLResponse:
+                from astraapi._cpp_server import _server_root_path
+                root_path = _server_root_path.rstrip("/")
+                openapi_url = root_path + _app_ref.openapi_url
                 return get_redoc_html(
-                    openapi_url=openapi_url, title=f"{self.title} - ReDoc"
+                    openapi_url=openapi_url, title=f"{_app_ref.title} - ReDoc"
                 )
 
             self.add_route(self.redoc_url, redoc_html, include_in_schema=False)
-
     @staticmethod
     def _convert_batch_specs(
         batch_specs: list[tuple],
