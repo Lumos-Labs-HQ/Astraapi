@@ -321,7 +321,7 @@ tests/test_tutorial/test_settings/test_tutorial001.py .                  [ 94%]
 tests/test_tutorial/test_sql_databases/test_tutorial001.py ........      [ 95%]
 tests/test_tutorial/test_sql_databases/test_tutorial002.py ........      [ 95%]
 tests/test_tutorial/test_static_files/test_tutorial001.py ...            [ 95%]
-tests/test_tutorial/test_sub_applications/test_tutorial001.py ..F.       [ 96%]
+tests/test_tutorial/test_sub_applications/test_tutorial001.py ....       [ 96%]
 tests/test_tutorial/test_templates/test_tutorial001.py .                 [ 96%]
 tests/test_tutorial/test_testing/test_main_a.py ...                      [ 96%]
 tests/test_tutorial/test_testing/test_main_b.py ....                     [ 96%]
@@ -336,19 +336,6 @@ tests/test_tutorial/test_websockets/test_tutorial001.py ..               [ 98%]
 tests/test_tutorial/test_websockets/test_tutorial002.py ................ [ 99%]
 ........                                                                 [ 99%]
 tests/test_tutorial/test_websockets/test_tutorial003.py ..               [ 99%]
-tests/test_tutorial/test_wsgi/test_tutorial001.py ..                     [100%]
+tests/test_tutorial/test_wsgi/test_tutorial001.py s.                     [100%]
 
-=================================== FAILURES ===================================
-___________________________ test_openapi_schema_sub ____________________________
-
-    def test_openapi_schema_sub():
-        response = client.get("/subapi/openapi.json")
->       assert response.status_code == 200, response.text
-E       AssertionError: {"detail":"Internal Server Error"}
-E       assert 500 == 200
-E        +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-tests/test_tutorial/test_sub_applications/test_tutorial001.py:60: AssertionError
-=========================== short test summary info ============================
-FAILED tests/test_tutorial/test_sub_applications/test_tutorial001.py::test_openapi_schema_sub
-======= 1 failed, 1951 passed, 1 skipped, 8 xfailed in 720.24s (0:12:00) =======
+============ 1951 passed, 2 skipped, 8 xfailed in 662.06s (0:11:02) ============

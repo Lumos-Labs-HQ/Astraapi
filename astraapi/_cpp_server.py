@@ -2466,6 +2466,8 @@ async def _create_server(
     # Sync routes if not yet done
     if hasattr(app, "_sync_routes_to_core"):
         app._sync_routes_to_core()
+    # Clear protocol pool so all protocols use the new app's _needs_req_ctx
+    _protocol_pool._pool.clear()
 
     # Apply body size limit (0 = unlimited, like FastAPI/Hono/Bun/Express)
     _env_max = int(os.environ.get("ASTRAAPI_MAX_BODY_SIZE", "0"))

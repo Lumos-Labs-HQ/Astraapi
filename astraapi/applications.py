@@ -1094,9 +1094,11 @@ class AstraAPI(AppBase):
             # on ALL requests (adds 3-4us Python header parse per request).
             _app_ref = self
 
-            async def openapi() -> Response:
-                from astraapi._cpp_server import _server_root_path
-                root_path = _server_root_path.rstrip("/")
+            async def openapi(request: Request = None) -> Response:
+                from astraapi._cpp_server import _server_root_path, _current_root_path
+                # ASGI path passes request; C++ fast path passes nothing
+                _rp = (request.scope.get("root_path", "") if request else None)
+                root_path = (_rp or _current_root_path.get() or _server_root_path).rstrip("/")
                 if root_path not in server_urls:
                     if root_path and _app_ref.root_path_in_servers:
                         _app_ref.servers.insert(0, {"url": root_path})
@@ -1112,9 +1114,10 @@ class AstraAPI(AppBase):
             self.add_route(self.openapi_url, openapi, include_in_schema=False)
         if self.openapi_url and self.docs_url:
 
-            async def swagger_ui_html() -> HTMLResponse:
-                from astraapi._cpp_server import _server_root_path
-                root_path = _server_root_path.rstrip("/")
+            async def swagger_ui_html(request: Request = None) -> HTMLResponse:
+                from astraapi._cpp_server import _server_root_path, _current_root_path
+                _rp = (request.scope.get("root_path", "") if request else None)
+                root_path = (_rp or _current_root_path.get() or _server_root_path).rstrip("/")
                 openapi_url = root_path + _app_ref.openapi_url
                 oauth2_redirect_url = _app_ref.swagger_ui_oauth2_redirect_url
                 if oauth2_redirect_url:
@@ -1141,9 +1144,10 @@ class AstraAPI(AppBase):
                 )
         if self.openapi_url and self.redoc_url:
 
-            async def redoc_html() -> HTMLResponse:
-                from astraapi._cpp_server import _server_root_path
-                root_path = _server_root_path.rstrip("/")
+            async def redoc_html(request: Request = None) -> HTMLResponse:
+                from astraapi._cpp_server import _server_root_path, _current_root_path
+                _rp = (request.scope.get("root_path", "") if request else None)
+                root_path = (_rp or _current_root_path.get() or _server_root_path).rstrip("/")
                 openapi_url = root_path + _app_ref.openapi_url
                 return get_redoc_html(
                     openapi_url=openapi_url, title=f"{_app_ref.title} - ReDoc"
@@ -2354,7 +2358,14 @@ class AstraAPI(AppBase):
                     import warnings as _warnings
                     with _warnings.catch_warnings():
                         _warnings.simplefilter('ignore', DeprecationWarning)
-                        await _app(_scope, _receive, _send)
+                        # Set root_path ContextVar so sub-app openapi() reads correct path
+                        from astraapi._cpp_server import _current_root_path as _crp
+                        _prev_rp = _crp.get()
+                        _crp.set(_scope['root_path'])
+                        try:
+                            await _app(_scope, _receive, _send)
+                        finally:
+                            _crp.set(_prev_rp)
                     from astraapi._response import Response as _Resp
                     _r = _Resp(content=_resp_body[0], status_code=_resp_status[0])
                     for _hn, _hv in _resp_headers[0]:
