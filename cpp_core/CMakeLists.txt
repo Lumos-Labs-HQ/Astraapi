@@ -32,6 +32,7 @@ set(SOURCES
     src/json_parser.cpp
     src/ws_frame_parser.cpp
     src/ws_ring_buffer.cpp
+    src/streaming_multipart.cpp
 )
 
 set(THIRD_PARTY_C_SOURCES

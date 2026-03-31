@@ -193,9 +193,51 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
         if (!part) return nullptr;
 
         PyRef py_name(PyUnicode_FromString(name.c_str()));
-        PyRef py_data(PyBytes_FromStringAndSize(p, body_end - p));
         PyDict_SetItemString(part.get(), "name", py_name.get());
-        PyDict_SetItemString(part.get(), "data", py_data.get());
+
+        // File parts: write into SpooledTemporaryFile (rolls to disk above 1MB).
+        // Form fields: use PyBytes (small text values).
+        Py_ssize_t part_len = (Py_ssize_t)(body_end - p);
+        if (!filename.empty()) {
+            static PyObject* s_spooled_cls = nullptr;
+            static PyObject* s_write_str = nullptr;
+            static PyObject* s_seek_str = nullptr;
+            if (!s_spooled_cls) {
+                PyRef tf(PyImport_ImportModule("tempfile"));
+                if (tf) s_spooled_cls = PyObject_GetAttrString(tf.get(), "SpooledTemporaryFile");
+                s_write_str = PyUnicode_InternFromString("write");
+                s_seek_str  = PyUnicode_InternFromString("seek");
+            }
+            PyObject* spooled = nullptr;
+            if (s_spooled_cls) {
+                PyRef kw(PyDict_New());
+                PyRef max_sz(PyLong_FromLong(1048576));
+                PyRef mode(PyUnicode_FromString("w+b"));
+                if (kw && max_sz && mode) {
+                    PyDict_SetItemString(kw.get(), "max_size", max_sz.get());
+                    PyDict_SetItemString(kw.get(), "mode", mode.get());
+                    PyRef empty_tuple(PyTuple_New(0));
+                    if (empty_tuple) spooled = PyObject_Call(s_spooled_cls, empty_tuple.get(), kw.get());
+                }
+            }
+            if (spooled && s_write_str && s_seek_str) {
+                PyRef data_bytes(PyBytes_FromStringAndSize(p, part_len));
+                if (data_bytes) {
+                    PyRef wr(PyObject_CallMethodOneArg(spooled, s_write_str, data_bytes.get()));
+                    PyRef zero(PyLong_FromLong(0));
+                    if (zero) PyObject_CallMethodOneArg(spooled, s_seek_str, zero.get());
+                }
+                PyDict_SetItemString(part.get(), "data", spooled);
+                Py_DECREF(spooled);
+            } else {
+                PyRef py_data(PyBytes_FromStringAndSize(p, part_len));
+                PyDict_SetItemString(part.get(), "data", py_data ? py_data.get() : Py_None);
+                Py_XDECREF(spooled);
+            }
+        } else {
+            PyRef py_data(PyBytes_FromStringAndSize(p, part_len));
+            PyDict_SetItemString(part.get(), "data", py_data ? py_data.get() : Py_None);
+        }
 
         if (!filename.empty()) {
             PyRef py_fn(PyUnicode_FromString(filename.c_str()));

@@ -100,6 +100,11 @@ extern PyObject* py_batch_coerce_scalars(PyObject* self, PyObject* args);
 extern PyObject* py_serialize_error_response(PyObject* self, PyObject* arg);
 extern PyObject* py_serialize_error_list(PyObject* self, PyObject* arg);
 
+// streaming_multipart.cpp
+extern PyObject* py_create_streaming_multipart_parser(PyObject* self, PyObject* args);
+extern PyObject* py_feed_streaming_multipart(PyObject* self, PyObject* args);
+extern PyObject* py_get_streaming_multipart_form_data(PyObject* self, PyObject* arg);
+
 // param_extractor.cpp
 extern PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObject* kwargs);
 
@@ -196,6 +201,11 @@ static PyMethodDef module_methods[] = {
     // Error response
     {"serialize_error_response", (PyCFunction)py_serialize_error_response, METH_O, nullptr},
     {"serialize_error_list", (PyCFunction)py_serialize_error_list, METH_O, nullptr},
+
+    // Streaming multipart
+    {"create_streaming_multipart_parser", (PyCFunction)py_create_streaming_multipart_parser, METH_VARARGS, nullptr},
+    {"feed_streaming_multipart", (PyCFunction)py_feed_streaming_multipart, METH_VARARGS, nullptr},
+    {"get_streaming_multipart_form_data", (PyCFunction)py_get_streaming_multipart_form_data, METH_O, nullptr},
 
     // Param extractor
     {"batch_extract_params_inline", (PyCFunction)py_batch_extract_params_inline, METH_VARARGS | METH_KEYWORDS, nullptr},

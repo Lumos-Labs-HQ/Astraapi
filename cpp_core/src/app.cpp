@@ -9,6 +9,7 @@
 #include "buffer_pool.hpp"
 #include "http_parser.hpp"
 #include "ws_frame_parser.hpp"
+#include "streaming_multipart.hpp"
 #include "percent_decode.hpp"
 #include "pyref.hpp"
 #include <cstring>
@@ -2553,7 +2554,7 @@ static int serialize_json_and_write_response(
 
 class HttpConnectionBuffer {
     static constexpr size_t INITIAL_CAPACITY = 1024;   // 1KB initial — grows on demand
-    static constexpr size_t MAX_CAPACITY = 1048576;  // 1MB
+    static constexpr size_t MAX_CAPACITY = 16777216;  // 16MB (covers most file uploads)
 
     uint8_t* buf_;
     size_t capacity_;
@@ -3680,6 +3681,16 @@ static PyObject* dispatch_one_request(
     // ── Body parsing: JSON or Form data ────────────────────────────────────
     // Skip entirely for GET, HEAD, OPTIONS — these methods carry no request body.
     PyObject* json_body_obj = Py_None;
+    // Body size limit (0 = unlimited, like FastAPI/Hono/Bun/Express)
+    if (self->max_body_size > 0 && req.body.len > self->max_body_size) {
+        PyRef resp(build_http_error_response(413, "Request Entity Too Large", req.keep_alive,
+                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+        if (resp) write_to_transport(transport, resp.get());
+        --self->counters.active_requests; ++self->counters.total_errors;
+        Py_DECREF(endpoint_local); Py_XDECREF(body_params_local);
+        return make_consumed_true(self, req.total_consumed);
+    }
+
     if (!skip_body_parse && !req.body.empty()) {
         if (is_form_local && content_type_sv.len > 0) {
             // Check content-type to determine form type
@@ -3689,6 +3700,39 @@ static PyObject* dispatch_one_request(
                 is_urlencoded = true;
             } else if (ci_contains(content_type_sv.data, content_type_sv.len, "multipart/form-data", 19)) {
                 is_multipart = true;
+            }
+
+            if (is_multipart) {
+                // Streaming multipart: BMH boundary search, SpooledTemporaryFile
+                const char* bnd_start = nullptr; size_t bnd_len = 0;
+                const char* ct_data = content_type_sv.data; size_t ct_len = content_type_sv.len;
+                for (size_t ci = 0; ci + 9 <= ct_len; ci++) {
+                    if (strncasecmp(ct_data + ci, "boundary=", 9) == 0) {
+                        bnd_start = ct_data + ci + 9; bnd_len = ct_len - ci - 9;
+                        if (bnd_len > 0 && bnd_start[0] == '"') { bnd_start++; bnd_len -= 2; }
+                        break;
+                    }
+                }
+                if (bnd_start && bnd_len > 0) {
+                    StreamingMultipartParser smp(std::string(bnd_start, bnd_len), self->max_body_size);
+                    FeedResult fr = smp.feed((const uint8_t*)req.body.data, req.body.len);
+                    if (fr == FeedResult::SIZE_EXCEEDED) {
+                        PyRef resp(build_http_error_response(413, "Request Entity Too Large", req.keep_alive,
+                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                        if (resp) write_to_transport(transport, resp.get());
+                        --self->counters.active_requests; ++self->counters.total_errors;
+                        Py_DECREF(endpoint_local); Py_XDECREF(body_params_local);
+                        return make_consumed_true(self, req.total_consumed);
+                    }
+                    // build_kwargs injects UploadFile objects directly into kwargs
+                    // Zero Python calls during parsing - C++ owns all data buffers
+                    if (kwargs) {
+                        PyObject* result = smp.build_kwargs(kwargs.get());
+                        if (!result) PyErr_Clear();
+                        // json_body_obj stays Py_None for form routes
+                    }
+                }
+                goto body_done;
             }
 
             if (is_urlencoded) {
@@ -3821,35 +3865,43 @@ static PyObject* dispatch_one_request(
                                         }
                                         PyObject* upload_file_obj = nullptr;
                                         if (s_upload_file_class && data_obj) {
-                                            // Build BytesIO(data) for the file-like backing
-                                            PyRef io_mod(PyImport_ImportModule("io"));
-                                            if (io_mod) {
-                                                PyRef bytes_io_cls(PyObject_GetAttrString(io_mod.get(), "BytesIO"));
-                                                if (bytes_io_cls) {
-                                                    PyRef file_obj(PyObject_CallOneArg(bytes_io_cls.get(), data_obj));
-                                                    if (file_obj) {
-                                                        // Get content_type from part dict
-                                                        PyObject* ct_obj = PyDict_GetItemString(part, "content_type");
-                                                        const char* ct_str = "application/octet-stream";
-                                                        if (ct_obj && ct_obj != Py_None && PyUnicode_Check(ct_obj)) {
-                                                            const char* ct_tmp = PyUnicode_AsUTF8(ct_obj);
-                                                            if (ct_tmp) ct_str = ct_tmp;
-                                                        }
-                                                        // UploadFile(filename=..., file=..., content_type=...)
-                                                        PyRef kw(PyDict_New());
-                                                        if (kw) {
-                                                            if (!s_kw_filename) s_kw_filename = PyUnicode_InternFromString("filename");
-                                                            if (!s_kw_file) s_kw_file = PyUnicode_InternFromString("file");
-                                                            if (!s_kw_ct) s_kw_ct = PyUnicode_InternFromString("content_type");
-                                                            PyRef ct_pystr(PyUnicode_FromString(ct_str));
-                                                            if (ct_pystr) {
-                                                                PyDict_SetItem(kw.get(), s_kw_filename, fn_obj);
-                                                                PyDict_SetItem(kw.get(), s_kw_file, file_obj.get());
-                                                                PyDict_SetItem(kw.get(), s_kw_ct, ct_pystr.get());
-                                                                upload_file_obj = PyObject_Call(s_upload_file_class, g_empty_tuple, kw.get());
-                                                                if (!upload_file_obj) PyErr_Clear();
-                                                            }
-                                                        }
+                                            // Build file-like object: use SpooledTemporaryFile directly
+                                            // if C++ form_parser already created one, else wrap bytes in BytesIO
+                                            static PyObject* s_read_str = nullptr;
+                                            if (!s_read_str) s_read_str = PyUnicode_InternFromString("read");
+                                            bool data_is_file = s_read_str && PyObject_HasAttr(data_obj, s_read_str);
+                                            PyRef file_obj;
+                                            if (data_is_file) {
+                                                Py_INCREF(data_obj);
+                                                file_obj = PyRef(data_obj);
+                                            } else {
+                                                PyRef io_mod(PyImport_ImportModule("io"));
+                                                if (io_mod) {
+                                                    PyRef bytes_io_cls(PyObject_GetAttrString(io_mod.get(), "BytesIO"));
+                                                    if (bytes_io_cls) file_obj = PyRef(PyObject_CallOneArg(bytes_io_cls.get(), data_obj));
+                                                } else { PyErr_Clear(); }
+                                            }
+                                            if (file_obj) {
+                                                // Get content_type from part dict
+                                                PyObject* ct_obj = PyDict_GetItemString(part, "content_type");
+                                                const char* ct_str = "application/octet-stream";
+                                                if (ct_obj && ct_obj != Py_None && PyUnicode_Check(ct_obj)) {
+                                                    const char* ct_tmp = PyUnicode_AsUTF8(ct_obj);
+                                                    if (ct_tmp) ct_str = ct_tmp;
+                                                }
+                                                // UploadFile(filename=..., file=..., content_type=...)
+                                                PyRef kw(PyDict_New());
+                                                if (kw) {
+                                                    if (!s_kw_filename) s_kw_filename = PyUnicode_InternFromString("filename");
+                                                    if (!s_kw_file) s_kw_file = PyUnicode_InternFromString("file");
+                                                    if (!s_kw_ct) s_kw_ct = PyUnicode_InternFromString("content_type");
+                                                    PyRef ct_pystr(PyUnicode_FromString(ct_str));
+                                                    if (ct_pystr) {
+                                                        PyDict_SetItem(kw.get(), s_kw_filename, fn_obj);
+                                                        PyDict_SetItem(kw.get(), s_kw_file, file_obj.get());
+                                                        PyDict_SetItem(kw.get(), s_kw_ct, ct_pystr.get());
+                                                        upload_file_obj = PyObject_Call(s_upload_file_class, g_empty_tuple, kw.get());
+                                                        if (!upload_file_obj) PyErr_Clear();
                                                     }
                                                 }
                                             } else { PyErr_Clear(); }
@@ -6536,6 +6588,14 @@ static PyObject* CoreApp_handle_http_append_and_dispatch(
     }
 }
 
+// set_max_body_size(size_bytes: int) -- 0 = unlimited
+static PyObject* CoreApp_set_max_body_size(CoreAppObject* self, PyObject* arg) {
+    Py_ssize_t sz = PyLong_AsSsize_t(arg);
+    if (sz == -1 && PyErr_Occurred()) return nullptr;
+    self->max_body_size = (sz <= 0) ? 0 : (size_t)sz;
+    Py_RETURN_NONE;
+}
+
 static PyMethodDef CoreApp_methods[] = {
     {"next_route_id", (PyCFunction)CoreApp_next_route_id, METH_NOARGS, nullptr},
     {"record_request_start", (PyCFunction)CoreApp_record_request_start, METH_NOARGS, nullptr},
@@ -6581,6 +6641,15 @@ static PyMethodDef CoreApp_methods[] = {
     {"set_client_ip", (PyCFunction)CoreApp_set_client_ip, METH_O, nullptr},
     {"set_post_response_hook", (PyCFunction)CoreApp_set_post_response_hook, METH_O, nullptr},
     {"warmup", (PyCFunction)CoreApp_warmup, METH_NOARGS, nullptr},
+    {"set_max_body_size", (PyCFunction)CoreApp_set_max_body_size, METH_O, nullptr},
+    {nullptr}
+};
+
+static PyObject* CoreApp_get_max_body_size(CoreAppObject* self, void*) {
+    return PyLong_FromSize_t(self->max_body_size);
+}
+static PyGetSetDef CoreApp_getset[] = {
+    {"max_body_size", (getter)CoreApp_get_max_body_size, nullptr, nullptr, nullptr},
     {nullptr}
 };
 
@@ -6591,6 +6660,7 @@ static PyMemberDef CoreApp_members[] = {
     {nullptr}
 };
 
+
 PyTypeObject CoreAppType = {
     .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
     .tp_name = "_astraapi_core.CoreApp",
@@ -6599,6 +6669,7 @@ PyTypeObject CoreAppType = {
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_methods = CoreApp_methods,
     .tp_members = CoreApp_members,
+    .tp_getset = CoreApp_getset,
     .tp_new = CoreApp_new,
 };
 

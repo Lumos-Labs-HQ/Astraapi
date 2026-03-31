@@ -245,6 +245,7 @@ struct CoreAppObject {
     // Connection pressure: when true, override keep_alive → false in all responses.
     // Set by Python when active_count > 80% of MAX_CONNECTIONS.
     int force_close = 0;  // int for Py_T_INT member access from Python
+    size_t max_body_size = 0;  // 0 = unlimited (like FastAPI/Hono/Bun/Express)
 
     // Trailing slash redirect control
     bool redirect_slashes = true;  // Set to false to disable 307 redirects

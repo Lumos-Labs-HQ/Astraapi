@@ -1496,6 +1496,16 @@ class CppHttpProtocol(asyncio.Protocol):
         if transport is None:
             return
 
+        # Body size limit check (0 = unlimited, like FastAPI/Hono/Bun/Express)
+        if self._core.max_body_size > 0:
+            # Total = already buffered + incoming chunk
+            # Add 8KB headroom for HTTP headers
+            _total_incoming = _http_buf_len(http_buf) + len(data)
+            if _total_incoming > self._core.max_body_size + 8192:
+                transport.write(b"HTTP/1.1 413 Request Entity Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                transport.close()
+                return
+
         sock_fd = self._sock_fd
 
         # Extract query string + header context only when needed.
@@ -2423,6 +2433,7 @@ async def _create_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
     keep_alive_timeout: float = 30.0,
     root_path: str = "",
+    max_body_size: int = 0,
 ) -> asyncio.AbstractServer:
     """Create and return a C++ HTTP server without blocking.
 
@@ -2455,6 +2466,13 @@ async def _create_server(
     # Sync routes if not yet done
     if hasattr(app, "_sync_routes_to_core"):
         app._sync_routes_to_core()
+
+    # Apply body size limit (0 = unlimited, like FastAPI/Hono/Bun/Express)
+    _env_max = int(os.environ.get("ASTRAAPI_MAX_BODY_SIZE", "0"))
+    _effective_max = max_body_size or _env_max
+    # Only set if explicitly provided or env var set; preserve any value set directly on core_app
+    if _effective_max > 0 and hasattr(core_app, "set_max_body_size"):
+        core_app.set_max_body_size(_effective_max)
 
     # OPT-A: Register app exception handlers for async dispatch paths
     _exc_handlers_all = dict(getattr(app, 'exception_handlers', {}))
@@ -2760,9 +2778,10 @@ def _setup_fd_receiver_win(
 
 async def run_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
-    keep_alive_timeout: float = 30.0,
+    keep_alive_timeout: float = 5.0,
     sock: Any = None,
     unix_sock: Any = None,
+    max_body_size: int = 0,
 ) -> None:
     """Start the C++ HTTP server with optimal event loop configuration."""
     from astraapi._multiworker import is_worker as _is_worker_check
@@ -2786,6 +2805,7 @@ async def run_server(
             "/proc/sys/net/core/netdev_max_backlog": "65535",
             "/proc/sys/net/ipv4/tcp_tw_reuse": "1",
             "/proc/sys/net/ipv4/tcp_fin_timeout": "10",
+            "/proc/sys/net/ipv4/ip_local_port_range": "1024 65535",
         }
         for _path, _val in _sysctl_map.items():
             try:
@@ -3116,7 +3136,9 @@ async def run_server(
     # instead of per-connection call_later() timers (eliminates ~1K+ callbacks/sec)
     async def _ka_sweep() -> None:
         while not stop_event.is_set():
-            await asyncio.sleep(5.0)
+            # Adaptive interval: faster sweep when few connections
+            _sweep_interval = 1.0 if active_count[0] < 500 else 5.0
+            await asyncio.sleep(_sweep_interval)
             now = _monotonic()
             batch: list = []
             for p in active_connections:

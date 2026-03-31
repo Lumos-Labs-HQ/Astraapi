@@ -1767,9 +1767,12 @@ class AstraAPI(AppBase):
                         elif isinstance(item, dict) and 'data' in item:
                             d = item.get('data') or b''
                             if is_upload:
-                                uf = _UploadFile(filename=item.get('filename') or '', file=io.BytesIO(d),
+                                # Use SpooledTemporaryFile directly if C++ provided one (avoids BytesIO copy)
+                                _file_obj = d if hasattr(d, 'read') else io.BytesIO(d)
+                                _size = item.get('size') or (len(d) if isinstance(d, (bytes, bytearray)) else 0)
+                                uf = _UploadFile(filename=item.get('filename') or '', file=_file_obj,
                                                  content_type=item.get('content_type') or 'application/octet-stream',
-                                                 headers=_Headers(raw=[]), size=len(d))
+                                                 headers=_Headers(raw=[]), size=_size)
                                 converted.append(uf)
                                 created_files.append(uf)
                             else:
@@ -1778,14 +1781,17 @@ class AstraAPI(AppBase):
                             converted.append(item)
                     kwargs[name] = converted
                 elif isinstance(raw, dict) and 'data' in raw:
-                    data: bytes = raw.get('data') or b''
+                    data = raw.get('data') or b''
                     if is_upload:
+                        # Use SpooledTemporaryFile directly if C++ provided one
+                        _file_obj = data if hasattr(data, 'read') else io.BytesIO(data)
+                        _size = raw.get('size') or (len(data) if isinstance(data, (bytes, bytearray)) else 0)
                         uf = _UploadFile(
                             filename=raw.get('filename') or '',
-                            file=io.BytesIO(data),
+                            file=_file_obj,
                             content_type=raw.get('content_type') or 'application/octet-stream',
                             headers=_Headers(raw=[]),
-                            size=len(data),
+                            size=_size,
                         )
                         if is_list:
                             kwargs[name] = [uf]
@@ -5951,6 +5957,10 @@ class AstraAPI(AppBase):
         reload_includes: Optional[Sequence[str]] = None,
         reload_excludes: Optional[Sequence[str]] = None,
         workers: int = 1,
+        keep_alive_timeout: float = 5.0,
+        max_body_size: int = 0,
+        max_body_size_kb: float = 0,
+        max_body_size_mb: float = 0,
     ) -> None:
         """Run the app with the built-in C++ HTTP server.
 
@@ -5996,10 +6006,11 @@ class AstraAPI(AppBase):
 
         try:
             import uvloop
-            uvloop.run(run_server(self, host, port))
+            _max_bytes = max_body_size or int(max_body_size_kb * 1024) or int(max_body_size_mb * 1024 * 1024)
+            uvloop.run(run_server(self, host, port, keep_alive_timeout=keep_alive_timeout, max_body_size=_max_bytes))
         except ImportError:
             try:
                 import winloop
-                winloop.run(run_server(self, host, port))
+                winloop.run(run_server(self, host, port, keep_alive_timeout=keep_alive_timeout, max_body_size=_max_bytes))
             except ImportError:
-                asyncio.run(run_server(self, host, port))
+                asyncio.run(run_server(self, host, port, keep_alive_timeout=keep_alive_timeout, max_body_size=_max_bytes))
