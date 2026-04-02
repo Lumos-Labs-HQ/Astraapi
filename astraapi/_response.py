@@ -214,6 +214,10 @@ class Response:
 
     def _populate_content_headers(self) -> None:
         """Ensure content-type and content-length headers are set."""
+        # RFC 7230: 204 No Content and 304 Not Modified must not have body/content-length
+        if self.status_code in (204, 304):
+            self.body = b""
+            return
         body = self.body
         # Build content-type
         if self.media_type is not None:
@@ -351,8 +355,16 @@ class JSONResponse(Response):
     def render(self, content: Any) -> bytes:
         if content is None:
             return b"null"
-        # Try C++ fast-path
         if _CORE_JSON:
+            # For non-primitive types without model_dump_json: use jsonable_encoder
+            _is_primitive = isinstance(content, (dict, list, str, int, float, bool, type(None)))
+            _is_pydantic = hasattr(content, "model_dump_json")
+            if not _is_primitive and not _is_pydantic:
+                try:
+                    from astraapi.encoders import jsonable_encoder as _je
+                    content = _je(content)
+                except Exception:
+                    pass
             try:
                 return _core_json_bytes(content)
             except (ValueError, TypeError):

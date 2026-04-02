@@ -338,4 +338,4 @@ tests/test_tutorial/test_websockets/test_tutorial002.py ................ [ 99%]
 tests/test_tutorial/test_websockets/test_tutorial003.py ..               [ 99%]
 tests/test_tutorial/test_wsgi/test_tutorial001.py s.                     [100%]
 
-============ 1951 passed, 2 skipped, 8 xfailed in 662.06s (0:11:02) ============
+============ 1951 passed, 2 skipped, 8 xfailed in 768.03s (0:12:48) ============

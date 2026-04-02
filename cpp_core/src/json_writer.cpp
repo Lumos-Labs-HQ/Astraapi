@@ -38,6 +38,8 @@ static PyObject* s_enum_type = nullptr;        // enum.Enum
 static PyObject* s_isoformat = nullptr;        // cached "isoformat" string
 static PyObject* s_value = nullptr;            // cached "value" string
 static PyObject* s_model_dump = nullptr;       // cached "model_dump" string (Pydantic v2)
+static PyObject* s_is_dataclass = nullptr;    // dataclasses.is_dataclass
+static PyObject* s_asdict = nullptr;           // dataclasses.asdict
 
 // TS-1: Thread-safe lazy init for free-threaded Python (PEP 703) readiness
 static std::once_flag s_types_init_flag;
@@ -478,6 +480,56 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         }
     }
 
+    // Try dataclass: call dataclasses.asdict() to get a dict
+    if (!s_is_dataclass || !s_asdict) {
+        if (!s_is_dataclass) {
+            PyRef dc(PyImport_ImportModule("dataclasses"));
+            if (dc) s_is_dataclass = PyObject_GetAttrString(dc.get(), "is_dataclass");
+        }
+        if (!s_asdict) {
+            PyRef dc(PyImport_ImportModule("dataclasses"));
+            if (dc) s_asdict = PyObject_GetAttrString(dc.get(), "asdict");
+        }
+    }
+    if (s_is_dataclass && s_asdict) {
+        PyRef is_dc(PyObject_CallOneArg(s_is_dataclass, obj));
+        if (is_dc && PyObject_IsTrue(is_dc.get())) {
+            PyRef dc_dict(PyObject_CallOneArg(s_asdict, obj));
+            if (dc_dict) return write_json(dc_dict.get(), buf, depth);
+            PyErr_Clear();
+        } else if (!is_dc) PyErr_Clear();
+    }
+
+    // Try __dict__ for plain Python objects before str() fallback
+    // Skip if object is a str subclass (e.g. Pydantic AnyUrl) - serialize as string
+    if (!PyUnicode_Check(obj)) {
+        PyObject* dict_attr = PyObject_GetAttrString(obj, "__dict__");
+        if (dict_attr && PyDict_Check(dict_attr) && PyDict_Size(dict_attr) > 0) {
+            // Only use __dict__ if str(obj) looks like an object repr (contains " object at ")
+            // This avoids serializing URL-like objects as dicts
+            PyRef str_check(PyObject_Str(obj));
+            bool is_obj_repr = false;
+            if (str_check) {
+                Py_ssize_t slen;
+                const char* s = PyUnicode_AsUTF8AndSize(str_check.get(), &slen);
+                if (s && slen > 10) {
+                    // Check for " object at 0x" pattern
+                    for (Py_ssize_t i = 0; i < slen - 10; i++) {
+                        if (s[i] == ' ' && s[i+1] == 'o' && s[i+2] == 'b' && s[i+3] == 'j') {
+                            is_obj_repr = true; break;
+                        }
+                    }
+                }
+            }
+            if (is_obj_repr) {
+                int rc = write_json(dict_attr, buf, depth);
+                Py_DECREF(dict_attr);
+                return rc;
+            }
+        }
+        Py_XDECREF(dict_attr);
+        PyErr_Clear();
+    }
     // Fallback: try str()
     PyObject* str_repr = PyObject_Str(obj);
     if (!str_repr) return -1;
@@ -500,6 +552,8 @@ void json_writer_cleanup() {
     Py_CLEAR(s_isoformat);
     Py_CLEAR(s_value);
     Py_CLEAR(s_model_dump);
+    Py_CLEAR(s_is_dataclass);
+    Py_CLEAR(s_asdict);
 }
 
 PyObject* serialize_to_json_pybytes(PyObject* obj) {

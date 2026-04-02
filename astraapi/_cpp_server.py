@@ -2260,9 +2260,6 @@ class CppHttpProtocol(asyncio.Protocol):
                 return _raw
 
             if exit_stack is not None:
-                # Write response AND run background tasks INSIDE exit_stack so
-                # cleanup (generator dep teardown) happens AFTER bg tasks complete.
-                # This matches AstraAPI semantics: bg tasks see pre-cleanup dep state.
                 async with exit_stack:
                     raw = await _call_and_write()
                     background = getattr(raw, 'background', None)
@@ -2867,15 +2864,23 @@ async def run_server(
         _routes = getattr(getattr(app, 'router', None), 'routes', [])
         from pydantic import BaseModel as _BM
         from astraapi._compat import lenient_issubclass as _lis
-        def _route_needs_ctx(r: object) -> bool:
-            d = getattr(r, 'dependant', None)
-            if getattr(d, 'request_param_name', None) or getattr(d, 'http_connection_param_name', None):
+        def _dep_needs_ctx(dep, _visited=None):
+            if _visited is None: _visited = set()
+            if id(dep) in _visited: return False
+            _visited.add(id(dep))
+            if getattr(dep, 'request_param_name', None) or getattr(dep, 'http_connection_param_name', None):
                 return True
-            if type(r) is not _APIRoute and type(r) is not _APIWSRoute and getattr(r, 'include_in_schema', False):
-                return True
-            for _hf in getattr(d, 'header_params', []) + getattr(d, 'cookie_params', []):
+            for _hf in getattr(dep, 'header_params', []) + getattr(dep, 'cookie_params', []):
                 if _lis(_hf.type_, _BM) and getattr(getattr(_hf.type_, 'model_config', None), 'get', lambda *a: None)('extra') == 'forbid':
                     return True
+            for _sub in getattr(dep, 'dependencies', []):
+                if _dep_needs_ctx(_sub, _visited): return True
+            return False
+        def _route_needs_ctx(r: object) -> bool:
+            d = getattr(r, 'dependant', None)
+            if _dep_needs_ctx(d): return True
+            if type(r) is not _APIRoute and type(r) is not _APIWSRoute and getattr(r, 'include_in_schema', False):
+                return True
             return False
         _asgi_mw = any(
             getattr(getattr(_mw, 'cls', None), '__name__', '') not in

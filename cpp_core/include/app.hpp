@@ -128,6 +128,7 @@ enum MethodBit : uint8_t {
     METHOD_PATCH   = 1 << 4,
     METHOD_HEAD    = 1 << 5,
     METHOD_OPTIONS = 1 << 6,
+    METHOD_TRACE   = 1 << 7,
 };
 
 // ── Route info ──────────────────────────────────────────────────────────────

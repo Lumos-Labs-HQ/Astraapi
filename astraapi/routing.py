@@ -1318,11 +1318,23 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
         _s_host = _h_parts[0]
         _s_port = int(_h_parts[1]) if len(_h_parts) > 1 else (443 if _scheme_hdr == 'https' else 80)
         _server_tuple = (_s_host, _s_port)
+    # Extract query string from path or ContextVar
+    _qs = b""
+    if path and "?" in path:
+        _path_part, _, _qs_str = path.partition("?")
+        path = _path_part
+        _qs = _qs_str.encode("latin-1") if isinstance(_qs_str, str) else _qs_str
+    if not _qs:
+        try:
+            from astraapi._cpp_server import _current_query_string as _cqs
+            _qs = _cqs.get() or b""
+        except Exception:
+            pass
     scope = {
         "type": "http",
         "method": method or "GET",
         "path": path or "/",
-        "query_string": b"",
+        "query_string": _qs,
         "headers": header_list,
         "root_path": _root_path,
         "_body": _body_bytes,
@@ -2335,6 +2347,7 @@ class APIRoute(routing.Route):
                 self.body_field.field_info, params.Form
             ))
             and isinstance(actual_rc, type) and issubclass(actual_rc, JSONResponse)
+            and getattr(actual_rc, "media_type", "application/json") == "application/json"
         )
         # Build dependency solver if route has dependencies.
         # If a generator dependency is detected, fall back from fast path

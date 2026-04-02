@@ -782,7 +782,7 @@ presets: [
 SwaggerUIBundle.presets.apis,
 SwaggerUIBundle.SwaggerUIStandalonePreset
 ],
-%s"oauth2RedirectUrl": window.location.origin + '%s',
+%soauth2RedirectUrl: window.location.origin + '%s',
 })
 window.ui = ui
 }
@@ -1076,6 +1076,7 @@ static inline uint8_t method_str_to_bit(const char* method, size_t len) {
             break;
         case 5:
             if (memcmp(method, "PATCH", 5) == 0) return METHOD_PATCH;
+            if (memcmp(method, "TRACE", 5) == 0) return METHOD_TRACE;
             break;
         case 6:
             if (memcmp(method, "DELETE", 6) == 0) return METHOD_DELETE;
@@ -2229,6 +2230,24 @@ static PyObject* build_http_response_bytes(
     const char* content_encoding = nullptr, bool head_only = false,
     const char* extra_headers = nullptr, size_t extra_headers_len = 0)
 {
+    // RFC 7230: 204/304 must not include message body or content-length
+    if (status_code == 204 || status_code == 304) {
+        auto buf = acquire_buffer();
+        const char* reason = status_reason(status_code);
+        buf_append(buf, "HTTP/1.1 ", 9);
+        char sc_buf[8]; int sn = fast_i64_to_buf(sc_buf, status_code);
+        buf_append(buf, sc_buf, sn); buf.push_back(' ');
+        buf_append(buf, reason, strlen(reason));
+        if (cors && origin && origin_len > 0) build_cors_headers(buf, cors, origin, origin_len);
+        if (extra_headers && extra_headers_len > 0) buf_append(buf, extra_headers, extra_headers_len);
+        static const char CONN_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
+        static const char CONN_CLOSE[] = "\r\nconnection: close\r\n\r\n";
+        buf_append(buf, keep_alive ? CONN_KA : CONN_CLOSE,
+                   keep_alive ? sizeof(CONN_KA)-1 : sizeof(CONN_CLOSE)-1);
+        PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+        release_buffer(std::move(buf));
+        return result;
+    }
     // Pre-built header templates — single memcpy for common case
     static const char HDR_200_JSON[] =
         "HTTP/1.1 200 OK\r\n"
@@ -2494,6 +2513,22 @@ static int serialize_json_and_write_response(
         }
     }
 
+    // No-body status codes: 204, 304 must not have body or content-length
+    if (status_code == 204 || status_code == 304) {
+        static const char NO_BODY_KA[]    = "HTTP/1.1 204 No Content\r\nconnection: keep-alive\r\n\r\n";
+        static const char NO_BODY_CLOSE[] = "HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n";
+        static const char NOT_MOD_KA[]    = "HTTP/1.1 304 Not Modified\r\nconnection: keep-alive\r\n\r\n";
+        static const char NOT_MOD_CLOSE[] = "HTTP/1.1 304 Not Modified\r\nconnection: close\r\n\r\n";
+        const char* resp_str = (status_code == 204)
+            ? (keep_alive ? NO_BODY_KA : NO_BODY_CLOSE)
+            : (keep_alive ? NOT_MOD_KA : NOT_MOD_CLOSE);
+        PyRef resp_bytes(PyBytes_FromString(resp_str));
+        if (resp_bytes) write_to_transport(transport, resp_bytes.get());
+        if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+        release_buffer(std::move(buf));
+        if (!compressed.empty()) release_buffer(std::move(compressed));
+        return 0;
+    }
     // 3. Ultra-fast path: no CORS, no compression, cached prefix
     if (LIKELY(!cors && !encoding &&
         status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data))
@@ -4854,6 +4889,7 @@ static PyObject* dispatch_one_request(
     // Clean up body_params_local if not used in InlineResult
     Py_XDECREF(body_params_local);
 
+
 body_done:
     // ── CALL ENDPOINT FROM C++ (OPT-9: fast-call) ──────────────────────
     // Use PyObject_CallNoArgs for zero-param endpoints (fastest possible call).
@@ -5188,7 +5224,7 @@ body_done:
                 }
             }
             // Ensure content-length is present (needed for keep-alive HTTP/1.1)
-            if (!saw_content_length) {
+            if (!saw_content_length && resp_sc != 204 && resp_sc != 304) {
                 char cl_buf[32];
                 int cl_len = snprintf(cl_buf, sizeof(cl_buf), "\r\ncontent-length: %zu", (size_t)resp_body_len);
                 buf_append(buf, cl_buf, (size_t)cl_len);
@@ -5318,6 +5354,25 @@ body_done:
                     }
                 } else if (!is_dc_result) PyErr_Clear();
             }
+        }
+        // Try __dict__ for plain Python objects (e.g. OAuth2PasswordRequestForm)
+        {
+            PyRef dict_attr(PyObject_GetAttrString(raw_result, "__dict__"));
+            if (dict_attr && PyDict_Check(dict_attr.get())) {
+                Py_DECREF(raw_result);
+                raw_result = dict_attr.release();
+                PyRef err_json(serialize_to_json_pybytes(raw_result));
+                Py_DECREF(raw_result);
+                if (err_json) {
+                    char* ej; Py_ssize_t ejl;
+                    PyBytes_AsStringAndSize(err_json.get(), &ej, &ejl);
+                    build_and_write_http_response(sock_fd, transport, status_code_local, ej, (size_t)ejl, req.keep_alive,
+                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                }
+                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, status_code_local, request_start_time);
+                --self->counters.active_requests;
+                return make_consumed_true(self, req.total_consumed);
+            } else { PyErr_Clear(); }
         }
         PyRef str_repr(PyObject_Str(raw_result));
         Py_DECREF(raw_result);
@@ -5959,7 +6014,7 @@ static PyObject* CoreApp_build_response_from_any(
                     }
                 }
             }
-            if (!saw_content_length2) {
+            if (!saw_content_length2 && resp_sc != 204 && resp_sc != 304) {
                 char cl_buf[32];
                 int cl_len = snprintf(cl_buf, sizeof(cl_buf), "\r\ncontent-length: %zu", (size_t)resp_body_len);
                 buf_append(buf, cl_buf, (size_t)cl_len);
@@ -6014,6 +6069,14 @@ static PyObject* CoreApp_build_response_from_any(
         }
     }
 
+    // Try __dict__ for plain Python objects (e.g. OAuth2PasswordRequestForm)
+    {
+        PyRef dict_attr(PyObject_GetAttrString(raw, "__dict__"));
+        if (dict_attr && PyDict_Check(dict_attr.get())) {
+            PyObject* new_args[3] = {dict_attr.get(), args[1], args[2]};
+            return CoreApp_build_response(self, new_args, 3);
+        } else { PyErr_Clear(); }
+    }
     // Ultimate fallback: try to serialize whatever it is
     return CoreApp_build_response(self, args, nargs);
 }
@@ -6743,8 +6806,8 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
         }
     }
 
-    // Add content-length if not provided by headers
-    if (!has_content_length) {
+    // Add content-length if not provided by headers (skip for 204/304)
+    if (!has_content_length && status_code != 204 && status_code != 304) {
         static const char cl_pre[] = "content-length: ";
         buf_append(buf, cl_pre, sizeof(cl_pre) - 1);
         char cl_buf[20];

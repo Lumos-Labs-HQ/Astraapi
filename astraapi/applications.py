@@ -1437,7 +1437,19 @@ class AstraAPI(AppBase):
             import astraapi._cpp_server as _s; _s._needs_request_context = True
         _resp_param_name = getattr(getattr(route, 'dependant', None), 'response_param_name', None)
 
+        # Pre-compute path param coercions for _response_shim
+        _path_coercions = {}
+        for _pp in getattr(getattr(route, 'dependant', None), 'path_params', []):
+            _pt = getattr(_pp, 'type_', None) or getattr(_pp, 'annotation', None)
+            if _pt is not None and _pt is not str:
+                _path_coercions[_pp.name] = _pt
+
         async def _response_shim(**kwargs: Any) -> Any:
+            # Coerce path params (C++ passes them as strings)
+            for _pname, _ptype in _path_coercions.items():
+                if _pname in kwargs and isinstance(kwargs[_pname], str):
+                    try: kwargs[_pname] = _ptype(kwargs[_pname])
+                    except (ValueError, TypeError): pass
             _bg = None
             if _bg_param:
                 from astraapi.background import BackgroundTasks as _BackgroundTasks
@@ -1525,6 +1537,8 @@ class AstraAPI(AppBase):
             kwargs.pop('__path__', None)
             kwargs.pop('__auth_scheme__', None)
             kwargs.pop('__auth_credentials__', None)
+            kwargs.pop('__body__', None)
+            kwargs.pop('__content_type__', None)
             _exit_stack = kwargs.pop('__exit_stack__', None)
             kwargs.pop('__deps_ran__', None)
             _exc_handlers_shim = getattr(route, '_app_exception_handlers', None)
@@ -1810,10 +1824,15 @@ class AstraAPI(AppBase):
                 else:
                     return original_endpoint(**kwargs)
             finally:
-                # Close UploadFile BytesIO objects after the request completes
+                # Close UploadFile objects after the request completes
                 # (mirrors standard AstraAPI's FormData.close() cleanup)
                 for uf in created_files:
                     uf.file.close()
+                # Also close UploadFile objects injected directly by C++ build_kwargs
+                for _k, _v in kwargs.items():
+                    if isinstance(_v, _UploadFile) and _v not in created_files:
+                        try: _v.file.close()
+                        except Exception: pass
 
         _form_shim.__name__ = getattr(original_endpoint, '__name__', '_form_shim')
         return _form_shim
@@ -1887,15 +1906,16 @@ class AstraAPI(AppBase):
             if _in_group:
                 # Build per-method shims and a dispatcher
                 _method_shim_map: dict = {}
+                # First pass: register explicit routes
                 for _gr in _path_group:
                     _gr_shim = self._make_response_class_shim(_gr)
                     _gm = sorted(_gr.methods) if _gr.methods else ["GET"]
                     for _m in _gm:
-                        # First route wins for each method
                         if _m.upper() not in _method_shim_map:
                             _method_shim_map[_m.upper()] = _gr_shim
-                    if "GET" in _gm and "HEAD" not in _method_shim_map:
-                        _method_shim_map["HEAD"] = _gr_shim
+                # Second pass: auto-add HEAD for GET routes (only if no explicit HEAD)
+                if "GET" in _method_shim_map and "HEAD" not in _method_shim_map:
+                    _method_shim_map["HEAD"] = _method_shim_map["GET"]
                 _captured_shim_map = dict(_method_shim_map)
                 def _make_group_dispatcher(_smap: dict, _route_map: dict) -> Any:
                     # Pre-compute known param names per method to filter cross-method kwargs
@@ -1995,19 +2015,29 @@ class AstraAPI(AppBase):
                 _registered_endpoint = self._make_asgi_route_shim(route)
                 _is_coro = True
                 _srv_mod._needs_request_context = True
-            # Header/cookie/query model with extra='forbid' needs raw query/headers to detect unknown fields
+            # Check if any dep (including sub-deps) needs Request injection
             if not _srv_mod._needs_request_context:
                 try:
                     from pydantic import BaseModel as _BM
                     from astraapi._compat import lenient_issubclass as _lis
+                    def _dep_needs_ctx(d, _visited=None):
+                        if _visited is None: _visited = set()
+                        if id(d) in _visited: return False
+                        _visited.add(id(d))
+                        if getattr(d, 'request_param_name', None) or getattr(d, 'http_connection_param_name', None):
+                            return True
+                        _all_model_params = (getattr(d, 'header_params', []) +
+                                            getattr(d, 'cookie_params', []) +
+                                            getattr(d, 'query_params', []))
+                        for _hf in _all_model_params:
+                            if _lis(_hf.type_, _BM) and getattr(getattr(_hf.type_, 'model_config', None), 'get', lambda *a: None)('extra') == 'forbid':
+                                return True
+                        for _sub in getattr(d, 'dependencies', []):
+                            if _dep_needs_ctx(_sub, _visited): return True
+                        return False
                     _dep = getattr(route, 'dependant', None)
-                    _all_model_params = (getattr(_dep, 'header_params', []) +
-                                        getattr(_dep, 'cookie_params', []) +
-                                        getattr(_dep, 'query_params', []))
-                    for _hf in _all_model_params:
-                        if _lis(_hf.type_, _BM) and getattr(getattr(_hf.type_, 'model_config', None), 'get', lambda *a: None)('extra') == 'forbid':
-                            _srv_mod._needs_request_context = True
-                            break
+                    if _dep and _dep_needs_ctx(_dep):
+                        _srv_mod._needs_request_context = True
                 except Exception:
                     pass
             if _is_form and not _has_custom_route_class:
@@ -2396,6 +2426,26 @@ class AstraAPI(AppBase):
                     )
                 except Exception as exc:
                     logger.debug('Mount route registration failed for %s: %s', _mp, exc)
+
+        # Register plain Route objects (from router.route() decorator)
+        from astraapi._routing_base import Route as _PlainRoute
+        for route in self.routes:
+            if not isinstance(route, _PlainRoute) or isinstance(route, (APIRoute, APIWebSocketRoute)):
+                continue
+            _ep = route.endpoint
+            _methods = list(route.methods) if route.methods else ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+            _srv_mod._needs_request_context = True
+            _shim = self._make_asgi_route_shim(route)
+            try:
+                self._core_app.add_route(
+                    route.path, _methods, _shim, True,
+                    status_code=200, tags=[], has_body=True,
+                    exclude_unset=False, exclude_defaults=False, exclude_none=False,
+                )
+                _ridx = self._core_app.route_count() - 1
+                self._core_app.register_fast_spec(_ridx, None, None, None, False, None, None, None)
+            except Exception as exc:
+                logger.debug("Plain Route registration failed for %s: %s", route.path, exc)
 
         # Register WebSocket routes in C++ core for app.run() fast-path
         from astraapi._routing_base import WebSocketRoute as _WebSocketRoute
