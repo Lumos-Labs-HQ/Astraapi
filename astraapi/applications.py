@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import inspect
+import threading
 from collections.abc import Awaitable, Coroutine, Sequence
 from enum import Enum
 from typing import (
@@ -57,6 +58,10 @@ AppType = TypeVar("AppType", bound="AstraAPI")
 # Module-level constants for batch spec conversion (avoid dict recreation per call)
 _BATCH_SPEC_LOC = {"query": 0, "header": 1, "cookie": 2, "path": 3}
 _BATCH_SPEC_TYPE = {"": 0, "str": 0, "int": 1, "float": 2, "bool": 3}
+
+# Serialises concurrent _sync_routes_to_core calls across all app instances.
+# Prevents data races in C++ route registration (shared module-level state).
+_global_sync_lock = threading.Lock()
 
 
 class AstraAPI(AppBase):
@@ -1845,9 +1850,10 @@ class AstraAPI(AppBase):
         This scans the router once and bulk-registers everything.
         Called from build_middleware_stack() during startup.
         """
-        if self._routes_synced:
-            return
-        self._routes_synced = True
+        with _global_sync_lock:
+            if self._routes_synced:
+                return
+            self._routes_synced = True
 
         import astraapi._cpp_server as _srv_mod
         _srv_mod._needs_request_context = False  # reset; set True below if any route needs it

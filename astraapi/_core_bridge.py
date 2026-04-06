@@ -35,3 +35,7 @@ from astraapi._astraapi_core import (  # type: ignore[import-not-found]
     init_cached_refs,
     prewarm_buffer_pool,
 )
+
+# Run once at import time (main thread) so std::call_once in C++ completes
+# before any server threads start. Prevents concurrent call_once crashes.
+init_cached_refs()
