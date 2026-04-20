@@ -95,12 +95,13 @@ struct FastRouteSpec {
     PyObject* body_params;  // Python list or None (strong ref)
     bool embed_body_fields;
 
-    // O(1) lookup maps (built at registration, immutable during requests)
-    // Keys are string_views into the FieldSpec vectors above (stable after registration)
-    std::unordered_map<std::string_view, size_t> path_map;    // field_name → index
-    std::unordered_map<std::string_view, size_t> query_map;   // alias/field_name → index
-    std::unordered_map<std::string_view, size_t> header_map;  // header_lookup_key → index
-    std::unordered_map<std::string_view, size_t> cookie_map;  // field_name → index
+    // O(1) lookup maps — std::string keys (own their data, survive RouteInfo vector
+    // reallocation) + transparent hash/equal (string_view lookups, zero allocation).
+    using _SMap = std::unordered_map<std::string, size_t, TransparentStringHash, TransparentStringEqual>;
+    _SMap path_map;
+    _SMap query_map;
+    _SMap header_map;
+    _SMap cookie_map;
 
     // Dependency injection
     bool has_dependencies = false;
@@ -182,6 +183,7 @@ struct CoreAppObject {
     std::vector<std::string> route_paths;
     std::shared_mutex routes_mutex;
     std::atomic<bool> routes_frozen{false};  // Skip lock after startup
+    std::atomic<bool> registering{false};    // Skip mutex during _sync_routes_to_core
     AtomicSharedPtr<CorsConfig> cors_config;
     bool cors_enabled = false;  // Cached bool — avoids atomic shared_ptr load per request
     const CorsConfig* cors_ptr_cached = nullptr;       // Raw pointer — set once in configure_cors

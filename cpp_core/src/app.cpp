@@ -605,7 +605,9 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
     if (self) {
         new (&self->router) Router();
         new (&self->routes) std::vector<RouteInfo>();
+        self->routes.reserve(64);  // pre-allocate to avoid reallocation invalidating string_view keys
         new (&self->route_paths) std::vector<std::string>();
+        self->route_paths.reserve(64);
         new (&self->routes_mutex) std::shared_mutex();
         new (&self->cors_config) AtomicSharedPtr<CorsConfig>();
         new (&self->trusted_host_config) AtomicSharedPtr<TrustedHostConfig>();
@@ -1022,6 +1024,16 @@ static PyObject* CoreApp_freeze_routes(CoreAppObject* self, PyObject*) {
     Py_RETURN_NONE;
 }
 
+static PyObject* CoreApp_begin_registration(CoreAppObject* self, PyObject*) {
+    self->registering.store(true, std::memory_order_release);
+    Py_RETURN_NONE;
+}
+
+static PyObject* CoreApp_end_registration(CoreAppObject* self, PyObject*) {
+    self->registering.store(false, std::memory_order_release);
+    Py_RETURN_NONE;
+}
+
 static PyObject* CoreApp_get_metrics(CoreAppObject* self, PyObject*) {
     PyRef dict(PyDict_New());
     if (!dict) return nullptr;
@@ -1178,8 +1190,11 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
     route.is_form = (bool)is_form;
     route.is_multi_method = (bool)is_multi_method_arg;
 
+    // Skip mutex during registration phase (protected by Python _global_sync_lock)
     {
-        std::unique_lock lock(self->routes_mutex);
+        std::optional<std::unique_lock<std::shared_mutex>> lock;
+        if (!self->registering.load(std::memory_order_relaxed))
+            lock.emplace(self->routes_mutex);
         // Check if path already registered — merge method mask + store per-method endpoint
         auto existing = self->router.at(path, strlen(path));
         if (existing.has_value() && existing->route_index >= 0) {
@@ -1194,7 +1209,7 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
                 auto& fs = *er.fast_spec;
                 Py_XDECREF(fs.body_params); fs.body_params = nullptr;
                 fs.has_body_params = false;
-                fs.body_param_name = nullptr;
+                fs.body_param_name = std::nullopt;
             }
             Py_DECREF(route.endpoint);
             route.endpoint = nullptr;
@@ -1509,11 +1524,14 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
         return nullptr;
     }
 
-    std::unique_lock lock(self->routes_mutex);
+    std::optional<std::unique_lock<std::shared_mutex>> lock_check;
+    if (!self->registering.load(std::memory_order_relaxed))
+        lock_check.emplace(self->routes_mutex);
     if (route_index < 0 || route_index >= (Py_ssize_t)self->routes.size()) {
         PyErr_SetString(PyExc_IndexError, "route index out of range");
         return nullptr;
     }
+    lock_check.reset();  // Release lock before Python calls to avoid EDEADLK
 
     auto& route = self->routes[route_index];
     FastRouteSpec spec;
@@ -1546,9 +1564,11 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
             PyObject* cu = PyDict_GetItemString(spec_dict, "convert_underscores");
             PyObject* isseq = PyDict_GetItemString(spec_dict, "is_sequence");
 
-            fs.field_name = fn ? PyUnicode_AsUTF8(fn) : "";
-            fs.alias = al ? PyUnicode_AsUTF8(al) : fs.field_name;
-            fs.header_lookup_key = hlk ? PyUnicode_AsUTF8(hlk) : "";
+            fs.field_name = (fn && PyUnicode_AsUTF8(fn)) ? PyUnicode_AsUTF8(fn) : "";
+            const char* _al = al ? PyUnicode_AsUTF8(al) : nullptr;
+            fs.alias = _al ? _al : fs.field_name;
+            const char* _hlk = hlk ? PyUnicode_AsUTF8(hlk) : nullptr;
+            fs.header_lookup_key = _hlk ? _hlk : "";
             fs.location = loc ? (ParamLocation)PyLong_AsLong(loc) : LOC_QUERY;
             fs.type_tag = tt ? (ParamType)PyLong_AsLong(tt) : TYPE_STR;
             fs.required = req ? PyObject_IsTrue(req) : false;
@@ -1650,25 +1670,27 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
         spec.param_validator = param_validator_obj;
     }
 
+    // Re-acquire lock to safely write fast_spec to routes vector
+    if (!self->registering.load(std::memory_order_relaxed))
+        lock_check.emplace(self->routes_mutex);
     route.fast_spec = std::move(spec);
 
-    // Build O(1) lookup maps AFTER move — string_views must point into final location
+    // Build O(1) lookup maps — keys are std::string (owned, survive reallocation)
     auto& final_spec = *route.fast_spec;
     for (size_t i = 0; i < final_spec.path_specs.size(); i++)
-        final_spec.path_map[std::string_view(final_spec.path_specs[i].field_name)] = i;
+        final_spec.path_map[final_spec.path_specs[i].field_name] = i;
     for (size_t i = 0; i < final_spec.query_specs.size(); i++) {
         const auto& fs = final_spec.query_specs[i];
-        // If alias differs from field_name, only match by alias (not by Python name)
         if (!fs.alias.empty() && fs.alias != fs.field_name) {
-            final_spec.query_map[std::string_view(fs.alias)] = i;
+            final_spec.query_map[fs.alias] = i;
         } else {
-            final_spec.query_map[std::string_view(fs.field_name)] = i;
+            final_spec.query_map[fs.field_name] = i;
         }
     }
     for (size_t i = 0; i < final_spec.header_specs.size(); i++)
-        final_spec.header_map[std::string_view(final_spec.header_specs[i].header_lookup_key)] = i;
+        final_spec.header_map[final_spec.header_specs[i].header_lookup_key] = i;
     for (size_t i = 0; i < final_spec.cookie_specs.size(); i++)
-        final_spec.cookie_map[std::string_view(final_spec.cookie_specs[i].field_name)] = i;
+        final_spec.cookie_map[final_spec.cookie_specs[i].field_name] = i;
 
     Py_RETURN_NONE;
 }
@@ -6696,6 +6718,8 @@ static PyMethodDef CoreApp_methods[] = {
     // Non-blocking parse+route — returns PreparedRequest for async dispatch
     {"parse_and_route", (PyCFunction)(void(*)(void))CoreApp_parse_and_route, METH_FASTCALL, nullptr},
     {"freeze_routes", (PyCFunction)CoreApp_freeze_routes, METH_NOARGS, nullptr},
+    {"begin_registration", (PyCFunction)CoreApp_begin_registration, METH_NOARGS, nullptr},
+    {"end_registration", (PyCFunction)CoreApp_end_registration, METH_NOARGS, nullptr},
     {"set_openapi_schema", (PyCFunction)CoreApp_set_openapi_schema, METH_O, nullptr},
     {"set_urls", (PyCFunction)CoreApp_set_urls, METH_VARARGS, nullptr},
     {"set_swagger_ui_parameters", (PyCFunction)CoreApp_set_swagger_ui_parameters, METH_O, nullptr},

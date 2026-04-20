@@ -214,6 +214,9 @@ addopts = [
 ]
 xfail_strict = true
 junit_family = "xunit2"
+markers = [
+  "filterwarnings: add warning filters to a test",
+]
 filterwarnings = [
     "error",
     # see https://trio.readthedocs.io/en/stable/history.html#trio-0-22-0-2022-09-28

@@ -179,6 +179,42 @@ class WebSocketTestSession:
                 pass
         self._close_sync()
 
+
+# ── Per-app shared server registry ───────────────────────────────────────────
+# Maps id(app) -> _SharedServer. All TestClient instances for the same app
+# share one server thread. A cap of _MAX_LIVE_SERVERS prevents thread
+# exhaustion when hundreds of test modules each create a unique app.
+
+_MAX_LIVE_SERVERS = 64  # generous cap — crash was C++ bug, not thread count
+
+
+class _SharedServer:
+    __slots__ = ('port', 'thread', 'loop_ref', 'stop_event')
+
+    def __init__(self):
+        self.port: int | None = None
+        self.thread: threading.Thread | None = None
+        self.loop_ref: asyncio.AbstractEventLoop | None = None
+        self.stop_event: asyncio.Event | None = None
+
+    def stop(self) -> None:
+        if self.stop_event is not None and self.loop_ref is not None:
+            try:
+                if not self.loop_ref.is_closed():
+                    self.loop_ref.call_soon_threadsafe(self.stop_event.set)
+            except Exception:
+                pass
+        self.stop_event = None
+        if self.thread is not None:
+            self.thread.join(timeout=3.0)
+        self.thread = None
+
+
+from collections import OrderedDict as _OrderedDict
+_app_servers: "_OrderedDict[int, _SharedServer]" = _OrderedDict()
+_app_servers_lock = threading.Lock()
+
+
 class TestClient:
     """Test client backed by the C++ HTTP server.
 
@@ -194,6 +230,7 @@ class TestClient:
         Ignored (kept for API compatibility). The actual URL is
         ``http://127.0.0.1:<ephemeral_port>``.
     """
+    __test__ = False  # prevent pytest from collecting this as a test class
 
     def __init__(
         self,
@@ -218,6 +255,7 @@ class TestClient:
         self._lock = threading.Lock()
         self._loop_ref: asyncio.AbstractEventLoop | None = None
         self._stop_event: asyncio.Event | None = None
+        self._shared_server: "_SharedServer | None" = None
         # Mutable headers dict — tests can call client.headers.clear() etc.
         # Populated with starlette-compatible default so tests expecting
         # 'User-Agent: testclient' pass even without explicit headers.
@@ -247,91 +285,91 @@ class TestClient:
         return self._base_url or "http://testserver"
 
     def _ensure_started(self) -> None:
-        """Start the server on first use (lazy init — no FDs opened at construction)."""
+        """Start the server on first use — shared per app instance."""
         with self._lock:
-            # Recreate httpx client if it was closed (e.g. after exiting a `with` block)
-            if self._client is not None and getattr(self._client, '_state', None) is not None:
+            if self._client is not None:
+                # Recreate httpx client if closed
                 try:
                     import httpx
-                    if self._client._state.name == 'CLOSED':
+                    if getattr(self._client, '_state', None) is not None and self._client._state.name == 'CLOSED':
                         kw = dict(self._httpx_kwargs)
                         kw.setdefault('follow_redirects', True)
                         _headers = dict(self.headers)
                         _headers.setdefault('host', 'testserver')
-                        self._client = httpx.Client(
-                            base_url=self._base_url,
-                            headers=_headers,
-                            **kw,
-                        )
-                        return
+                        self._client = httpx.Client(base_url=self._base_url, headers=_headers, **kw)
                 except Exception:
                     pass
-            if self._client is not None:
                 return
+
             try:
                 import httpx
             except ImportError:
-                raise RuntimeError(
-                    "httpx must be installed to use TestClient. "
-                    "Install it with: pip install httpx"
-                )
-            # Find a free port
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("127.0.0.1", 0))
-                self._port = s.getsockname()[1]
-            self._base_url = f"http://127.0.0.1:{self._port}"
-            self._started = threading.Event()
-            self._stop = threading.Event()
-            self._server_error = None
-            self._thread = threading.Thread(target=self._run_server, daemon=True)
-            self._thread.start()
-            if not self._started.wait(timeout=10.0):
-                raise RuntimeError("C++ test server failed to start within 10s")
-            if self._server_error is not None:
-                raise RuntimeError(f"Server startup failed: {self._server_error}")
+                raise RuntimeError("httpx must be installed to use TestClient. Install it with: pip install httpx")
+
+            app_id = id(self.app)
+            with _app_servers_lock:
+                shared = _app_servers.get(app_id)
+                need_start = shared is None or shared.thread is None or not shared.thread.is_alive()
+
+                if need_start:
+                    shared = _SharedServer()
+                    _app_servers[app_id] = shared
+
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.bind(("127.0.0.1", 0))
+                        shared.port = s.getsockname()[1]
+
+                    started_event = threading.Event()
+                    self._server_error = None
+
+                    def _run(_shared=shared):
+                        try:
+                            import uvloop
+                            loop = uvloop.new_event_loop()
+                        except ImportError:
+                            try:
+                                import winloop
+                                loop = winloop.new_event_loop()
+                            except ImportError:
+                                loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        _shared.loop_ref = loop
+                        import gc; gc.disable(); gc.collect()
+                        try:
+                            loop.run_until_complete(self._serve_shared(loop, _shared, started_event))
+                        except Exception as exc:
+                            self._server_error = exc
+                            started_event.set()
+                        finally:
+                            gc.enable()
+                            loop.close()
+
+                    shared.thread = threading.Thread(target=_run, daemon=True)
+                    shared.thread.start()
+                    _app_servers_lock.release()
+                    try:
+                        if not started_event.wait(timeout=10.0):
+                            raise RuntimeError("C++ test server failed to start within 10s")
+                        if self._server_error is not None:
+                            raise RuntimeError(f"Server startup failed: {self._server_error}")
+                    finally:
+                        _app_servers_lock.acquire()
+                else:
+                    _app_servers.move_to_end(app_id)
+
+                self._port = shared.port
+                self._base_url = f"http://127.0.0.1:{shared.port}"
+                self._shared_server = shared
+
             kw = dict(self._httpx_kwargs)
             kw.setdefault('follow_redirects', True)
-            # Inject Host: testserver to match ASGI TestClient behavior
             _headers = dict(self.headers)
             _headers.setdefault('host', 'testserver')
-            self._client = httpx.Client(
-                base_url=self._base_url,
-                headers=_headers,
-                **kw,
-            )
+            self._client = httpx.Client(base_url=self._base_url, headers=_headers, **kw)
 
-    def _run_server(self) -> None:
-        # Use uvloop (Linux) or winloop (Windows) — same loop as production.
-        # Fall back to plain asyncio when neither is installed.
-        try:
-            import uvloop
-            loop = uvloop.new_event_loop()
-        except ImportError:
-            try:
-                import winloop
-                loop = winloop.new_event_loop()
-            except ImportError:
-                loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self._loop_ref = loop  # store for close() to use call_soon_threadsafe
-        # Disable GC to match production run_server() — prevents C-extension object
-        # collection during active request processing (avoids use-after-free segfaults).
-        import gc
-        gc.disable()
-        gc.collect()
-        try:
-            loop.run_until_complete(self._serve(loop))
-        except Exception as exc:
-            self._server_error = exc
-            self._started.set()  # type: ignore[union-attr]
-        finally:
-            gc.enable()
-            loop.close()
-
-    async def _serve(self, loop: asyncio.AbstractEventLoop) -> None:
+    async def _serve_shared(self, loop: asyncio.AbstractEventLoop, shared: "_SharedServer", started_event: threading.Event) -> None:
         from astraapi._cpp_server import _create_server, _set_raise_server_exceptions
         _set_raise_server_exceptions(self._raise_server_exceptions)
-        # Run lifespan startup before signalling ready
         _lifespan_cm = None
         _router = getattr(self.app, "router", None)
         _lh = getattr(_router, "lifespan_context", None) if _router else None
@@ -347,12 +385,10 @@ class TestClient:
                     elif isinstance(_ls_state, dict):
                         for _k, _v in _ls_state.items():
                             setattr(_app_state, _k, _v)
-        server = await _create_server(self.app, "127.0.0.1", self._port, root_path=self._root_path)
-        # Use asyncio.Event for clean shutdown instead of polling every 50ms.
-        # The stop event is set by close() via loop.call_soon_threadsafe().
+        server = await _create_server(self.app, "127.0.0.1", shared.port, root_path=self._root_path)
         stop_event = asyncio.Event()
-        self._stop_event = stop_event
-        self._started.set()  # type: ignore[union-attr]
+        shared.stop_event = stop_event
+        started_event.set()
         await stop_event.wait()
         server.close()
         await server.wait_closed()
@@ -468,24 +504,25 @@ class TestClient:
     # -- Lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
-        """Close the httpx client. The server thread continues running (daemon)
-        so that the same TestClient instance can be reused across multiple tests.
-        The server is stopped when the process exits (daemon thread).
-        """
+        """Close the httpx client and release the shared server reference."""
         if self._client is not None:
             try:
                 self._client.close()
             except Exception:
                 pass
+            self._client = None
+        self._stop_server()
+
+    def __del__(self) -> None:
+        try:
+            self._stop_server()
+        except Exception:
+            pass
 
     def _stop_server(self) -> None:
-        """Stop the server thread and wait for it to finish (runs lifespan shutdown)."""
-        if self._stop_event is not None and self._loop_ref is not None:
-            self._loop_ref.call_soon_threadsafe(self._stop_event.set)
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
+        """Remove this client's shared server reference (server stays alive for other clients)."""
+        self._shared_server = None
         self._thread = None
-        self._client = None
 
     def __enter__(self) -> "TestClient":
         self._ensure_started()
@@ -493,7 +530,6 @@ class TestClient:
 
     def __exit__(self, *args: Any) -> None:
         self.close()
-        self._stop_server()
 
     @property
     def app_state(self) -> Any:

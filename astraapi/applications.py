@@ -1855,6 +1855,18 @@ class AstraAPI(AppBase):
                 return
             self._routes_synced = True
 
+            self._sync_routes_to_core_locked()
+
+    def _sync_routes_to_core_locked(self) -> None:
+        """Body of _sync_routes_to_core — called with _global_sync_lock held."""
+        self._core_app.begin_registration()
+        try:
+            self._sync_routes_to_core_body()
+        finally:
+            self._core_app.end_registration()
+
+    def _sync_routes_to_core_body(self) -> None:
+        """Actual route registration — mutex-free (protected by begin/end_registration)."""
         import astraapi._cpp_server as _srv_mod
         _srv_mod._needs_request_context = False  # reset; set True below if any route needs it
 
