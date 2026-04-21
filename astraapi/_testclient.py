@@ -334,7 +334,7 @@ class TestClient:
                                 loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         _shared.loop_ref = loop
-                        import gc; gc.disable(); gc.collect()
+                        import gc; gc.disable()
                         try:
                             loop.run_until_complete(self._serve_shared(loop, _shared, started_event))
                         except Exception as exc:
