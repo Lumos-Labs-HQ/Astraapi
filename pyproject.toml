@@ -211,6 +211,7 @@ addopts = [
   "--ignore=docs_src",
   "-W", "ignore::pytest.PytestCollectionWarning",
   "-p", "no:logfire",
+  "-p", "no:inline-snapshot",
 ]
 xfail_strict = true
 junit_family = "xunit2"
@@ -219,6 +220,11 @@ markers = [
 ]
 filterwarnings = [
     "error",
+    # Unclosed httpx sockets from shared TestClient servers — harmless at session end
+    "ignore::ResourceWarning",
+    # Unclosed httpx sockets from shared TestClient servers — harmless at session end
+    "ignore:.*unclosed.*socket.*:ResourceWarning",
+    "ignore:Exception ignored while finalizing socket.*:pytest.PytestUnraisableExceptionWarning",
     # see https://trio.readthedocs.io/en/stable/history.html#trio-0-22-0-2022-09-28
     "ignore:You seem to already have a custom.*:RuntimeWarning:trio",
     # pydantic.v1 is not compatible with Python 3.14+; strawberry still imports it

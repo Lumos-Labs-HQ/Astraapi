@@ -51,3 +51,36 @@ def pytest_configure(config):
                 resource.setrlimit(resource.RLIMIT_NOFILE, (65535, 65535))
             except Exception:
                 pass
+
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Stop all shared TestClient servers at session end to avoid ResourceWarning."""
+    try:
+        from astraapi._testclient import _app_servers, _app_servers_lock
+        with _app_servers_lock:
+            servers = list(_app_servers.values())
+            _app_servers.clear()
+        for srv in servers:
+            try:
+                srv.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Stop all shared TestClient servers at session end to close sockets cleanly."""
+    try:
+        from astraapi._testclient import _app_servers, _app_servers_lock
+        with _app_servers_lock:
+            servers = list(_app_servers.values())
+            _app_servers.clear()
+        for srv in servers:
+            try:
+                srv.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass

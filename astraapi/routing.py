@@ -811,16 +811,9 @@ def _build_field_specs(
 
     for field in dependant.query_params:
         if lenient_issubclass(field.type_, _BaseModel):
-            # Model-based query param: expand inner fields so C++ extracts them
-            default_cu = getattr(field.field_info, "convert_underscores", False)
-            for inner_f in get_cached_model_fields(field.type_):
-                inner_alias = get_validation_alias(inner_f)
-                tag = _get_scalar_type_tag(inner_f) or ""
-                is_seq = is_sequence_field(inner_f) and not _is_json_field(inner_f)
-                is_json = _is_json_field(inner_f)
-                # Mark as not-required: the outer model validator handles "required"
-                inner_default = None if inner_f.required else inner_f.get_default()
-                specs.append(("query", inner_alias, tag, inner_f.name, is_seq, is_json, False, False, inner_default))
+            # Model-based query param: do NOT expand inner fields into batch_specs.
+            # The _make_param_validator reads raw query string directly via ContextVar.
+            pass
         else:
             alias = get_validation_alias(field)
             tag = _get_scalar_type_tag(field) or ""
@@ -835,23 +828,9 @@ def _build_field_specs(
 
     for field in dependant.header_params:
         if lenient_issubclass(field.type_, _BaseModel):
-            # Model-based header param: expand inner fields
-            default_cu = getattr(field.field_info, "convert_underscores", True)
-            for inner_f in get_cached_model_fields(field.type_):
-                inner_alias = get_validation_alias(inner_f)
-                tag = _get_scalar_type_tag(inner_f) or ""
-                is_seq = is_sequence_field(inner_f) and not _is_json_field(inner_f)
-                # Inner fields always use convert_underscores=True (match both dash and underscore)
-                convert = True
-                inner_default = None if inner_f.required else inner_f.get_default()
-                # seq_underscore_only: when outer convert_underscores=False, only collect into list
-                # if the header name has underscores (not dashes)
-                seq_uo = is_seq and not default_cu
-                spec_dict = ("header", inner_alias, tag, inner_f.name, is_seq, False, convert, False, inner_default)
-                specs.append(spec_dict)
-                # Store seq_underscore_only flag for C++ (appended as extra element)
-                if seq_uo:
-                    specs[-1] = spec_dict + (seq_uo,)
+            # Model-based header param: do NOT expand inner fields into batch_specs.
+            # The _make_param_validator reads raw headers directly via ContextVar.
+            pass
         else:
             alias = get_validation_alias(field)
             tag = _get_scalar_type_tag(field) or ""
@@ -865,12 +844,9 @@ def _build_field_specs(
 
     for field in dependant.cookie_params:
         if lenient_issubclass(field.type_, _BaseModel):
-            # Model-based cookie param: expand inner fields
-            for inner_f in get_cached_model_fields(field.type_):
-                inner_alias = get_validation_alias(inner_f)
-                tag = _get_scalar_type_tag(inner_f) or ""
-                inner_default = None if inner_f.required else inner_f.get_default()
-                specs.append(("cookie", inner_alias, tag, inner_f.name, False, False, False, False, inner_default))
+            # Model-based cookie param: do NOT expand inner fields into batch_specs.
+            # The _make_param_validator reads raw cookies directly via ContextVar.
+            pass
         else:
             alias = get_validation_alias(field)
             tag = _get_scalar_type_tag(field) or ""
@@ -878,7 +854,10 @@ def _build_field_specs(
             is_ep_param = endpoint_only_dependant is None or field.name in _ep_cookie_names
             is_req = field.required and is_ep_param
             default = None if (is_req or (field.required and not is_ep_param)) else field.get_default()
-            specs.append(("cookie", alias, tag, field.name, False, False, False, is_req, default))
+            # For cookies, C++ uses field_name as the lookup key in the cookie jar.
+            # Use alias as field_name so C++ looks up by alias (correct behavior).
+            cookie_lookup = alias if alias and alias != field.name else field.name
+            specs.append(("cookie", alias, tag, cookie_lookup, False, False, False, is_req, default))
 
     for field in dependant.path_params:
         alias = get_validation_alias(field)
@@ -990,17 +969,99 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
             # Collect inner field values from kwargs (C++ extracted them individually)
             inner_dict: dict = {}
             known_keys: set = set()
+
+            # For header/cookie params, build a lookup dict from raw values first
+            _raw_hdr_dict: dict = {}
+            if loc == "header":
+                _rh = _raw_headers_saved
+                if not _rh:
+                    try:
+                        from astraapi._cpp_server import _current_raw_headers as _crh_inner
+                        _rh = _crh_inner.get()
+                    except Exception:
+                        pass
+                if _rh:
+                    for _hn_b, _hv_b in _rh:
+                        try:
+                            _hn = (_hn_b.decode('latin-1') if isinstance(_hn_b, bytes) else _hn_b).lower()
+                            _hv = _hv_b.decode('latin-1') if isinstance(_hv_b, bytes) else _hv_b
+                            _hn_us = _hn.replace('-', '_')
+                            # Collect all values for repeated headers
+                            for _key in set((_hn, _hn_us)):
+                                if _key in _raw_hdr_dict:
+                                    existing = _raw_hdr_dict[_key]
+                                    if isinstance(existing, list):
+                                        existing.append(_hv)
+                                    else:
+                                        _raw_hdr_dict[_key] = [existing, _hv]
+                                else:
+                                    _raw_hdr_dict[_key] = _hv
+                        except Exception:
+                            pass
+            elif loc == "cookie":
+                _rh2 = _raw_headers_saved
+                if not _rh2:
+                    try:
+                        from astraapi._cpp_server import _current_raw_headers as _crh_ck
+                        _rh2 = _crh_ck.get()
+                    except Exception:
+                        pass
+                if _rh2:
+                    try:
+                        from http.cookies import SimpleCookie as _SC2
+                        for _hn_b, _hv_b in _rh2:
+                            _hn = (_hn_b.decode('latin-1') if isinstance(_hn_b, bytes) else _hn_b).lower()
+                            if _hn == 'cookie':
+                                _hv = _hv_b.decode('latin-1') if isinstance(_hv_b, bytes) else _hv_b
+                                _sc2 = _SC2()
+                                _sc2.load(_hv)
+                                for _ck, _cv in _sc2.items():
+                                    _raw_hdr_dict[_ck] = _cv.value
+                    except Exception:
+                        pass
+            elif loc == "query":
+                try:
+                    from astraapi._cpp_server import _current_query_string as _cqs_inner
+                    from urllib.parse import parse_qs as _pqs_inner
+                    _qs_raw = _cqs_inner.get()
+                    if _qs_raw:
+                        _qs_all = _pqs_inner(_qs_raw.decode('latin-1') if isinstance(_qs_raw, bytes) else _qs_raw, keep_blank_values=True)
+                        for _k, _vs in _qs_all.items():
+                            _raw_hdr_dict[_k] = _vs[0] if len(_vs) == 1 else _vs
+                except Exception:
+                    pass
+
             for inner_name, inner_alias, inner_is_list in inner_specs:
                 known_keys.add(inner_name)
                 known_keys.add(inner_alias)
                 val = kwargs_dict.get(inner_name)
                 if val is None and inner_alias != inner_name:
                     val = kwargs_dict.get(inner_alias)
+                # Also look up from raw values by alias (handles alias != field_name)
+                if val is None and _raw_hdr_dict:
+                    if loc == "header":
+                        if inner_alias != inner_name:
+                            # Alias-only matching: try alias (with - and _ variants)
+                            lookup_alias = inner_alias.lower().replace('_', '-') if _cu else inner_alias.lower()
+                            val = (_raw_hdr_dict.get(inner_alias.lower())
+                                   or _raw_hdr_dict.get(lookup_alias))
+                        else:
+                            # No alias: match by name (with - and _ variants)
+                            lookup_name = inner_name.lower().replace('_', '-') if _cu else inner_name.lower()
+                            val = (_raw_hdr_dict.get(inner_name.lower())
+                                   or _raw_hdr_dict.get(lookup_name))
+                    else:
+                        # cookie/query: match by alias only when alias != name, else by name
+                        if inner_alias != inner_name:
+                            val = _raw_hdr_dict.get(inner_alias)
+                        else:
+                            val = _raw_hdr_dict.get(inner_name)
                 if val is not None:
                     # Wrap string in list for list-type fields (only when convert_underscores=True)
                     if inner_is_list and isinstance(val, str) and _cu:
                         val = [val]
-                    inner_dict[inner_name] = val
+                    # Use alias as key (Pydantic v2 validates by alias by default)
+                    inner_dict[inner_alias] = val
             # Include extra params so extra="forbid" models can reject them
             if loc == "query":
                 try:
@@ -1010,7 +1071,7 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                     if _qs_raw:
                         _qs_all = _pqs(_qs_raw.decode('latin-1'), keep_blank_values=True)
                         for _k, _vs in _qs_all.items():
-                            if _k not in known_keys and _k not in inner_dict:
+                            if _k not in inner_dict:
                                 inner_dict[_k] = _vs[0] if len(_vs) == 1 else _vs
                 except Exception:
                     pass
@@ -1032,7 +1093,7 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                                 _sc = _SC()
                                 _sc.load(_hv)
                                 for _ck, _cv in _sc.items():
-                                    if _ck not in known_keys and _ck not in inner_dict:
+                                    if _ck not in inner_dict:
                                         inner_dict[_ck] = _cv.value
                     except Exception:
                         pass
@@ -1044,18 +1105,28 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                         _raw_hdrs = _crh2.get()
                     except Exception: pass
                 if _raw_hdrs:
+                    _extra_hdr_multi: dict = {}  # collect all values first
                     for _hname, _hval in _raw_hdrs:
                         try:
                             _hn = (_hname.decode('latin-1') if isinstance(_hname, bytes) else _hname).lower()
                             _hv = _hval.decode('latin-1') if isinstance(_hval, bytes) else _hval
-                            # Normalize: replace - with _ to match field names
                             _hn_norm = _hn.replace('-', '_')
-                            if _hn_norm not in known_keys and _hn_norm not in inner_dict:
-                                # Skip standard HTTP headers that are always present
-                                if _hn not in ('host', 'content-length', 'content-type', 'accept', 'accept-encoding', 'user-agent', 'connection'):
-                                    inner_dict[_hn_norm] = _hv
+                            if _hn in ('content-length', 'content-type', 'accept', 'accept-encoding', 'user-agent', 'connection'):
+                                continue
+                            if _hn_norm in _extra_hdr_multi:
+                                existing = _extra_hdr_multi[_hn_norm]
+                                if isinstance(existing, list):
+                                    existing.append(_hv)
+                                else:
+                                    _extra_hdr_multi[_hn_norm] = [existing, _hv]
+                            else:
+                                _extra_hdr_multi[_hn_norm] = _hv
                         except Exception:
                             pass
+                    # Merge into inner_dict: skip keys already resolved by inner_specs
+                    for _k, _v in _extra_hdr_multi.items():
+                        if _k not in inner_dict:
+                            inner_dict[_k] = _v
 
             # Validate the assembled dict as the model type
             try:
@@ -1193,7 +1264,7 @@ def _flatten_deps(
         # Collect param names this dep needs from request kwargs
         param_names: set[str] = set()
         required_query_params: set[str] = set()  # required query params (no default)
-        required_body_params: set[str] = set()   # required body params (no default)
+        required_body_params: list[str] = []   # required body params (no default, ordered)
         required_header_params: set[str] = set()  # required header params
         required_cookie_params: set[str] = set()  # required cookie params
         for f in sub_dep.query_params:
@@ -1214,7 +1285,7 @@ def _flatten_deps(
         for f in sub_dep.body_params:
             param_names.add(f.name)
             if f.required:
-                required_body_params.add(f.name)
+                if f.name not in required_body_params: required_body_params.append(f.name)
             if isinstance(f.field_info, params.Form):
                 has_form_body = True
 
@@ -1259,6 +1330,7 @@ def _flatten_deps(
             'security_cred_cls': security_cred_cls,
             'response_param_name': sub_dep.response_param_name,
             'background_tasks_param_name': sub_dep.background_tasks_param_name,
+            'dep_scope': getattr(sub_dep, 'computed_scope', None) or 'function',
         })
 
 
@@ -1415,7 +1487,8 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
             if node['is_security']:
                 sec_type = node['security_type']
                 if sec_type in ('HTTPBearer', 'HTTPBase'):
-                    if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
+                    _needs_bearer = (sec_type == 'HTTPBearer')
+                    if not auth_scheme or not auth_credentials or (_needs_bearer and auth_scheme.lower() != 'bearer'):
                         if node['auto_error']:
                             _sec_obj = node['call']
                             _www_auth = getattr(_sec_obj, 'model', None)
@@ -1488,7 +1561,7 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
             _req_qp = node.get('required_query_params')
             if _req_qp:
                 for _rp in _req_qp:
-                    if _rp not in dep_kwargs:
+                    if _rp not in dep_kwargs or dep_kwargs[_rp] is None:
                         errors.append({
                             "type": "missing",
                             "loc": ("query", _rp),
@@ -1575,12 +1648,8 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
 
         except _exc_types:
             raise  # Propagate auth/permission errors — C++ handles these
-        except Exception as exc:
-            errors.append({
-                "loc": ("dependency", node['name']),
-                "msg": str(exc),
-                "type": "dependency_error",
-            })
+        except Exception:
+            raise  # Propagate all exceptions to app-level handlers
 
     return (resolved, errors, sub_response)
 
@@ -1632,7 +1701,8 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
             if node['is_security']:
                 sec_type = node['security_type']
                 if sec_type in ('HTTPBearer', 'HTTPBase'):
-                    if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
+                    _needs_bearer = (sec_type == 'HTTPBearer')
+                    if not auth_scheme or not auth_credentials or (_needs_bearer and auth_scheme.lower() != 'bearer'):
                         if node['auto_error']:
                             _sec_obj = node['call']
                             _www_auth = getattr(_sec_obj, 'model', None)
@@ -1705,7 +1775,7 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
             _req_qp = node.get('required_query_params')
             if _req_qp:
                 for _rp in _req_qp:
-                    if _rp not in dep_kwargs:
+                    if _rp not in dep_kwargs or dep_kwargs[_rp] is None:
                         errors.append({
                             "type": "missing",
                             "loc": ("query", _rp),
@@ -1796,12 +1866,8 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
 
         except _exc_types:
             raise  # Propagate auth/permission errors — C++ handles these
-        except Exception as exc:
-            errors.append({
-                "loc": ("dependency", node['name']),
-                "msg": str(exc),
-                "type": "dependency_error",
-            })
+        except Exception:
+            raise  # Propagate all exceptions to app-level handlers
 
     return (resolved, errors, sub_response)
 
@@ -1809,10 +1875,13 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
 async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _app=None):
     """Resolve dependencies including generator (yield) deps using AsyncExitStack.
 
-    Returns (resolved_dict, errors_list, exit_stack).
-    The exit_stack must be closed by the caller after the endpoint returns.
+    Returns (resolved_dict, errors_list, exit_stack, sub_response).
+    exit_stack is a tuple (function_stack, request_stack):
+      - function_stack: close immediately after endpoint returns (scope="function")
+      - request_stack: close after response body is fully consumed (scope="request")
     """
-    exit_stack = AsyncExitStack()
+    function_stack = AsyncExitStack()
+    request_stack = AsyncExitStack()
     resolved = {}
     errors = []
     sub_response = None
@@ -1834,17 +1903,28 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
             pass
     request_obj = None
 
+    async def _cleanup_on_error():
+        try:
+            await function_stack.aclose()
+        except Exception:
+            pass
+        try:
+            await request_stack.aclose()
+        except Exception:
+            pass
+
     for node in dep_nodes:
         try:
             if node['is_security']:
                 sec_type = node['security_type']
                 if sec_type in ('HTTPBearer', 'HTTPBase'):
-                    if not auth_scheme or auth_scheme.lower() != 'bearer' or not auth_credentials:
+                    _needs_bearer = (sec_type == 'HTTPBearer')
+                    if not auth_scheme or not auth_credentials or (_needs_bearer and auth_scheme.lower() != 'bearer'):
                         if node['auto_error']:
                             _sec_obj = node['call']
                             _www_auth = getattr(_sec_obj, 'model', None)
                             _scheme = getattr(_www_auth, 'scheme', 'Bearer') or 'Bearer'
-                            await exit_stack.aclose()
+                            await _cleanup_on_error()
                             raise _DepHTTPExc(status_code=401, detail="Not authenticated",
                                               headers={"WWW-Authenticate": _scheme.title()})
                         creds_val = None
@@ -1861,7 +1941,7 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                             _sec_obj = node['call']
                             _realm = getattr(_sec_obj, 'realm', None)
                             _www_auth_hdr = f'Basic realm="{_realm}"' if _realm else 'Basic'
-                            await exit_stack.aclose()
+                            await _cleanup_on_error()
                             raise _DepHTTPExc(status_code=401, detail="Not authenticated",
                                               headers={"WWW-Authenticate": _www_auth_hdr})
                         creds_val = None
@@ -1873,7 +1953,7 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                             decoded = _base64.b64decode(auth_credentials).decode('utf-8')
                         except Exception:
                             if node['auto_error']:
-                                await exit_stack.aclose()
+                                await _cleanup_on_error()
                                 raise _DepHTTPExc(status_code=401, detail="Not authenticated",
                                                   headers={"WWW-Authenticate": _www_auth_hdr})
                             creds_val = None
@@ -1882,7 +1962,7 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                         username, sep, password = decoded.partition(':')
                         if not sep:
                             if node['auto_error']:
-                                await exit_stack.aclose()
+                                await _cleanup_on_error()
                                 raise _DepHTTPExc(status_code=401, detail="Not authenticated",
                                                   headers={"WWW-Authenticate": _www_auth_hdr})
                             creds_val = None
@@ -1906,7 +1986,7 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
             _req_qp = node.get('required_query_params')
             if _req_qp:
                 for _rp in _req_qp:
-                    if _rp not in dep_kwargs:
+                    if _rp not in dep_kwargs or dep_kwargs.get(_rp) is None:
                         errors.append({
                             "type": "missing",
                             "loc": ("query", _rp),
@@ -1958,17 +2038,21 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                 from astraapi.security.oauth2 import SecurityScopes as _SecurityScopes
                 dep_kwargs[_ss_param] = _SecurityScopes(scopes=node.get('oauth_scopes') or [])
 
+            # Choose stack based on dep scope: "request" deps live until response body sent
+            _dep_scope = node.get('dep_scope', 'function')
+            _use_stack = request_stack if _dep_scope == 'request' else function_stack
+
             if node.get('is_async_gen'):
                 # Async generator dep: wrap as async context manager and enter
                 call = node['call']
                 cm = asynccontextmanager(call)(**dep_kwargs)
-                result = await exit_stack.enter_async_context(cm)
+                result = await _use_stack.enter_async_context(cm)
             elif node.get('is_gen'):
                 # Sync generator dep: wrap as context manager and enter
                 from contextlib import contextmanager as _contextmanager
                 call = node['call']
                 cm = _contextmanager(call)(**dep_kwargs)
-                result = exit_stack.enter_context(cm)
+                result = _use_stack.enter_context(cm)
             elif node['is_coro']:
                 result = await node['call'](**dep_kwargs)
             else:
@@ -1979,16 +2063,15 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                 resolved[alias] = result
 
         except _exc_types:
-            await exit_stack.aclose()
+            await _cleanup_on_error()
             raise
         except Exception as exc:
-            errors.append({
-                "loc": ("dependency", node['name']),
-                "msg": str(exc),
-                "type": "dependency_error",
-            })
+            # Propagate all exceptions to app-level exception handlers
+            await _cleanup_on_error()
+            raise
 
-    return (resolved, errors, exit_stack, sub_response)
+    # Return both stacks as a tuple; caller closes function_stack first, request_stack after streaming
+    return (resolved, errors, (function_stack, request_stack), sub_response)
 
 
 def _dep_tree_has_special_params(dep: Any) -> bool:
@@ -2077,7 +2160,18 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
 
     dep_consumed_params: set[str] = set()
     for node in dep_nodes:
-        dep_consumed_params.update(node['param_names'])
+        # Only consume query/header/cookie params — NOT path params.
+        # Path params must remain in kwargs for the endpoint itself.
+        for pname in node['param_names']:
+            # Check if this param is a path param in any dep
+            _is_path = any(
+                f.name == pname
+                for sub in dependant.dependencies
+                if sub.call is not None
+                for f in getattr(sub, 'path_params', [])
+            )
+            if not _is_path:
+                dep_consumed_params.add(pname)
 
     # Check for generator (yield) dependencies
     has_gen = any(node.get('is_gen') or node.get('is_async_gen') for node in dep_nodes)
@@ -2348,6 +2442,27 @@ class APIRoute(routing.Route):
             ))
             and isinstance(actual_rc, type) and issubclass(actual_rc, JSONResponse)
             and getattr(actual_rc, "media_type", "application/json") == "application/json"
+            # Pydantic model params need slow path for proper model construction
+            and not any(
+                lenient_issubclass(f.type_, __import__('pydantic').BaseModel)
+                for f in (
+                    list(self.dependant.header_params)
+                    + list(self.dependant.query_params)
+                    + list(self.dependant.cookie_params)
+                )
+            )
+            # Body params with aliases (different from field name) need slow path
+            and not any(
+                (getattr(f.field_info, 'alias', None) not in (None, f.name))
+                or (getattr(f.field_info, 'validation_alias', None) not in (None, f.name))
+                for f in self.dependant.body_params
+            )
+            # GET/HEAD routes with body params need slow path (C++ skips body for GET)
+            and not (
+                self.dependant.body_params
+                and self.methods
+                and not any(m in ('POST', 'PUT', 'PATCH', 'DELETE') for m in self.methods)
+            )
         )
         # Build dependency solver if route has dependencies.
         # If a generator dependency is detected, fall back from fast path

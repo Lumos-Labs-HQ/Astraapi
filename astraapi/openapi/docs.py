@@ -174,8 +174,9 @@ def get_swagger_ui_html(
     })"""
 
     if init_oauth:
+        import json as _json
         html += f"""
-        ui.initOAuth({_json_dumps_str(jsonable_encoder(init_oauth))})
+        ui.initOAuth({_json.dumps(jsonable_encoder(init_oauth))})
         """
 
     html += """

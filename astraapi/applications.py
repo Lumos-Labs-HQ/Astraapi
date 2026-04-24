@@ -1180,7 +1180,9 @@ class AstraAPI(AppBase):
             # unless convert_underscores=False, in which case keep as-is
             convert_underscores = spec[6] if len(spec) > 6 else True
             if loc_str == "header":
-                header_key = field_name.lower().replace("-", "_") if convert_underscores else field_name.lower()
+                # Use alias for header lookup (alias is the actual header name to look for)
+                lookup = alias if alias else field_name
+                header_key = lookup.lower().replace("-", "_") if convert_underscores else lookup.lower()
             else:
                 header_key = ""
             is_sequence = spec[4] if len(spec) > 4 else False
@@ -1442,6 +1444,19 @@ class AstraAPI(AppBase):
             import astraapi._cpp_server as _s; _s._needs_request_context = True
         _resp_param_name = getattr(getattr(route, 'dependant', None), 'response_param_name', None)
 
+        # Collect response_param_names from all deps (for __deps_ran__ path)
+        _dep_resp_param_names: set = set()
+        _dep_for_resp = getattr(route, 'dependant', None)
+        if _dep_for_resp:
+            def _collect_resp_params(d):
+                for sub in getattr(d, 'dependencies', []):
+                    if sub.call is not None:
+                        rp = getattr(sub, 'response_param_name', None)
+                        if rp:
+                            _dep_resp_param_names.add(rp)
+                        _collect_resp_params(sub)
+            _collect_resp_params(_dep_for_resp)
+
         # Pre-compute path param coercions for _response_shim
         _path_coercions = {}
         for _pp in getattr(getattr(route, 'dependant', None), 'path_params', []):
@@ -1449,7 +1464,55 @@ class AstraAPI(AppBase):
             if _pt is not None and _pt is not str:
                 _path_coercions[_pp.name] = _pt
 
+        # Pre-build param validator for Pydantic model params (header/query/cookie)
+        _param_validator_shim = None
+        try:
+            from astraapi.routing import _make_param_validator as _mpv
+            from pydantic import BaseModel as _BM
+            from astraapi._compat import lenient_issubclass as _lis
+            _dep = getattr(route, 'dependant', None)
+            if _dep and any(
+                _lis(f.type_, _BM)
+                for f in list(getattr(_dep, 'header_params', []))
+                + list(getattr(_dep, 'query_params', []))
+                + list(getattr(_dep, 'cookie_params', []))
+            ):
+                _flat = getattr(route, '_flat_dependant', None) or _dep
+                _param_validator_shim = _mpv(_flat)
+        except Exception:
+            pass
+
+        # Body params for non-fast-path routes (aliases or GET+body need Python-side parsing)
+        _dep_for_body = getattr(route, 'dependant', None)
+        _has_alias_body = (
+            _dep_for_body and _dep_for_body.body_params
+            and not getattr(route, '_fast_path_eligible', True)
+            and any(
+                (getattr(f.field_info, 'alias', None) not in (None, f.name))
+                or (getattr(f.field_info, 'validation_alias', None) not in (None, f.name))
+                for f in _dep_for_body.body_params
+            )
+        )
+        # Also set for GET+body routes (C++ doesn't parse body for GET)
+        _is_get_with_body = (
+            _dep_for_body and _dep_for_body.body_params
+            and route.methods and not any(m in ('POST', 'PUT', 'PATCH', 'DELETE') for m in route.methods)
+        )
+        _body_params_shim = _dep_for_body.body_params if (_has_alias_body or _is_get_with_body) else None
+        _embed_body_shim = getattr(route, '_embed_body_fields', False)
+
         async def _response_shim(**kwargs: Any) -> Any:
+            # Validate/assemble Pydantic model params (header/query/cookie)
+            if _param_validator_shim is not None:
+                _pv_result = _param_validator_shim(kwargs)
+                _pv_values, _pv_errors = _pv_result[0], _pv_result[1]
+                _pv_consumed = _pv_result[2] if len(_pv_result) > 2 else set()
+                if _pv_errors:
+                    from astraapi.exceptions import RequestValidationError
+                    raise RequestValidationError(_pv_errors)
+                for _k in _pv_consumed:
+                    kwargs.pop(_k, None)
+                kwargs.update(_pv_values)
             # Coerce path params (C++ passes them as strings)
             for _pname, _ptype in _path_coercions.items():
                 if _pname in kwargs and isinstance(kwargs[_pname], str):
@@ -1481,6 +1544,18 @@ class AstraAPI(AppBase):
                 from astraapi._response import Response as _Resp
                 _sub_resp = _Resp()
                 kwargs[_resp_param_name] = _sub_resp
+            # Collect Response objects injected by deps (when C++ already ran dep_solver)
+            if _dep_resp_param_names:
+                from astraapi._response import Response as _Resp
+                for _drp in _dep_resp_param_names:
+                    _dep_resp_obj = kwargs.get(_drp)
+                    if isinstance(_dep_resp_obj, _Resp):
+                        if _sub_resp is None:
+                            _sub_resp = _dep_resp_obj
+                        else:
+                            for _k, _v in _dep_resp_obj.headers.items():
+                                _sub_resp.headers[_k] = _v
+                        # Don't pop — endpoint may need it as a parameter
             kwargs.pop('__auth_scheme__', None)
             kwargs.pop('__auth_credentials__', None)
             # Run dep solver for sub-deps (e.g. deps needing BackgroundTasks)
@@ -1505,7 +1580,7 @@ class AstraAPI(AppBase):
                         kwargs[_bg_param] = _shim_bg_tasks
                 else:
                     _shim_bg_tasks.tasks.extend(_cpp_bg.tasks)
-            elif _dep_solver is not None:
+            elif _dep_solver is not None and not kwargs.get('__gen_deps_ran__'):
                 import inspect as _inspect
                 # Share endpoint's BackgroundTasks with deps
                 if _shim_bg_tasks is not None and '__bg_tasks__' not in kwargs:
@@ -1542,11 +1617,63 @@ class AstraAPI(AppBase):
             kwargs.pop('__path__', None)
             kwargs.pop('__auth_scheme__', None)
             kwargs.pop('__auth_credentials__', None)
-            kwargs.pop('__body__', None)
-            kwargs.pop('__content_type__', None)
+            _raw_body = kwargs.pop('__body__', None)
+            _raw_ct = kwargs.pop('__content_type__', None)
+            # Parse body for non-fast-path routes with body params (e.g. alias/validation_alias, GET+body)
+            if _body_params_shim:
+                try:
+                    import json as _json
+                    _body_to_parse = _raw_body
+                    if not _body_to_parse:
+                        # Fall back to ContextVar (e.g. GET requests where C++ skips body)
+                        try:
+                            from astraapi._cpp_server import _current_body as _cb
+                            _body_to_parse = _cb.get() or b''
+                        except Exception:
+                            _body_to_parse = b''
+                    _parsed_body = _json.loads(_body_to_parse) if _body_to_parse else None
+                    from astraapi.dependencies.utils import request_body_to_args as _rbta
+                    _bvals, _berrs = await _rbta(_body_params_shim, _parsed_body, _embed_body_shim)
+                    if _berrs:
+                        from astraapi.exceptions import RequestValidationError as _RVE
+                        raise _RVE(_berrs, body=_parsed_body)
+                    kwargs.update(_bvals)
+                except (ValueError, TypeError):
+                    pass
             _exit_stack = kwargs.pop('__exit_stack__', None)
             kwargs.pop('__deps_ran__', None)
+            _gen_deps_ran = kwargs.pop('__gen_deps_ran__', False)
             _exc_handlers_shim = getattr(route, '_app_exception_handlers', None)
+            # Unpack dual stacks: function_stack closes before streaming, request_stack after
+            _function_stack = None
+            _request_stack = None
+            if isinstance(_exit_stack, tuple) and len(_exit_stack) == 2:
+                _function_stack, _request_stack = _exit_stack
+                _exit_stack = None  # use individual stacks below
+            elif _exit_stack is not None:
+                # Legacy single stack — treat as request-scoped (default for gen deps)
+                _request_stack = _exit_stack
+                _exit_stack = None
+
+            async def _close_stack(stack):
+                if stack is not None:
+                    await stack.aclose()  # let exceptions propagate
+
+            async def _exit_stack_on_error(exc):
+                """Propagate exception through both stacks, return True if suppressed."""
+                suppressed = False
+                if _function_stack is not None:
+                    try:
+                        suppressed = await _function_stack.__aexit__(type(exc), exc, exc.__traceback__)
+                    except Exception as _new_exc:
+                        # Stack raised a different exception (e.g. dep caught and re-raised)
+                        raise _new_exc from exc
+                if _request_stack is not None:
+                    try:
+                        suppressed = await _request_stack.__aexit__(type(exc), exc, exc.__traceback__) or suppressed
+                    except Exception as _new_exc:
+                        raise _new_exc from exc
+                return suppressed
 
             async def _call_with_exc_handling():
                 try:
@@ -1554,23 +1681,31 @@ class AstraAPI(AppBase):
                         _r = await original_endpoint(**kwargs)
                     else:
                         _r = original_endpoint(**kwargs)
-                    if _exit_stack is not None:
-                        await _exit_stack.aclose()
                     return _r
                 except Exception as _exc:
-                    if _exit_stack is not None:
-                        _suppressed = await _exit_stack.__aexit__(type(_exc), _exc, _exc.__traceback__)
-                        if _suppressed:
-                            from astraapi.exceptions import AstraAPIError as _FAE
-                            raise _FAE(
-                                "Response not awaited. There's a high chance that the "
-                                "application code is raising an exception and a dependency with yield "
-                                "has a block with a bare except, or a block with except Exception, "
-                                "and is not raising the exception again."
-                            )
+                    _suppressed = await _exit_stack_on_error(_exc)
+                    if _suppressed:
+                        from astraapi.exceptions import AstraAPIError as _FAE
+                        raise _FAE(
+                            "Response not awaited. There's a high chance that the "
+                            "application code is raising an exception and a dependency with yield "
+                            "has a block with a bare except, or a block with except Exception, "
+                            "and is not raising the exception again."
+                        )
                     if _exc_handlers_shim:
                         for _exc_cls, _exc_handler in _exc_handlers_shim.items():
                             if isinstance(_exc, _exc_cls):
+                                # Store exception for raise_server_exceptions=True
+                                # (non-HTTP exceptions should propagate in test mode)
+                                from astraapi.exceptions import HTTPException as _HE
+                                from astraapi.exceptions import RequestValidationError as _RVE
+                                if not isinstance(_exc, (_HE, _RVE)):
+                                    try:
+                                        import astraapi._cpp_server as _srv_exc
+                                        if _srv_exc._raise_server_exceptions:
+                                            _srv_exc._set_last_server_exception(_exc)
+                                    except Exception:
+                                        pass
                                 from astraapi.routing import _make_lightweight_request as _mlr
                                 _req = _mlr(None, 'GET', '/', route)
                                 import inspect as _insp
@@ -1619,15 +1754,32 @@ class AstraAPI(AppBase):
                     raise HTTPException(status_code=404, detail="File not found") from exc
 
             elif isinstance(result, _StreamingResponse):
-                # Collect iterator into bytes and return as plain Response
+                # Collect iterator into bytes and return as plain Response.
+                # function-scoped deps close before body consumed; request-scoped after.
+                await _close_stack(_function_stack)
                 chunks = []
                 body_iter = result.body_iterator
-                if hasattr(body_iter, '__aiter__'):
-                    async for chunk in body_iter:
-                        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
-                else:
-                    for chunk in body_iter:
-                        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+                _stream_exc = None
+                try:
+                    if hasattr(body_iter, '__aiter__'):
+                        async for chunk in body_iter:
+                            chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+                    else:
+                        for chunk in body_iter:
+                            chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+                except Exception as _se:
+                    _stream_exc = _se
+                await _close_stack(_request_stack)
+                if _stream_exc is not None:
+                    # Exception during streaming — response already started (200), capture as server error
+                    import logging as _logging
+                    _logging.getLogger("astraapi").error(
+                        "Exception during streaming response: %s", _stream_exc)
+                    try:
+                        import astraapi._cpp_server as _srv
+                        _srv._last_server_exception = _stream_exc
+                    except Exception:
+                        pass
                 _final = _Response(
                     content=b"".join(chunks),
                     status_code=result.status_code,
@@ -1635,6 +1787,10 @@ class AstraAPI(AppBase):
                 )
 
             elif isinstance(result, _Response):
+                _final = result
+
+            elif hasattr(result, 'body') and isinstance(getattr(result, 'body', None), bytes):
+                # Response-like object from a different framework (e.g. starlette.responses)
                 _final = result
 
             else:
@@ -1685,12 +1841,46 @@ class AstraAPI(AppBase):
                 _sub_sc = getattr(_sub_resp, 'status_code', None)
                 if _sub_sc is not None and _sub_sc != 200:
                     _final.status_code = _sub_sc
+                    # If original status was 204/no-content but override has body, rebuild
+                    if status_code == 204 and _sub_sc not in (204, 205) and not getattr(_final, 'body', b''):
+                        _final = actual_rc(content=result, status_code=_sub_sc)
 
             # Attach bg tasks to response for _handle_async_di to run
             # inside the exit_stack (before gen dep cleanup).
             # Run bg tasks before returning so they complete before response is sent
             if _shim_bg_tasks is not None and getattr(_shim_bg_tasks, 'tasks', None):
                 await _shim_bg_tasks()
+
+            # Close both stacks for non-streaming paths.
+            # function_stack: HTTPException → becomes response; other → server error
+            # request_stack: all exceptions → server error (response already built)
+            from astraapi.exceptions import HTTPException as _HTTPExcCleanup
+            if _function_stack is not None:
+                try:
+                    await _function_stack.aclose()
+                except _HTTPExcCleanup:
+                    raise  # becomes HTTP response
+                except Exception as _stack_exc:
+                    import logging as _logging
+                    _logging.getLogger("astraapi").error(
+                        "Exception in dependency cleanup (after yield): %s", _stack_exc)
+                    try:
+                        import astraapi._cpp_server as _srv
+                        _srv._last_server_exception = _stack_exc
+                    except Exception:
+                        pass
+            if _request_stack is not None:
+                try:
+                    await _request_stack.aclose()
+                except Exception as _stack_exc:
+                    import logging as _logging
+                    _logging.getLogger("astraapi").error(
+                        "Exception in dependency cleanup (after yield): %s", _stack_exc)
+                    try:
+                        import astraapi._cpp_server as _srv
+                        _srv._last_server_exception = _stack_exc
+                    except Exception:
+                        pass
 
             return _final
 
@@ -1714,8 +1904,8 @@ class AstraAPI(AppBase):
 
         original_endpoint = route.endpoint
 
-        # Collect File/UploadFile params: name -> (is_upload, is_list)
-        file_param_names: dict[str, tuple[bool, bool]] = {}
+        # Collect File/UploadFile params: name -> (is_upload, is_list, alias)
+        file_param_names: dict[str, tuple[bool, bool, str]] = {}
         for bp in route.dependant.body_params:
             fi = getattr(bp, 'field_info', None)
             if fi is not None and isinstance(fi, _FileParam):
@@ -1737,34 +1927,57 @@ class AstraAPI(AppBase):
                     elif origin is _typing.Union and any(_is_upload_type(a) for a in args):
                         # Union[UploadFile, None] etc.
                         is_upload = True
-                file_param_names[bp.name] = (is_upload, is_list)
-
-        if not file_param_names:
-            # No file params — original endpoint is fine as-is
-            return original_endpoint
+                from astraapi.dependencies.utils import get_validation_alias as _gva
+                _alias = _gva(bp)
+                file_param_names[bp.name] = (is_upload, is_list, _alias)
 
         _is_async = inspect.iscoroutinefunction(original_endpoint)
 
-        # Collect required form params for 422 validation
-        _required_form_params = [f.name for f in route.dependant.body_params if f.required]
-        # Collect optional form params with their defaults
-        _optional_form_defaults = {f.name: f.field_info.default for f in route.dependant.body_params
+        from astraapi.dependencies.utils import get_validation_alias as _gva_form
+        from astraapi.params import File as _FileParam2
+        # Collect required form params: use alias as the lookup key (C++ uses form field name = alias)
+        _required_form_params = [(f.name, _gva_form(f)) for f in route.dependant.body_params if f.required]
+        _optional_form_defaults = {(f.name, _gva_form(f)): f.field_info.default for f in route.dependant.body_params
                                     if not f.required and hasattr(f.field_info, 'default')}
+        # Alias→fieldname mapping for non-file params (C++ injects under alias, endpoint expects fieldname)
+        _alias_to_name = {
+            _gva_form(f): f.name
+            for f in route.dependant.body_params
+            if not isinstance(getattr(f, 'field_info', None), _FileParam2)
+            and _gva_form(f) != f.name
+        }
+
+        if not file_param_names and not _alias_to_name:
+            # No file params and no aliases — original endpoint is fine as-is
+            return original_endpoint
 
         async def _form_shim(**kwargs: Any) -> Any:
-            # Validate required form params
-            _missing = [p for p in _required_form_params if kwargs.get(p) is None]
+            # Remap alias keys to field name keys for non-file params
+            for _alias, _fname in _alias_to_name.items():
+                if _alias in kwargs and _fname not in kwargs:
+                    kwargs[_fname] = kwargs.pop(_alias)
+                elif _fname in kwargs and _alias not in kwargs:
+                    # Field name sent instead of alias — remove it (alias is required)
+                    kwargs.pop(_fname, None)
+            # Validate required form params — check field name (after remapping)
+            _missing = []
+            for _fname, _falias in _required_form_params:
+                if kwargs.get(_fname) is None:
+                    _missing.append(_falias)
             if _missing:
                 from astraapi.exceptions import RequestValidationError as _RVE
                 _errs = [{'type': 'missing', 'loc': ('body', p), 'msg': 'Field required', 'input': None} for p in _missing]
                 raise _RVE(_errs)
             # Inject defaults for optional params not in kwargs
-            for _pn, _pdef in _optional_form_defaults.items():
-                if _pn not in kwargs:
+            for (_pn, _palias), _pdef in _optional_form_defaults.items():
+                if _palias not in kwargs and _pn not in kwargs:
                     kwargs[_pn] = _pdef
             created_files: list[Any] = []
-            for name, (is_upload, is_list) in file_param_names.items():
-                raw = kwargs.get(name)
+            for name, (is_upload, is_list, alias) in file_param_names.items():
+                # Look up by alias first (C++ uses form field name = alias), then by field name
+                raw = kwargs.get(alias) if alias != name else None
+                if raw is None:
+                    raw = kwargs.get(name)
                 # C++ passes UploadFile, list of UploadFile, or dict
                 if isinstance(raw, _UploadFile):
                     if is_list:
@@ -1823,6 +2036,9 @@ class AstraAPI(AppBase):
                         created_files.append(uf)
                     else:
                         kwargs[name] = [data] if is_list else data
+                # Remove alias key if different from field name (endpoint expects field name)
+                if alias != name and alias in kwargs:
+                    kwargs.pop(alias, None)
             try:
                 if _is_async:
                     return await original_endpoint(**kwargs)
@@ -1911,7 +2127,9 @@ class AstraAPI(AppBase):
                     if "GET" in _gm:
                         _all_m.add("HEAD")
                 _methods = sorted(_all_m)
-            _has_body = any(m in ("POST", "PUT", "PATCH", "DELETE") for m in _methods)
+            _has_body = any(m in ("POST", "PUT", "PATCH", "DELETE") for m in _methods) or bool(
+                getattr(route, 'dependant', None) and getattr(route.dependant, 'body_params', None)
+            )
 
             # Detect form-based routes (File / UploadFile / Form body params)
             _is_form = bool(
@@ -2135,6 +2353,43 @@ class AstraAPI(AppBase):
                     if _type_exc_handlers:
                         route._app_exception_handlers = _type_exc_handlers
                     _pv_shim = self._make_param_validation_shim(route)
+                    # When Exception base class handler is registered, wrap endpoint to
+                    # store non-HTTP exceptions for raise_server_exceptions=True
+                    if Exception in self.exception_handlers and _pv_shim is endpoint:
+                        _orig_ep = endpoint
+                        _is_async_ep = inspect.iscoroutinefunction(_orig_ep)
+                        if _is_async_ep:
+                            async def _exc_store_shim(_ep=_orig_ep, **_kw):
+                                try:
+                                    return await _ep(**_kw)
+                                except Exception as _e:
+                                    from astraapi.exceptions import HTTPException as _HE
+                                    from astraapi.exceptions import RequestValidationError as _RVE
+                                    if not isinstance(_e, (_HE, _RVE)):
+                                        try:
+                                            import astraapi._cpp_server as _s
+                                            if _s._raise_server_exceptions:
+                                                _s._set_last_server_exception(_e)
+                                        except Exception:
+                                            pass
+                                    raise
+                        else:
+                            def _exc_store_shim(_ep=_orig_ep, **_kw):
+                                try:
+                                    return _ep(**_kw)
+                                except Exception as _e:
+                                    from astraapi.exceptions import HTTPException as _HE
+                                    from astraapi.exceptions import RequestValidationError as _RVE
+                                    if not isinstance(_e, (_HE, _RVE)):
+                                        try:
+                                            import astraapi._cpp_server as _s
+                                            if _s._raise_server_exceptions:
+                                                _s._set_last_server_exception(_e)
+                                        except Exception:
+                                            pass
+                                    raise
+                        _pv_shim = _exc_store_shim
+                        _is_coro = _is_async_ep
                     if _pv_shim is not endpoint:
                         _registered_endpoint = _pv_shim
                         _is_coro = True
@@ -2278,6 +2533,7 @@ class AstraAPI(AppBase):
                         dep_solver,
                         param_validator=param_validator,
                     )
+                    logger.debug("register_fast_spec OK for %s route_index=%s body_param_name=%s embed=%s", route.path, route_index, body_param_name, getattr(route, '_embed_body_fields', False))
                 elif _is_form:
                     # Form route: register fast_spec so C++ dispatch handles it.
                     # - No file params (original endpoint returned, not shim): pass
@@ -2327,13 +2583,24 @@ class AstraAPI(AppBase):
                         self._convert_batch_specs(raw_specs) if raw_specs
                         else None
                     )
+                    # If route has body params with aliases, use a body-injecting dep_solver so C++
+                    # injects __body__ into kwargs (shim then parses it with request_body_to_args)
+                    _has_alias_bp = dep.body_params and any(
+                        (getattr(f.field_info, 'alias', None) not in (None, f.name))
+                        or (getattr(f.field_info, 'validation_alias', None) not in (None, f.name))
+                        for f in dep.body_params
+                    )
+                    if _has_alias_bp and dep_solver is None:
+                        async def _body_injector(kwargs_dict):
+                            return ({}, [], None, None)
+                        dep_solver = _body_injector
                     self._core_app.register_fast_spec(
                         route_index,
-                        None,       # no JSON body param
+                        None,       # no JSON body param — shim handles body parsing
                         field_specs,
                         None,       # no body_params validation
                         False,
-                        dep if dep.dependencies else None,
+                        dep if (dep.dependencies or _has_alias_bp) else None,
                         dep_solver,
                     )
             except Exception as exc:

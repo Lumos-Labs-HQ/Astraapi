@@ -399,11 +399,9 @@ class TestClient:
 
     def _check_exc(self) -> None:
         """Re-raise any server exception captured during the last request."""
-        if not self._raise_server_exceptions:
-            return
         from astraapi._cpp_server import _pop_server_exception
-        exc = _pop_server_exception()
-        if exc is not None:
+        exc = _pop_server_exception()  # always pop to prevent cross-test pollution
+        if exc is not None and self._raise_server_exceptions:
             raise exc
 
     def _sync_raise_flag(self) -> None:
@@ -530,6 +528,20 @@ class TestClient:
 
     def __exit__(self, *args: Any) -> None:
         self.close()
+        # When used as context manager, actually stop the server so lifespan shutdown runs
+        shared = self._shared_server
+        if shared is None:
+            # Already cleared by close() — look up by app id
+            app_id = id(self.app)
+            with _app_servers_lock:
+                shared = _app_servers.pop(app_id, None)
+        else:
+            self._shared_server = None
+            app_id = id(self.app)
+            with _app_servers_lock:
+                _app_servers.pop(app_id, None)
+        if shared is not None:
+            shared.stop()
 
     @property
     def app_state(self) -> Any:

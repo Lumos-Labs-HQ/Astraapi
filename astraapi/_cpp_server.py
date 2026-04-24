@@ -1946,6 +1946,10 @@ class CppHttpProtocol(asyncio.Protocol):
         if handler is None and isinstance(exc, HTTPException):
             handler = _app_status_handlers.get(exc.status_code)
         if handler is not None:
+            # When raise_server_exceptions=True, store the original exception so
+            # TestClient can re-raise it (matches FastAPI/Starlette test behavior)
+            if _raise_server_exceptions and not isinstance(exc, (HTTPException, RequestValidationError)):
+                _set_last_server_exception(exc)
             try:
                 if is_async_callable(handler):
                     resp = await handler(None, exc)
@@ -2167,6 +2171,11 @@ class CppHttpProtocol(asyncio.Protocol):
                 if isinstance(values, dict):
                     # Extract generator dep exit_stack before updating kwargs
                     exit_stack = values.pop('__exit_stack__', None)
+                    if exit_stack is not None:
+                        # Pass exit_stack to _response_shim for exception handling,
+                        # but signal that gen deps are already resolved (don't run _dep_solver again)
+                        kwargs['__exit_stack__'] = exit_stack
+                        kwargs['__gen_deps_ran__'] = True
                     kwargs.update(values)
             else:
                 exit_stack = None
@@ -2260,13 +2269,24 @@ class CppHttpProtocol(asyncio.Protocol):
                 return _raw
 
             if exit_stack is not None:
-                async with exit_stack:
+                # Handle dual-stack tuple (function_stack, request_stack)
+                if isinstance(exit_stack, tuple):
+                    # _response_shim manages both stacks (via __exit_stack__ in kwargs).
+                    # Just run _call_and_write() — stacks are closed inside _response_shim.
                     raw = await _call_and_write()
                     background = getattr(raw, 'background', None)
                     if background is not None:
                         await background()
                     if di_bg_tasks is not None and getattr(di_bg_tasks, 'tasks', None):
                         await di_bg_tasks()
+                else:
+                    async with exit_stack:
+                        raw = await _call_and_write()
+                        background = getattr(raw, 'background', None)
+                        if background is not None:
+                            await background()
+                        if di_bg_tasks is not None and getattr(di_bg_tasks, 'tasks', None):
+                            await di_bg_tasks()
             else:
                 raw = await _call_and_write()
                 background = getattr(raw, 'background', None)
@@ -2615,7 +2635,10 @@ async def _create_server(
         _openapi_url = getattr(app, "openapi_url", "/openapi.json") or "/openapi.json"
         _docs_url = getattr(app, "docs_url", "/docs") or ""
         _redoc_url = getattr(app, "redoc_url", "/redoc") or ""
-        _oauth2_url = getattr(app, "swagger_ui_oauth2_redirect_url", "/docs/oauth2-redirect") or "/docs/oauth2-redirect"
+        _oauth2_url = getattr(app, "swagger_ui_oauth2_redirect_url", "/docs/oauth2-redirect") or ""
+        # If init_oauth is set or oauth2_redirect_url is None, let Python route serve /docs
+        if getattr(app, "swagger_ui_init_oauth", None) or not getattr(app, "swagger_ui_oauth2_redirect_url", True):
+            _docs_url = ""
         try:
             core_app.set_urls(_openapi_url, _docs_url, _redoc_url, _oauth2_url)
         except Exception:
