@@ -1643,6 +1643,11 @@ class CppHttpProtocol(asyncio.Protocol):
                         path=ws_path, path_params=path_params,
                         headers=ws_headers, query_string=ws_query_string,
                     )
+                    # Inject app reference so deps can access conn.app.state
+                    if _full_app is not None:
+                        ws.scope["app"] = _full_app
+                        if hasattr(_full_app, "router"):
+                            ws.scope["router"] = _full_app.router
                     ws._protocol = self
                     ws._channel._protocol = self
                     self._ws = ws
@@ -1960,7 +1965,9 @@ class CppHttpProtocol(asyncio.Protocol):
         if handler is not None:
             # When raise_server_exceptions=True, store the original exception so
             # TestClient can re-raise it (matches FastAPI/Starlette test behavior)
-            if _raise_server_exceptions and not isinstance(exc, (HTTPException, RequestValidationError)):
+            # Always store ResponseValidationError (programming error)
+            from astraapi.exceptions import ResponseValidationError as _RVE3
+            if isinstance(exc, _RVE3) or (_raise_server_exceptions and not isinstance(exc, (HTTPException, RequestValidationError))):
                 _set_last_server_exception(exc)
             try:
                 if is_async_callable(handler):
@@ -2054,7 +2061,9 @@ class CppHttpProtocol(asyncio.Protocol):
         except Exception:
             pass
         logger.exception("Unhandled exception in endpoint")
-        if _raise_server_exceptions:
+        # Always store ResponseValidationError (programming error, always re-raise)
+        from astraapi.exceptions import ResponseValidationError as _RVE2
+        if isinstance(exc, _RVE2) or _raise_server_exceptions:
             global _last_server_exception
             _last_server_exception = exc
         transport.write(_500_RESP)
@@ -2594,6 +2603,8 @@ async def _create_server(
                 return await _orig(request, exc)
             _type_handlers = dict(_type_handlers)
             _type_handlers[_RVE] = _rv_handler_with_ctx
+            # Also update _app_exc_handlers so _dispatch_exception uses the wrapper
+            _app_exc_handlers[_RVE] = _rv_handler_with_ctx
         core_app.set_type_exception_handlers(_type_handlers)
 
     # Build WS app map for DI-wrapped WebSocket dispatch
@@ -2733,6 +2744,10 @@ async def _create_server(
             if schema:
                 schema_json = json_dumps_str(schema)
                 core_app.set_openapi_schema(schema_json)
+        except ValueError:
+            raise  # Let ValueError propagate (e.g. invalid response status codes)
+        except ValueError:
+            raise  # Let ValueError propagate (e.g. invalid response status codes)
         except Exception:
             pass
 

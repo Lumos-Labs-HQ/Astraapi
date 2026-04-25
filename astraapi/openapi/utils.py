@@ -377,6 +377,18 @@ def get_openapi_path(
                     status_code_key = str(additional_status_code).upper()
                     if status_code_key == "DEFAULT":
                         status_code_key = "default"
+                    else:
+                        # Validate that the status code is a valid integer or range (e.g. 4XX)
+                        try:
+                            int(additional_status_code)
+                        except (ValueError, TypeError):
+                            # Allow range codes like 1XX, 2XX, 3XX, 4XX, 5XX
+                            _sc_str = str(additional_status_code).upper()
+                            if not (_sc_str[:-2].isdigit() and _sc_str[-2:] == 'XX' and len(_sc_str) == 3):
+                                raise ValueError(
+                                    f"Invalid status code {additional_status_code!r} in additional responses. "
+                                    "Status codes must be integers, range codes (e.g. '4XX'), or 'default'."
+                                )
                     openapi_response = operation_responses.setdefault(
                         status_code_key, {}
                     )

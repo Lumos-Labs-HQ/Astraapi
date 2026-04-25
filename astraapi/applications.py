@@ -1805,16 +1805,24 @@ class AstraAPI(AppBase):
                 # Apply response model filtering if set
                 if _response_field is not None:
                     _val, _errs = _response_field.validate(result, {}, loc=("response",))
-                    if not _errs:
-                        result = _response_field.serialize(
-                            _val,
-                            include=_rm_include,
-                            exclude=_rm_exclude,
-                            by_alias=_rm_by_alias,
-                            exclude_unset=_rm_exclude_unset,
-                            exclude_defaults=_rm_exclude_defaults,
-                            exclude_none=_rm_exclude_none,
-                        )
+                    if _errs:
+                        from astraapi.exceptions import ResponseValidationError as _RVE
+                        _rve = _RVE(errors=_errs, body=result)
+                        try:
+                            from astraapi._cpp_server import _set_last_server_exception as _slse
+                            _slse(_rve)
+                        except Exception:
+                            pass
+                        raise _rve
+                    result = _response_field.serialize(
+                        _val,
+                        include=_rm_include,
+                        exclude=_rm_exclude,
+                        by_alias=_rm_by_alias,
+                        exclude_unset=_rm_exclude_unset,
+                        exclude_defaults=_rm_exclude_defaults,
+                        exclude_none=_rm_exclude_none,
+                    )
                 # Not a Response — wrap using the route's response_class
                 if _is_redirect:
                     # Pass only the URL; let RedirectResponse use its own default status_code

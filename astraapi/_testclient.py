@@ -351,7 +351,11 @@ class TestClient:
                         if not started_event.wait(timeout=10.0):
                             raise RuntimeError("C++ test server failed to start within 10s")
                         if self._server_error is not None:
-                            raise RuntimeError(f"Server startup failed: {self._server_error}")
+                            err = self._server_error
+                            # Re-raise original exception type if possible
+                            if isinstance(err, (ValueError, TypeError)):
+                                raise err
+                            raise RuntimeError(f"Server startup failed: {err}")
                     finally:
                         _app_servers_lock.acquire()
                 else:
@@ -418,9 +422,12 @@ class TestClient:
     def _check_exc(self) -> None:
         """Re-raise any server exception captured during the last request."""
         from astraapi._cpp_server import _pop_server_exception
+        from astraapi.exceptions import ResponseValidationError
         exc = _pop_server_exception()  # always pop to prevent cross-test pollution
-        if exc is not None and self._raise_server_exceptions:
-            raise exc
+        if exc is not None:
+            # Always re-raise ResponseValidationError (programming error, not server error)
+            if isinstance(exc, ResponseValidationError) or self._raise_server_exceptions:
+                raise exc
 
     def _sync_raise_flag(self) -> None:
         """Sync _raise_server_exceptions global to this client's setting before each request."""
@@ -430,7 +437,10 @@ class TestClient:
     def _apply_cookies(self) -> None:
         """Sync instance cookies to the underlying httpx client."""
         if self._client is not None and self.cookies:
-            for name, value in self.cookies.items():
+            _cookies = self.cookies
+            if isinstance(_cookies, list):
+                _cookies = dict(_cookies)
+            for name, value in _cookies.items():
                 self._client.cookies.set(name, value)
 
 

@@ -931,10 +931,17 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
         errors: list = []
 
         for loc, alias, name, is_req, default, ta in param_info:
-            # Look up by alias first (how C++ stores it), then by field name
-            value = kwargs_dict.get(alias)
-            if value is None and alias != name:
+            # For query/cookie params: C++ stores by field_name; look up field_name first
+            # For header params: C++ stores by alias (header lookup key)
+            if loc in ("query", "cookie"):
                 value = kwargs_dict.get(name)
+                if value is None and alias != name:
+                    value = kwargs_dict.get(alias)
+            else:
+                # Look up by alias first (how C++ stores header params), then by field name
+                value = kwargs_dict.get(alias)
+                if value is None and alias != name:
+                    value = kwargs_dict.get(name)
 
             if value is None:
                 if is_req:
