@@ -138,11 +138,11 @@ tests/test_tutorial/test_handling_errors/test_tutorial004.py ....        [ 40%]
 tests/test_tutorial/test_handling_errors/test_tutorial005.py ...         [ 40%]
 tests/test_tutorial/test_handling_errors/test_tutorial006.py ....        [ 40%]
 tests/test_tutorial/test_header_param_models/test_tutorial001.py ....... [ 41%]
-.FEFEFEFE........                                                        [ 41%]
+.............                                                            [ 41%]
 tests/test_tutorial/test_header_param_models/test_tutorial002.py ....... [ 42%]
-.FEFEFEFE........                                                        [ 42%]
-tests/test_tutorial/test_header_param_models/test_tutorial003.py ....FFF [ 43%]
-F....FEFEFEFE........                                                    [ 44%]
+.............                                                            [ 42%]
+tests/test_tutorial/test_header_param_models/test_tutorial003.py ....... [ 43%]
+.................                                                        [ 44%]
 tests/test_tutorial/test_header_params/test_tutorial001.py ............. [ 44%]
 ...                                                                      [ 44%]
 tests/test_tutorial/test_header_params/test_tutorial002.py ............. [ 45%]
@@ -338,293 +338,76 @@ FF..FF..                                                                 [ 99%]
 tests/test_tutorial/test_websockets/test_tutorial003.py ..               [ 99%]
 tests/test_tutorial/test_wsgi/test_tutorial001.py s.                     [100%]
 
-==================================== ERRORS ====================================
-____ ERROR at teardown of test_header_param_model_invalid[tutorial001_py39] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-___ ERROR at teardown of test_header_param_model_invalid[tutorial001_py310] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial001_an_py39] ___
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial001_an_py310] __
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-____ ERROR at teardown of test_header_param_model_invalid[tutorial002_py39] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-___ ERROR at teardown of test_header_param_model_invalid[tutorial002_py310] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial002_an_py39] ___
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial002_an_py310] __
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-____ ERROR at teardown of test_header_param_model_invalid[tutorial003_py39] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-___ ERROR at teardown of test_header_param_model_invalid[tutorial003_py310] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial003_an_py39] ___
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial003_an_py310] __
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
 =================================== FAILURES ===================================
-______________ test_header_param_model_invalid[tutorial001_py39] _______________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c7e6e50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial001.py:62: AssertionError
-______________ test_header_param_model_invalid[tutorial001_py310] ______________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c7e7850>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial001.py:62: AssertionError
-_____________ test_header_param_model_invalid[tutorial001_an_py39] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c6c0150>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial001.py:62: AssertionError
-____________ test_header_param_model_invalid[tutorial001_an_py310] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c6c0a50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial001.py:62: AssertionError
-______________ test_header_param_model_invalid[tutorial002_py39] _______________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c6c3850>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial002.py:63: AssertionError
-______________ test_header_param_model_invalid[tutorial002_py310] ______________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c554250>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial002.py:63: AssertionError
-_____________ test_header_param_model_invalid[tutorial002_an_py39] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c554850>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial002.py:63: AssertionError
-____________ test_header_param_model_invalid[tutorial002_an_py310] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c554e50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial002.py:63: AssertionError
-___________ test_header_param_model_no_underscore[tutorial003_py39] ____________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c557950>
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:58: AssertionError
-___________ test_header_param_model_no_underscore[tutorial003_py310] ___________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c400150>
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:58: AssertionError
-__________ test_header_param_model_no_underscore[tutorial003_an_py39] __________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c400750>
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:58: AssertionError
-_________ test_header_param_model_no_underscore[tutorial003_an_py310] __________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c400c50>
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:58: AssertionError
-______________ test_header_param_model_invalid[tutorial003_py39] _______________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c401150>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:88: AssertionError
-______________ test_header_param_model_invalid[tutorial003_py310] ______________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c401750>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:88: AssertionError
-_____________ test_header_param_model_invalid[tutorial003_an_py39] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c401d50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:88: AssertionError
-____________ test_header_param_model_invalid[tutorial003_an_py310] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7f5b4c402350>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:88: AssertionError
 _________________ test_websocket_with_cookie[tutorial002_py39] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac3067b0>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506660>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...: fakesession'
 E     
 E     - Session cookie or query token value is: fakesession
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5aac31d4e0>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5f00521900>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:40: AssertionError
 ________________ test_websocket_with_cookie[tutorial002_py310] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac306a50>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506900>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...: fakesession'
 E     
 E     - Session cookie or query token value is: fakesession
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5aac31f7f0>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5f00523c10>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:40: AssertionError
 _________________ test_websocket_with_header[tutorial002_py39] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac3067b0>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506660>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...s: some-token'
 E     
 E     - Session cookie or query token value is: some-token
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5aac31d4e0>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5f00521900>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:58: AssertionError
 ________________ test_websocket_with_header[tutorial002_py310] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac306a50>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506900>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...s: some-token'
 E     
 E     - Session cookie or query token value is: some-token
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5aac31f7f0>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5f00523c10>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:58: AssertionError
 ____________ test_websocket_with_header_and_query[tutorial002_py39] ____________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac3067b0>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506660>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...s: some-token'
 E     
 E     - Session cookie or query token value is: some-token
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5aac31d4e0>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5f00521900>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:76: AssertionError
 ___________ test_websocket_with_header_and_query[tutorial002_py310] ____________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac306a50>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506900>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...s: some-token'
 E     
 E     - Session cookie or query token value is: some-token
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5aac31f7f0>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7f5f00523c10>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:76: AssertionError
 _______________ test_websocket_no_credentials[tutorial002_py39] ________________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac3067b0>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506660>
 
 >   ???
 E   Failed: did not raise WebSocketDisconnect on __enter__
@@ -632,7 +415,7 @@ E   Failed: did not raise WebSocketDisconnect on __enter__
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:95: Failed
 _______________ test_websocket_no_credentials[tutorial002_py310] _______________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac306a50>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506900>
 
 >   ???
 E   Failed: did not raise WebSocketDisconnect on __enter__
@@ -640,7 +423,7 @@ E   Failed: did not raise WebSocketDisconnect on __enter__
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:95: Failed
 ________________ test_websocket_invalid_data[tutorial002_py39] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac3067b0>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506660>
 
 >   ???
 E   Failed: did not raise WebSocketDisconnect on __enter__
@@ -648,29 +431,13 @@ E   Failed: did not raise WebSocketDisconnect on __enter__
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:104: Failed
 ________________ test_websocket_invalid_data[tutorial002_py310] ________________
 
-app = <astraapi.applications.AstraAPI object at 0x7f5aac306a50>
+app = <astraapi.applications.AstraAPI object at 0x7f5f00506900>
 
 >   ???
 E   Failed: did not raise WebSocketDisconnect on __enter__
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:104: Failed
 =========================== short test summary info ============================
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_an_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_an_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_an_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_an_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_no_underscore[tutorial003_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_no_underscore[tutorial003_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_no_underscore[tutorial003_an_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_no_underscore[tutorial003_an_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_an_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_an_py310]
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_with_cookie[tutorial002_py39]
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_with_cookie[tutorial002_py310]
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_with_header[tutorial002_py39]
@@ -681,16 +448,4 @@ FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_n
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_no_credentials[tutorial002_py310]
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_invalid_data[tutorial002_py39]
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_invalid_data[tutorial002_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_an_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_an_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_an_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_an_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_an_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_an_py310]
-= 26 failed, 1927 passed, 2 skipped, 8 xfailed, 12 errors in 155.23s (0:02:35) =
+====== 10 failed, 1943 passed, 2 skipped, 8 xfailed in 149.21s (0:02:29) =======

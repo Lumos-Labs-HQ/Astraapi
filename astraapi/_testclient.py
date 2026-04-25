@@ -371,6 +371,12 @@ class TestClient:
         from astraapi._cpp_server import _create_server, _set_raise_server_exceptions
         _set_raise_server_exceptions(self._raise_server_exceptions)
         _lifespan_cm = None
+        # Clear any stale lifespan state from previous test
+        try:
+            from astraapi._cpp_server import _set_lifespan_state
+            _set_lifespan_state({})
+        except Exception:
+            pass
         _router = getattr(self.app, "router", None)
         _lh = getattr(_router, "lifespan_context", None) if _router else None
         if _lh is not None:
@@ -385,6 +391,12 @@ class TestClient:
                     elif isinstance(_ls_state, dict):
                         for _k, _v in _ls_state.items():
                             setattr(_app_state, _k, _v)
+                # Also store in module-level for request scope injection
+                try:
+                    from astraapi._cpp_server import _set_lifespan_state
+                    _set_lifespan_state(_ls_state)
+                except Exception:
+                    pass
         server = await _create_server(self.app, "127.0.0.1", shared.port, root_path=self._root_path)
         stop_event = asyncio.Event()
         shared.stop_event = stop_event
@@ -394,6 +406,12 @@ class TestClient:
         await server.wait_closed()
         if _lifespan_cm is not None:
             await _lifespan_cm.__aexit__(None, None, None)
+        # Clear lifespan state after server stops
+        try:
+            from astraapi._cpp_server import _set_lifespan_state
+            _set_lifespan_state({})
+        except Exception:
+            pass
 
     # -- HTTP methods (all lazy-start) ---------------------------------------
 

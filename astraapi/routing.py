@@ -1046,10 +1046,19 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                             val = (_raw_hdr_dict.get(inner_alias.lower())
                                    or _raw_hdr_dict.get(lookup_alias))
                         else:
-                            # No alias: match by name (with - and _ variants)
-                            lookup_name = inner_name.lower().replace('_', '-') if _cu else inner_name.lower()
-                            val = (_raw_hdr_dict.get(inner_name.lower())
-                                   or _raw_hdr_dict.get(lookup_name))
+                            # No alias: match by name (with - and _ variants only when convert_underscores=True)
+                            if _cu:
+                                lookup_name = inner_name.lower().replace('_', '-')
+                                val = (_raw_hdr_dict.get(inner_name.lower())
+                                       or _raw_hdr_dict.get(lookup_name))
+                            else:
+                                # convert_underscores=False: look up hyphenated form,
+                                # but use only the last value (not collected list)
+                                _raw_val = _raw_hdr_dict.get(inner_name.lower().replace('_', '-'))
+                                if isinstance(_raw_val, list):
+                                    val = _raw_val[-1]  # last value only
+                                else:
+                                    val = _raw_val
                     else:
                         # cookie/query: match by alias only when alias != name, else by name
                         if inner_alias != inner_name:
@@ -1129,6 +1138,24 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                             inner_dict[_k] = _v
 
             # Validate the assembled dict as the model type
+            # Add fields with defaults that weren't sent (so Pydantic includes them in error input)
+            # Only for header params — cookie/query params use empty input for missing fields
+            if loc == "header":
+                try:
+                    _cls = getattr(outer_ta, '_type', None)
+                    _model_fields = getattr(_cls, 'model_fields', None) if _cls else None
+                    if _model_fields:
+                        import pydantic as _pyd
+                        for _fn, _finfo in _model_fields.items():
+                            _falias = getattr(_finfo, 'alias', None) or _fn
+                            if _falias not in inner_dict and _fn not in inner_dict:
+                                _fdefault = _finfo.default
+                                # Only add non-None, non-undefined defaults (e.g. [] for list fields)
+                                if _fdefault is not _pyd.fields.PydanticUndefined and _fdefault is not None:
+                                    import copy as _copy
+                                    inner_dict[_falias] = _copy.deepcopy(_fdefault)
+                except Exception:
+                    pass
             try:
                 validated = outer_ta.validate_python(inner_dict)
                 values[outer_name] = validated
@@ -1422,6 +1449,14 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
         scope["app"] = app
         if hasattr(app, 'router'):
             scope["router"] = app.router
+    # Inject lifespan state into scope["state"] so request.state has it
+    try:
+        from astraapi._cpp_server import _get_lifespan_state
+        from astraapi._datastructures_impl import State as _State
+        _ls = _get_lifespan_state()
+        scope["state"] = _State(dict(_ls) if _ls else {})
+    except Exception:
+        scope["state"] = {}
     # Inject route for scope["route"] access in endpoints
     _route = _shim_route
     if _route is None and route_id is not None:
@@ -1520,18 +1555,16 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                         try:
                             decoded = _base64.b64decode(auth_credentials).decode('utf-8')
                         except Exception:
-                            if node['auto_error']:
-                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
-                                                  headers={"WWW-Authenticate": _www_auth_hdr})
-                            creds_val = None
-                            resolved[node['name']] = creds_val
-                            continue
+                            # Malformed credentials always return 401
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _www_auth_hdr})
                         username, sep, password = decoded.partition(':')
                         if not sep:
-                            if node['auto_error']:
-                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
-                                                  headers={"WWW-Authenticate": _www_auth_hdr})
-                            creds_val = None
+                            # Malformed credentials always return 401
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _www_auth_hdr})
+                        if False:
+                            creds_val = None  # unreachable, kept for structure
                         else:
                             creds_val = node['security_cred_cls'](username=username, password=password)
                     resolved[node['name']] = creds_val
@@ -1641,6 +1674,35 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                 from astraapi.security.oauth2 import SecurityScopes as _SecurityScopes
                 dep_kwargs[_ss_param] = _SecurityScopes(scopes=node.get('oauth_scopes') or [])
 
+            # Validate form body params with constraints (e.g. pattern) before calling dep
+            if node.get('has_form_body') and _parsed_form is not None:
+                try:
+                    from astraapi.dependencies.utils import get_dependant as _gd
+                    _dep_dep = _gd(path='/', call=node['call'])
+                    if _dep_dep and _dep_dep.body_params:
+                        from pydantic import TypeAdapter as _TA
+                        from typing import Annotated as _Ann
+                        for _bp in _dep_dep.body_params:
+                            _bval = _parsed_form.get(_bp.name)
+                            if _bval is not None and _bp.field_info is not None:
+                                try:
+                                    _ann = _Ann[_bp.type_, _bp.field_info]
+                                    _ta = _TA(_ann)
+                                    _ta.validate_python(_bval)
+                                except Exception as _ve:
+                                    try:
+                                        _verrs = _ve.errors(include_url=False)
+                                        for _e in _verrs:
+                                            _ne = dict(_e)
+                                            _ne['loc'] = ('body', _bp.name) + tuple(_ne.get('loc', ()))
+                                            errors.append(_ne)
+                                    except Exception:
+                                        pass
+                        if errors:
+                            continue
+                except Exception:
+                    pass
+
             result = node['call'](**dep_kwargs)
             resolved[node['name']] = result
             for alias in node.get('aliases', ()):
@@ -1734,18 +1796,16 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                         try:
                             decoded = _base64.b64decode(auth_credentials).decode('utf-8')
                         except Exception:
-                            if node['auto_error']:
-                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
-                                                  headers={"WWW-Authenticate": _www_auth_hdr})
-                            creds_val = None
-                            resolved[node['name']] = creds_val
-                            continue
+                            # Malformed credentials always return 401
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _www_auth_hdr})
                         username, sep, password = decoded.partition(':')
                         if not sep:
-                            if node['auto_error']:
-                                raise _DepHTTPExc(status_code=401, detail="Not authenticated",
-                                                  headers={"WWW-Authenticate": _www_auth_hdr})
-                            creds_val = None
+                            # Malformed credentials always return 401
+                            raise _DepHTTPExc(status_code=401, detail="Not authenticated",
+                                              headers={"WWW-Authenticate": _www_auth_hdr})
+                        if False:
+                            creds_val = None  # unreachable, kept for structure
                         else:
                             creds_val = node['security_cred_cls'](username=username, password=password)
                     resolved[node['name']] = creds_val

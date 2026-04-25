@@ -106,7 +106,7 @@ tests/test_query_cookie_header_model_extra_params.py ....F               [ 17%]
 tests/test_read_with_orm_mode.py .                                       [ 17%]
 tests/test_regex_deprecated_body.py ....                                 [ 17%]
 tests/test_regex_deprecated_params.py ....                               [ 17%]
-tests/test_repeated_cookie_headers.py F                                  [ 17%]
+tests/test_repeated_cookie_headers.py .                                  [ 17%]
 tests/test_repeated_dependency_schema.py ..                              [ 17%]
 tests/test_repeated_parameter_alias.py F.                                [ 17%]
 tests/test_reponse_set_reponse_code_empty.py ..                          [ 17%]
@@ -124,20 +124,20 @@ tests/test_request_params/test_cookie/test_optional_str.py ............. [ 22%]
 ...................                                                      [ 23%]
 tests/test_request_params/test_cookie/test_required_str.py ............. [ 23%]
 ...................                                                      [ 24%]
-tests/test_request_params/test_file/test_list.py ..........FFFF....FFFF. [ 24%]
-...FF..FF                                                                [ 24%]
-tests/test_request_params/test_file/test_optional.py ..........FF.F....F [ 25%]
-F.F....FFFF.F                                                            [ 25%]
-tests/test_request_params/test_file/test_optional_list.py .....F....FF.F [ 26%]
-....FF.F....FFFF.F                                                       [ 26%]
-tests/test_request_params/test_file/test_required.py ..........FFFF....F [ 27%]
-FFF....FF..FF                                                            [ 27%]
+tests/test_request_params/test_file/test_list.py ....................... [ 24%]
+.........                                                                [ 24%]
+tests/test_request_params/test_file/test_optional.py ................... [ 25%]
+.............                                                            [ 25%]
+tests/test_request_params/test_file/test_optional_list.py .............. [ 26%]
+..................                                                       [ 26%]
+tests/test_request_params/test_file/test_required.py ................... [ 27%]
+.............                                                            [ 27%]
 tests/test_request_params/test_form/test_list.py ....................... [ 28%]
 .........                                                                [ 28%]
 tests/test_request_params/test_form/test_optional_list.py .............. [ 28%]
-..............F...                                                       [ 29%]
+..................                                                       [ 29%]
 tests/test_request_params/test_form/test_optional_str.py ............... [ 29%]
-.............F...                                                        [ 30%]
+.................                                                        [ 30%]
 tests/test_request_params/test_form/test_required_str.py ............... [ 30%]
 .................                                                        [ 30%]
 tests/test_request_params/test_header/test_list.py ..................... [ 31%]
@@ -173,7 +173,7 @@ tests/test_response_model_invalid.py ....                                [ 40%]
 tests/test_response_model_sub_types.py ..                                [ 40%]
 tests/test_return_none_stringified_annotations.py .                      [ 40%]
 tests/test_route_scope.py .....                                          [ 40%]
-tests/test_router_events.py ..F......                                    [ 40%]
+tests/test_router_events.py .........                                    [ 40%]
 tests/test_router_prefix_with_template.py .                              [ 40%]
 tests/test_router_redirect_slashes.py ..                                 [ 40%]
 tests/test_schema_compat_pydantic_v2.py ..                               [ 40%]
@@ -191,7 +191,7 @@ tests/test_security_api_key_query_optional.py ...                        [ 41%]
 tests/test_security_http_base.py .F..                                    [ 41%]
 tests/test_security_http_base_description.py ...                         [ 41%]
 tests/test_security_http_base_optional.py ...                            [ 41%]
-tests/test_security_http_basic_optional.py ..FF.                         [ 41%]
+tests/test_security_http_basic_optional.py .....                         [ 41%]
 tests/test_security_http_basic_realm.py .....                            [ 42%]
 tests/test_security_http_basic_realm_description.py .....                [ 42%]
 tests/test_security_http_bearer.py ....                                  [ 42%]
@@ -200,7 +200,7 @@ tests/test_security_http_bearer_optional.py ....                         [ 42%]
 tests/test_security_http_digest.py ....                                  [ 42%]
 tests/test_security_http_digest_description.py ....                      [ 42%]
 tests/test_security_http_digest_optional.py ....                         [ 42%]
-tests/test_security_oauth2.py .....FFF..                                 [ 43%]
+tests/test_security_oauth2.py ..........                                 [ 43%]
 tests/test_security_oauth2_authorization_code_bearer.py ...F.            [ 43%]
 tests/test_security_oauth2_authorization_code_bearer_description.py .... [ 43%]
                                                                          [ 43%]
@@ -208,8 +208,8 @@ tests/test_security_oauth2_authorization_code_bearer_scopes_openapi.py . [ 43%]
 .....                                                                    [ 43%]
 tests/test_security_oauth2_authorization_code_bearer_scopes_openapi_simple.py . [ 43%]
 .                                                                        [ 43%]
-tests/test_security_oauth2_optional.py .....FFF..                        [ 43%]
-tests/test_security_oauth2_optional_description.py .....FFF..            [ 44%]
+tests/test_security_oauth2_optional.py ..........                        [ 43%]
+tests/test_security_oauth2_optional_description.py ..........            [ 44%]
 tests/test_security_oauth2_password_bearer_optional.py ....              [ 44%]
 tests/test_security_oauth2_password_bearer_optional_description.py ....  [ 44%]
 tests/test_security_openid_connect.py ....                               [ 44%]
@@ -363,11 +363,11 @@ tests/test_tutorial/test_handling_errors/test_tutorial004.py ....        [ 67%]
 tests/test_tutorial/test_handling_errors/test_tutorial005.py ...         [ 67%]
 tests/test_tutorial/test_handling_errors/test_tutorial006.py ....        [ 67%]
 tests/test_tutorial/test_header_param_models/test_tutorial001.py ....... [ 67%]
-.FEFEFEFE........                                                        [ 68%]
+.............                                                            [ 68%]
 tests/test_tutorial/test_header_param_models/test_tutorial002.py ....... [ 68%]
-.FEFEFEFE........                                                        [ 68%]
+.............                                                            [ 68%]
 tests/test_tutorial/test_header_param_models/test_tutorial003.py ....FFF [ 68%]
-F....FEFEFEFE........                                                    [ 69%]
+F................                                                        [ 69%]
 tests/test_tutorial/test_header_params/test_tutorial001.py ............. [ 69%]
 ...                                                                      [ 69%]
 tests/test_tutorial/test_header_params/test_tutorial002.py ............. [ 70%]
@@ -578,43 +578,6 @@ tests/test_wrapped_method_forward_reference.py .                         [ 99%]
 tests/test_ws_dependencies.py ...                                        [ 99%]
 tests/test_ws_router.py ............                                     [100%]
 
-==================================== ERRORS ====================================
-____ ERROR at teardown of test_header_param_model_invalid[tutorial001_py39] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-___ ERROR at teardown of test_header_param_model_invalid[tutorial001_py310] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial001_an_py39] ___
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial001_an_py310] __
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-____ ERROR at teardown of test_header_param_model_invalid[tutorial002_py39] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-___ ERROR at teardown of test_header_param_model_invalid[tutorial002_py310] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial002_an_py39] ___
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial002_an_py310] __
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-____ ERROR at teardown of test_header_param_model_invalid[tutorial003_py39] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-___ ERROR at teardown of test_header_param_model_invalid[tutorial003_py310] ____
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial003_an_py39] ___
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
-__ ERROR at teardown of test_header_param_model_invalid[tutorial003_an_py310] __
-some snapshots in this test have incorrect values.
-If you just created this value with --inline-snapshot=create, the value is now created and you can ignore this message.
 =================================== FAILURES ===================================
 _____________________________ test_openapi_schema ______________________________
 
@@ -640,7 +603,7 @@ _________________ test_websocket_dependency_after_yield_broken _________________
 /mnt/e/temp_git/fastapi-rust/tests/test_dependency_after_yield_websockets.py:78: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-self = <astraapi._testclient.WebSocketTestSession object at 0x7fccf8330b90>
+self = <astraapi._testclient.WebSocketTestSession object at 0x7fd1140e8e10>
 
     def __enter__(self) -> "WebSocketTestSession":
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -668,9 +631,9 @@ E                   astraapi._websocket.WebSocketDisconnect: WebSocket disconnec
 
 astraapi/_testclient.py:60: WebSocketDisconnect
 ------------------------------ Captured log call -------------------------------
-ERROR    astraapi:_cpp_server.py:2418 Unhandled exception in WebSocket endpoint
+ERROR    astraapi:_cpp_server.py:2465 Unhandled exception in WebSocket endpoint
 Traceback (most recent call last):
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_cpp_server.py", line 2405, in _handle_websocket
+  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_cpp_server.py", line 2452, in _handle_websocket
     await _dispatch(ws.scope, ws.receive, ws.send)
   File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_app_base.py", line 134, in __call__
     await self.router(scope, receive, send)
@@ -804,7 +767,7 @@ The above exception was the direct cause of the following exception:
 
 /mnt/e/temp_git/fastapi-rust/tests/test_extra_routes.py:81: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:462: in options
+astraapi/_testclient.py:480: in options
     resp = self._client.options(url, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .venv/lib/python3.14/site-packages/httpx/_client.py:1082: in options
@@ -858,7 +821,7 @@ E           httpx.RemoteProtocolError: illegal status line: bytearray(b'nullHTTP
 .venv/lib/python3.14/site-packages/httpx/_transports/default.py:118: RemoteProtocolError
 ___________________________ test_validator_is_cloned ___________________________
 
-client = <astraapi._testclient.TestClient object at 0x7fcccc543850>
+client = <astraapi._testclient.TestClient object at 0x7fd10c16b750>
 
 >   ???
 E   Failed: DID NOT RAISE <class 'astraapi.exceptions.ResponseValidationError'>
@@ -871,7 +834,7 @@ _________________________ test_value_extracting_by_ws __________________________
 /mnt/e/temp_git/fastapi-rust/tests/test_http_connection_injection.py:38: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-self = <astraapi._testclient.WebSocketTestSession object at 0x7fcccc40f250>
+self = <astraapi._testclient.WebSocketTestSession object at 0x7fd0e4723150>
 
     def __enter__(self) -> "WebSocketTestSession":
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -899,9 +862,9 @@ E                   astraapi._websocket.WebSocketDisconnect: WebSocket disconnec
 
 astraapi/_testclient.py:60: WebSocketDisconnect
 ------------------------------ Captured log call -------------------------------
-ERROR    astraapi:_cpp_server.py:2418 Unhandled exception in WebSocket endpoint
+ERROR    astraapi:_cpp_server.py:2465 Unhandled exception in WebSocket endpoint
 Traceback (most recent call last):
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_cpp_server.py", line 2405, in _handle_websocket
+  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_cpp_server.py", line 2452, in _handle_websocket
     await _dispatch(ws.scope, ws.receive, ws.send)
   File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_app_base.py", line 134, in __call__
     await self.router(scope, receive, send)
@@ -944,11 +907,11 @@ _________________________ test_cookie_pass_extra_list __________________________
 
 /mnt/e/temp_git/fastapi-rust/tests/test_query_cookie_header_model_extra_params.py:101: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:422: in get
+astraapi/_testclient.py:440: in get
     self._apply_cookies()
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-self = <astraapi._testclient.TestClient object at 0x7fcca83bdb50>
+self = <astraapi._testclient.TestClient object at 0x7fd0c458da50>
 
     def _apply_cookies(self) -> None:
         """Sync instance cookies to the underlying httpx client."""
@@ -957,39 +920,7 @@ self = <astraapi._testclient.TestClient object at 0x7fcca83bdb50>
                                ^^^^^^^^^^^^^^^^^^
 E           AttributeError: 'list' object has no attribute 'items'
 
-astraapi/_testclient.py:415: AttributeError
-___________________________ test_cookie_is_set_once ____________________________
-
->   ???
-
-/mnt/e/temp_git/fastapi-rust/tests/test_repeated_cookie_headers.py:33: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-self = Headers({'content-type': 'application/json', 'content-length': '10', 'connection': 'keep-alive'})
-key = 'set-cookie'
-
-    def __getitem__(self, key: str) -> str:
-        """
-        Return a single header value.
-    
-        If there are multiple headers with the same key, then we concatenate
-        them with commas. See: https://tools.ietf.org/html/rfc7230#section-3.2.2
-        """
-        normalized_key = key.lower().encode(self.encoding)
-    
-        items = [
-            header_value.decode(self.encoding)
-            for _, header_key, header_value in self._list
-            if header_key == normalized_key
-        ]
-    
-        if items:
-            return ", ".join(items)
-    
->       raise KeyError(key)
-E       KeyError: 'set-cookie'
-
-.venv/lib/python3.14/site-packages/httpx/_models.py:302: KeyError
+astraapi/_testclient.py:433: AttributeError
 _____________________________ test_get_parameters ______________________________
 
 >   ???
@@ -1001,515 +932,6 @@ E     {'query': 'test_path'} != {'query': 'test_query'}
 E     Use -v to get more diff
 
 /mnt/e/temp_git/fastapi-rust/tests/test_repeated_parameter_alias.py:21: AssertionError
-__________________ test_list_alias_by_name[/list-bytes-alias] __________________
-
-path = '/list-bytes-alias'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:161: AssertionError
-_______________ test_list_alias_by_name[/list-uploadfile-alias] ________________
-
-path = '/list-uploadfile-alias'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:161: AssertionError
-_________________ test_list_alias_by_alias[/list-bytes-alias] __________________
-
-path = '/list-bytes-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:184: AssertionError
-_______________ test_list_alias_by_alias[/list-uploadfile-alias] _______________
-
-path = '/list-uploadfile-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:184: AssertionError
-_______ test_list_validation_alias_by_name[/list-bytes-validation-alias] _______
-
-path = '/list-bytes-validation-alias'
-
->   ???
-E   AssertionError: {"file_size":[5,5]}
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:270: AssertionError
-____ test_list_validation_alias_by_name[/list-uploadfile-validation-alias] _____
-
-path = '/list-uploadfile-validation-alias'
-
->   ???
-E   AssertionError: {"file_size":[5,5]}
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:270: AssertionError
-_ test_list_validation_alias_by_validation_alias[/list-bytes-validation-alias] _
-
-path = '/list-bytes-validation-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_val_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:296: AssertionError
-_ test_list_validation_alias_by_validation_alias[/list-uploadfile-validation-alias] _
-
-path = '/list-uploadfile-validation-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_val_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:296: AssertionError
-_ test_list_alias_and_validation_alias_by_name[/list-bytes-alias-and-validation-alias] _
-
-path = '/list-bytes-alias-and-validation-alias'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:387: AssertionError
-_ test_list_alias_and_validation_alias_by_name[/list-uploadfile-alias-and-validation-alias] _
-
-path = '/list-uploadfile-alias-and-validation-alias'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:387: AssertionError
-_ test_list_alias_and_validation_alias_by_validation_alias[/list-bytes-alias-and-validation-alias] _
-
-path = '/list-bytes-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_val_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:440: AssertionError
-_ test_list_alias_and_validation_alias_by_validation_alias[/list-uploadfile-alias-and-validation-alias] _
-
-path = '/list-uploadfile-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_val_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_list.py:440: AssertionError
-______________ test_optional_alias_by_name[/optional-bytes-alias] ______________
-
-path = '/optional-bytes-alias'
-
->   ???
-E   AssertionError: assert {'file_size': 5} == {'file_size': None}
-E     
-E     Differing items:
-E     {'file_size': 5} != {'file_size': None}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:148: AssertionError
-___________ test_optional_alias_by_name[/optional-uploadfile-alias] ____________
-
-path = '/optional-uploadfile-alias'
-
->   ???
-E   AssertionError: assert {'file_size': 5} == {'file_size': None}
-E     
-E     Differing items:
-E     {'file_size': 5} != {'file_size': None}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:148: AssertionError
-___________ test_optional_alias_by_alias[/optional-uploadfile-alias] ___________
-
-path = '/optional-uploadfile-alias'
-
->   ???
-E   AssertionError: assert {'file_size': None} == {'file_size': 5}
-E     
-E     Differing items:
-E     {'file_size': None} != {'file_size': 5}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:162: AssertionError
-___ test_optional_validation_alias_by_name[/optional-bytes-validation-alias] ___
-
-path = '/optional-bytes-validation-alias'
-
->   ???
-E   AssertionError: assert {'file_size': 5} == {'file_size': None}
-E     
-E     Differing items:
-E     {'file_size': 5} != {'file_size': None}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:239: AssertionError
-_ test_optional_validation_alias_by_name[/optional-uploadfile-validation-alias] _
-
-path = '/optional-uploadfile-validation-alias'
-
->   ???
-E   AssertionError: assert {'file_size': 5} == {'file_size': None}
-E     
-E     Differing items:
-E     {'file_size': 5} != {'file_size': None}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:239: AssertionError
-_ test_optional_validation_alias_by_validation_alias[/optional-uploadfile-validation-alias] _
-
-path = '/optional-uploadfile-validation-alias'
-
->   ???
-E   AssertionError: assert {'file_size': None} == {'file_size': 5}
-E     
-E     Differing items:
-E     {'file_size': None} != {'file_size': 5}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:253: AssertionError
-_ test_optional_alias_and_validation_alias_by_name[/optional-bytes-alias-and-validation-alias] _
-
-path = '/optional-bytes-alias-and-validation-alias'
-
->   ???
-E   AssertionError: assert {'file_size': 5} == {'file_size': None}
-E     
-E     Differing items:
-E     {'file_size': 5} != {'file_size': None}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:335: AssertionError
-_ test_optional_alias_and_validation_alias_by_name[/optional-uploadfile-alias-and-validation-alias] _
-
-path = '/optional-uploadfile-alias-and-validation-alias'
-
->   ???
-E   AssertionError: assert {'file_size': 5} == {'file_size': None}
-E     
-E     Differing items:
-E     {'file_size': 5} != {'file_size': None}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:335: AssertionError
-_ test_optional_alias_and_validation_alias_by_alias[/optional-bytes-alias-and-validation-alias] _
-
-path = '/optional-bytes-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:348: AssertionError
-_ test_optional_alias_and_validation_alias_by_alias[/optional-uploadfile-alias-and-validation-alias] _
-
-path = '/optional-uploadfile-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:348: AssertionError
-_ test_optional_alias_and_validation_alias_by_validation_alias[/optional-uploadfile-alias-and-validation-alias] _
-
-path = '/optional-uploadfile-alias-and-validation-alias'
-
->   ???
-E   AssertionError: assert {'file_size': None} == {'file_size': 5}
-E     
-E     Differing items:
-E     {'file_size': None} != {'file_size': 5}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional.py:363: AssertionError
-________________ test_optional_list[/optional-list-uploadfile] _________________
-
-path = '/optional-list-uploadfile'
-
->   ???
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:80: AssertionError
-_________ test_optional_list_alias_by_name[/optional-list-bytes-alias] _________
-
-path = '/optional-list-bytes-alias'
-
->   ???
-E   AssertionError: assert {'file_size': [5, 5]} == {'file_size': None}
-E     
-E     Differing items:
-E     {'file_size': [5, 5]} != {'file_size': None}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:156: AssertionError
-______ test_optional_list_alias_by_name[/optional-list-uploadfile-alias] _______
-
-path = '/optional-list-uploadfile-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:155: AssertionError
-______ test_optional_list_alias_by_alias[/optional-list-uploadfile-alias] ______
-
-path = '/optional-list-uploadfile-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:169: AssertionError
-_ test_optional_validation_alias_by_name[/optional-list-bytes-validation-alias] _
-
-path = '/optional-list-bytes-validation-alias'
-
->   ???
-E   AssertionError: assert {'file_size': [5, 5]} == {'file_size': None}
-E     
-E     Differing items:
-E     {'file_size': [5, 5]} != {'file_size': None}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:247: AssertionError
-_ test_optional_validation_alias_by_name[/optional-list-uploadfile-validation-alias] _
-
-path = '/optional-list-uploadfile-validation-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:246: AssertionError
-_ test_optional_validation_alias_by_validation_alias[/optional-list-uploadfile-validation-alias] _
-
-path = '/optional-list-uploadfile-validation-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:262: AssertionError
-_ test_optional_list_alias_and_validation_alias_by_name[/optional-list-bytes-alias-and-validation-alias] _
-
-path = '/optional-list-bytes-alias-and-validation-alias'
-
->   ???
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:342: AssertionError
-_ test_optional_list_alias_and_validation_alias_by_name[/optional-list-uploadfile-alias-and-validation-alias] _
-
-path = '/optional-list-uploadfile-alias-and-validation-alias'
-
->   ???
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:342: AssertionError
-_ test_optional_list_alias_and_validation_alias_by_alias[/optional-list-bytes-alias-and-validation-alias] _
-
-path = '/optional-list-bytes-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:356: AssertionError
-_ test_optional_list_alias_and_validation_alias_by_alias[/optional-list-uploadfile-alias-and-validation-alias] _
-
-path = '/optional-list-uploadfile-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:356: AssertionError
-_ test_optional_list_alias_and_validation_alias_by_validation_alias[/optional-list-uploadfile-alias-and-validation-alias] _
-
-path = '/optional-list-uploadfile-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_optional_list.py:372: AssertionError
-______________ test_required_alias_by_name[/required-bytes-alias] ______________
-
-path = '/required-bytes-alias'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:153: AssertionError
-___________ test_required_alias_by_name[/required-uploadfile-alias] ____________
-
-path = '/required-uploadfile-alias'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:153: AssertionError
-_____________ test_required_alias_by_alias[/required-bytes-alias] ______________
-
-path = '/required-bytes-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:176: AssertionError
-___________ test_required_alias_by_alias[/required-uploadfile-alias] ___________
-
-path = '/required-uploadfile-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:176: AssertionError
-___ test_required_validation_alias_by_name[/required-bytes-validation-alias] ___
-
-path = '/required-bytes-validation-alias'
-
->   ???
-E   AssertionError: {"file_size":5}
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:264: AssertionError
-_ test_required_validation_alias_by_name[/required-uploadfile-validation-alias] _
-
-path = '/required-uploadfile-validation-alias'
-
->   ???
-E   AssertionError: {"file_size":5}
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:264: AssertionError
-_ test_required_validation_alias_by_validation_alias[/required-bytes-validation-alias] _
-
-path = '/required-bytes-validation-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_val_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:288: AssertionError
-_ test_required_validation_alias_by_validation_alias[/required-uploadfile-validation-alias] _
-
-path = '/required-uploadfile-validation-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_val_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:288: AssertionError
-_ test_required_alias_and_validation_alias_by_name[/required-bytes-alias-and-validation-alias] _
-
-path = '/required-bytes-alias-and-validation-alias'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:377: AssertionError
-_ test_required_alias_and_validation_alias_by_name[/required-uploadfile-alias-and-validation-alias] _
-
-path = '/required-uploadfile-alias-and-validation-alias'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:377: AssertionError
-_ test_required_alias_and_validation_alias_by_validation_alias[/required-bytes-alias-and-validation-alias] _
-
-path = '/required-bytes-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_val_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:428: AssertionError
-_ test_required_alias_and_validation_alias_by_validation_alias[/required-uploadfile-alias-and-validation-alias] _
-
-path = '/required-uploadfile-alias-and-validation-alias'
-
->   ???
-E   AssertionError: {"detail":[{"type":"missing","loc":["body","p_val_alias"],"msg":"Field required","input":null}]}
-E   assert 422 == 200
-E    +  where 422 = <Response [422 Unprocessable Entity]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_file/test_required.py:428: AssertionError
-_ test_optional_list_alias_and_validation_alias_by_alias[/optional-list-alias-and-validation-alias] _
-
-path = '/optional-list-alias-and-validation-alias'
-
->   ???
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_form/test_optional_list.py:340: AssertionError
-_ test_optional_alias_and_validation_alias_by_alias[/optional-alias-and-validation-alias] _
-
-path = '/optional-alias-and-validation-alias'
-
->   ???
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_request_params/test_form/test_optional_str.py:322: AssertionError
-______________________ test_router_nested_lifespan_state _______________________
-
-state = State(app_startup=True, app_shutdown=True, router_startup=True, router_shutdown=True, sub_router_startup=True, sub_router_shutdown=True)
-
->   ???
-E   AssertionError: {"detail":"Internal Server Error"}
-E   assert 500 == 200
-E    +  where 500 = <Response [500 Internal Server Error]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_router_events.py:164: AssertionError
 ___________________ test_security_http_base_with_whitespaces ___________________
 
     @contextlib.contextmanager
@@ -1563,7 +985,7 @@ The above exception was the direct cause of the following exception:
 
 /mnt/e/temp_git/fastapi-rust/tests/test_security_http_base.py:25: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:423: in get
+astraapi/_testclient.py:441: in get
     resp = self._client.get(url, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .venv/lib/python3.14/site-packages/httpx/_client.py:1053: in get
@@ -1615,49 +1037,6 @@ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 E           httpx.LocalProtocolError: Illegal header value b'Other  foobar '
 
 .venv/lib/python3.14/site-packages/httpx/_transports/default.py:118: LocalProtocolError
-_________________ test_security_http_basic_invalid_credentials _________________
-
->   ???
-E   AssertionError: {"msg":"Create an account first"}
-E   assert 200 == 401
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_http_basic_optional.py:39: AssertionError
-________________ test_security_http_basic_non_basic_credentials ________________
-
->   ???
-E   AssertionError: {"msg":"Create an account first"}
-E   assert 200 == 401
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_http_basic_optional.py:48: AssertionError
-___________ test_strict_login_incorrect_grant_type[incorrect value] ____________
-
-grant_type = 'incorrect'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2.py:118: AssertionError
-_________ test_strict_login_incorrect_grant_type[password with suffix] _________
-
-grant_type = 'passwordblah'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2.py:118: AssertionError
-_________ test_strict_login_incorrect_grant_type[password with prefix] _________
-
-grant_type = 'blahpassword'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2.py:118: AssertionError
 _________________________ test_token_with_whitespaces __________________________
 
     @contextlib.contextmanager
@@ -1711,7 +1090,7 @@ The above exception was the direct cause of the following exception:
 
 /mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2_authorization_code_bearer.py:41: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:423: in get
+astraapi/_testclient.py:441: in get
     resp = self._client.get(url, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 .venv/lib/python3.14/site-packages/httpx/_client.py:1053: in get
@@ -1763,63 +1142,9 @@ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 E           httpx.LocalProtocolError: Illegal header value b'Bearer  testtoken '
 
 .venv/lib/python3.14/site-packages/httpx/_transports/default.py:118: LocalProtocolError
-___________ test_strict_login_incorrect_grant_type[incorrect value] ____________
-
-grant_type = 'incorrect'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2_optional.py:121: AssertionError
-_________ test_strict_login_incorrect_grant_type[password with suffix] _________
-
-grant_type = 'passwordblah'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2_optional.py:121: AssertionError
-_________ test_strict_login_incorrect_grant_type[password with prefix] _________
-
-grant_type = 'blahpassword'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2_optional.py:121: AssertionError
-___________ test_strict_login_incorrect_grant_type[incorrect value] ____________
-
-grant_type = 'incorrect'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2_optional_description.py:122: AssertionError
-_________ test_strict_login_incorrect_grant_type[password with suffix] _________
-
-grant_type = 'passwordblah'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2_optional_description.py:122: AssertionError
-_________ test_strict_login_incorrect_grant_type[password with prefix] _________
-
-grant_type = 'blahpassword'
-
->   ???
-E   assert 200 == 422
-E    +  where 200 = <Response [200 OK]>.status_code
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2_optional_description.py:122: AssertionError
 _________________ test_security_scopes_sub_dependency_caching __________________
 
-client = <astraapi._testclient.TestClient object at 0x7fcc38610c50>
+client = <astraapi._testclient.TestClient object at 0x7fd064550e50>
 call_counts = {'get_current_user': 2, 'get_db_session': 1, 'get_user_items': 1, 'get_user_me': 2}
 
 >   ???
@@ -1831,105 +1156,9 @@ E     {'user_me': {'current_user': {'db_session': 'db_session_1', 'scopes': ['it
 E     Use -v to get more diff
 
 /mnt/e/temp_git/fastapi-rust/tests/test_security_scopes_sub_dependency.py:87: AssertionError
-______________ test_header_param_model_invalid[tutorial001_py39] _______________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc690f2a50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial001.py:62: AssertionError
-______________ test_header_param_model_invalid[tutorial001_py310] ______________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc690f3150>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial001.py:62: AssertionError
-_____________ test_header_param_model_invalid[tutorial001_an_py39] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc690f3750>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial001.py:62: AssertionError
-____________ test_header_param_model_invalid[tutorial001_an_py310] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc690f3d50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial001.py:62: AssertionError
-______________ test_header_param_model_invalid[tutorial002_py39] _______________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc3850aa50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial002.py:63: AssertionError
-______________ test_header_param_model_invalid[tutorial002_py310] ______________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc3850b050>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial002.py:63: AssertionError
-_____________ test_header_param_model_invalid[tutorial002_an_py39] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc3850b650>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial002.py:63: AssertionError
-____________ test_header_param_model_invalid[tutorial002_an_py310] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc3850bc50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial002.py:63: AssertionError
 ___________ test_header_param_model_no_underscore[tutorial003_py39] ____________
 
-client = <astraapi._testclient.TestClient object at 0x7fcc38586850>
+client = <astraapi._testclient.TestClient object at 0x7fd064088b50>
 
 >   ???
 E   assert 200 == 422
@@ -1938,7 +1167,7 @@ E    +  where 200 = <Response [200 OK]>.status_code
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:58: AssertionError
 ___________ test_header_param_model_no_underscore[tutorial003_py310] ___________
 
-client = <astraapi._testclient.TestClient object at 0x7fcc38586e50>
+client = <astraapi._testclient.TestClient object at 0x7fd064089150>
 
 >   ???
 E   assert 200 == 422
@@ -1947,7 +1176,7 @@ E    +  where 200 = <Response [200 OK]>.status_code
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:58: AssertionError
 __________ test_header_param_model_no_underscore[tutorial003_an_py39] __________
 
-client = <astraapi._testclient.TestClient object at 0x7fcc38587350>
+client = <astraapi._testclient.TestClient object at 0x7fd064089650>
 
 >   ???
 E   assert 200 == 422
@@ -1956,130 +1185,82 @@ E    +  where 200 = <Response [200 OK]>.status_code
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:58: AssertionError
 _________ test_header_param_model_no_underscore[tutorial003_an_py310] __________
 
-client = <astraapi._testclient.TestClient object at 0x7fcc38587850>
+client = <astraapi._testclient.TestClient object at 0x7fd064089b50>
 
 >   ???
 E   assert 200 == 422
 E    +  where 200 = <Response [200 OK]>.status_code
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:58: AssertionError
-______________ test_header_param_model_invalid[tutorial003_py39] _______________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc38587d50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:88: AssertionError
-______________ test_header_param_model_invalid[tutorial003_py310] ______________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc38408450>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:88: AssertionError
-_____________ test_header_param_model_invalid[tutorial003_an_py39] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc38408a50>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:88: AssertionError
-____________ test_header_param_model_invalid[tutorial003_an_py310] _____________
-
-client = <astraapi._testclient.TestClient object at 0x7fcc38409050>
-
->   ???
-E   AssertionError: assert {'detail': [{...: 'missing'}]} == {'detail': [{...: 'missing'}]}
-E     
-E     Differing items:
-E     {'detail': [{'input': {'host': 'testserver'}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]} != {'detail': [{'input': {'host': 'testserver', 'x_tag': []}, 'loc': ['header', 'save_data'], 'msg': 'Field required', 'type': 'missing'}]}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_header_param_models/test_tutorial003.py:88: AssertionError
 _________________ test_websocket_with_cookie[tutorial002_py39] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c050>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc8563b60>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...: fakesession'
 E     
 E     - Session cookie or query token value is: fakesession
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcbac120250>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcfc839d0c0>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:40: AssertionError
 ________________ test_websocket_with_cookie[tutorial002_py310] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c830>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc83a0440>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...: fakesession'
 E     
 E     - Session cookie or query token value is: fakesession
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcbac122610>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcfc839f480>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:40: AssertionError
 _________________ test_websocket_with_header[tutorial002_py39] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c050>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc8563b60>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...s: some-token'
 E     
 E     - Session cookie or query token value is: some-token
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcbac120250>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcfc839d0c0>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:58: AssertionError
 ________________ test_websocket_with_header[tutorial002_py310] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c830>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc83a0440>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...s: some-token'
 E     
 E     - Session cookie or query token value is: some-token
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcbac122610>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcfc839f480>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:58: AssertionError
 ____________ test_websocket_with_header_and_query[tutorial002_py39] ____________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c050>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc8563b60>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...s: some-token'
 E     
 E     - Session cookie or query token value is: some-token
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcbac120250>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcfc839d0c0>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:76: AssertionError
 ___________ test_websocket_with_header_and_query[tutorial002_py310] ____________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c830>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc83a0440>
 
 >   ???
 E   AssertionError: assert 'Session cook..., scope=None)' == 'Session cook...s: some-token'
 E     
 E     - Session cookie or query token value is: some-token
-E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcbac122610>, use_cache=True, scope=None)
+E     + Session cookie or query token value is: Depends(dependency=<function get_cookie_or_token at 0x7fcfc839f480>, use_cache=True, scope=None)
 
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:76: AssertionError
 _______________ test_websocket_no_credentials[tutorial002_py39] ________________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c050>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc8563b60>
 
 >   ???
 E   Failed: did not raise WebSocketDisconnect on __enter__
@@ -2087,7 +1268,7 @@ E   Failed: did not raise WebSocketDisconnect on __enter__
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:95: Failed
 _______________ test_websocket_no_credentials[tutorial002_py310] _______________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c830>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc83a0440>
 
 >   ???
 E   Failed: did not raise WebSocketDisconnect on __enter__
@@ -2095,7 +1276,7 @@ E   Failed: did not raise WebSocketDisconnect on __enter__
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:95: Failed
 ________________ test_websocket_invalid_data[tutorial002_py39] _________________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c050>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc8563b60>
 
 >   ???
 E   Failed: did not raise WebSocketDisconnect on __enter__
@@ -2103,7 +1284,7 @@ E   Failed: did not raise WebSocketDisconnect on __enter__
 /mnt/e/temp_git/fastapi-rust/tests/test_tutorial/test_websockets/test_tutorial002.py:104: Failed
 ________________ test_websocket_invalid_data[tutorial002_py310] ________________
 
-app = <astraapi.applications.AstraAPI object at 0x7fcbac11c830>
+app = <astraapi.applications.AstraAPI object at 0x7fcfc83a0440>
 
 >   ???
 E   Failed: did not raise WebSocketDisconnect on __enter__
@@ -2119,7 +1300,7 @@ ___________ test_response_validation_error_includes_endpoint_context ___________
 
 >   ???
 E   assert None is not None
-E    +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7fcd02cd5e80>.exception
+E    +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7fd1160d1fd0>.exception
 
 /mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:107: AssertionError
 __________ test_websocket_validation_error_includes_endpoint_context ___________
@@ -2129,9 +1310,9 @@ E   assert 'websocket_endpoint' in "1 validation error:\n  {'type': 'int_parsing
 
 /mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:123: AssertionError
 ------------------------------ Captured log call -------------------------------
-ERROR    astraapi:_cpp_server.py:2418 Unhandled exception in WebSocket endpoint
+ERROR    astraapi:_cpp_server.py:2465 Unhandled exception in WebSocket endpoint
 Traceback (most recent call last):
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_cpp_server.py", line 2405, in _handle_websocket
+  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_cpp_server.py", line 2452, in _handle_websocket
     await _dispatch(ws.scope, ws.receive, ws.send)
   File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_app_base.py", line 134, in __call__
     await self.router(scope, receive, send)
@@ -2169,7 +1350,7 @@ _______ test_subapp_websocket_validation_error_includes_endpoint_context _______
 
 >   ???
 E   assert None is not None
-E    +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7fcd02cd5e80>.exception
+E    +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7fd1160d1fd0>.exception
 
 /mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:148: AssertionError
 _____________________________ test_openapi_schema ______________________________
@@ -2178,22 +1359,22 @@ _____________________________ test_openapi_schema ______________________________
 
 /mnt/e/temp_git/fastapi-rust/tests/test_webhooks_security.py:39: 
 _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:424: in get
+astraapi/_testclient.py:442: in get
     self._check_exc()
-astraapi/_testclient.py:405: in _check_exc
+astraapi/_testclient.py:423: in _check_exc
     raise exc
-astraapi/_cpp_server.py:1955: in _dispatch_exception
+astraapi/_cpp_server.py:1966: in _dispatch_exception
     resp = await handler(None, exc)
            ^^^^^^^^^^^^^^^^^^^^^^^^
 /mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:43: in response_validation_handler
     ???
-astraapi/_cpp_server.py:2028: in _handle_async
+astraapi/_cpp_server.py:2072: in _handle_async
     raw = await _drive_coro(coro, first_yield)
           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-astraapi/_cpp_server.py:1141: in _drive_coro
+astraapi/_cpp_server.py:1152: in _drive_coro
     next_yield = coro.send(result)
                  ^^^^^^^^^^^^^^^^^
-astraapi/applications.py:2681: in _mount_endpoint
+astraapi/applications.py:2787: in _mount_endpoint
     await _app(_scope, _receive, _send)
 astraapi/_app_base.py:134: in __call__
     await self.router(scope, receive, send)
@@ -2266,88 +1447,14 @@ FAILED tests/test_filter_pydantic_sub_model_pv2.py::test_validator_is_cloned
 FAILED tests/test_http_connection_injection.py::test_value_extracting_by_ws
 FAILED tests/test_operations_signatures.py::test_signatures_consistency - ass...
 FAILED tests/test_query_cookie_header_model_extra_params.py::test_cookie_pass_extra_list
-FAILED tests/test_repeated_cookie_headers.py::test_cookie_is_set_once - KeyEr...
 FAILED tests/test_repeated_parameter_alias.py::test_get_parameters - Assertio...
-FAILED tests/test_request_params/test_file/test_list.py::test_list_alias_by_name[/list-bytes-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_alias_by_name[/list-uploadfile-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_alias_by_alias[/list-bytes-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_alias_by_alias[/list-uploadfile-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_validation_alias_by_name[/list-bytes-validation-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_validation_alias_by_name[/list-uploadfile-validation-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_validation_alias_by_validation_alias[/list-bytes-validation-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_validation_alias_by_validation_alias[/list-uploadfile-validation-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_alias_and_validation_alias_by_name[/list-bytes-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_alias_and_validation_alias_by_name[/list-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_alias_and_validation_alias_by_validation_alias[/list-bytes-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_list.py::test_list_alias_and_validation_alias_by_validation_alias[/list-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_alias_by_name[/optional-bytes-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_alias_by_name[/optional-uploadfile-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_alias_by_alias[/optional-uploadfile-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_validation_alias_by_name[/optional-bytes-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_validation_alias_by_name[/optional-uploadfile-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_validation_alias_by_validation_alias[/optional-uploadfile-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_alias_and_validation_alias_by_name[/optional-bytes-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_alias_and_validation_alias_by_name[/optional-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_alias_and_validation_alias_by_alias[/optional-bytes-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_alias_and_validation_alias_by_alias[/optional-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional.py::test_optional_alias_and_validation_alias_by_validation_alias[/optional-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list[/optional-list-uploadfile]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list_alias_by_name[/optional-list-bytes-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list_alias_by_name[/optional-list-uploadfile-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list_alias_by_alias[/optional-list-uploadfile-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_validation_alias_by_name[/optional-list-bytes-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_validation_alias_by_name[/optional-list-uploadfile-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_validation_alias_by_validation_alias[/optional-list-uploadfile-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list_alias_and_validation_alias_by_name[/optional-list-bytes-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list_alias_and_validation_alias_by_name[/optional-list-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list_alias_and_validation_alias_by_alias[/optional-list-bytes-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list_alias_and_validation_alias_by_alias[/optional-list-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_optional_list.py::test_optional_list_alias_and_validation_alias_by_validation_alias[/optional-list-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_alias_by_name[/required-bytes-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_alias_by_name[/required-uploadfile-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_alias_by_alias[/required-bytes-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_alias_by_alias[/required-uploadfile-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_validation_alias_by_name[/required-bytes-validation-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_validation_alias_by_name[/required-uploadfile-validation-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_validation_alias_by_validation_alias[/required-bytes-validation-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_validation_alias_by_validation_alias[/required-uploadfile-validation-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_alias_and_validation_alias_by_name[/required-bytes-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_alias_and_validation_alias_by_name[/required-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_alias_and_validation_alias_by_validation_alias[/required-bytes-alias-and-validation-alias]
-FAILED tests/test_request_params/test_file/test_required.py::test_required_alias_and_validation_alias_by_validation_alias[/required-uploadfile-alias-and-validation-alias]
-FAILED tests/test_request_params/test_form/test_optional_list.py::test_optional_list_alias_and_validation_alias_by_alias[/optional-list-alias-and-validation-alias]
-FAILED tests/test_request_params/test_form/test_optional_str.py::test_optional_alias_and_validation_alias_by_alias[/optional-alias-and-validation-alias]
-FAILED tests/test_router_events.py::test_router_nested_lifespan_state - Asser...
 FAILED tests/test_security_http_base.py::test_security_http_base_with_whitespaces
-FAILED tests/test_security_http_basic_optional.py::test_security_http_basic_invalid_credentials
-FAILED tests/test_security_http_basic_optional.py::test_security_http_basic_non_basic_credentials
-FAILED tests/test_security_oauth2.py::test_strict_login_incorrect_grant_type[incorrect value]
-FAILED tests/test_security_oauth2.py::test_strict_login_incorrect_grant_type[password with suffix]
-FAILED tests/test_security_oauth2.py::test_strict_login_incorrect_grant_type[password with prefix]
 FAILED tests/test_security_oauth2_authorization_code_bearer.py::test_token_with_whitespaces
-FAILED tests/test_security_oauth2_optional.py::test_strict_login_incorrect_grant_type[incorrect value]
-FAILED tests/test_security_oauth2_optional.py::test_strict_login_incorrect_grant_type[password with suffix]
-FAILED tests/test_security_oauth2_optional.py::test_strict_login_incorrect_grant_type[password with prefix]
-FAILED tests/test_security_oauth2_optional_description.py::test_strict_login_incorrect_grant_type[incorrect value]
-FAILED tests/test_security_oauth2_optional_description.py::test_strict_login_incorrect_grant_type[password with suffix]
-FAILED tests/test_security_oauth2_optional_description.py::test_strict_login_incorrect_grant_type[password with prefix]
 FAILED tests/test_security_scopes_sub_dependency.py::test_security_scopes_sub_dependency_caching
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_an_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_an_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_an_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_an_py310]
 FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_no_underscore[tutorial003_py39]
 FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_no_underscore[tutorial003_py310]
 FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_no_underscore[tutorial003_an_py39]
 FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_no_underscore[tutorial003_an_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_py310]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_an_py39]
-FAILED tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_an_py310]
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_with_cookie[tutorial002_py39]
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_with_cookie[tutorial002_py310]
 FAILED tests/test_tutorial/test_websockets/test_tutorial002.py::test_websocket_with_header[tutorial002_py39]
@@ -2364,16 +1471,4 @@ FAILED tests/test_validation_error_context.py::test_websocket_validation_error_i
 FAILED tests/test_validation_error_context.py::test_subapp_request_validation_error_includes_endpoint_context
 FAILED tests/test_validation_error_context.py::test_subapp_websocket_validation_error_includes_endpoint_context
 FAILED tests/test_webhooks_security.py::test_openapi_schema - astraapi.except...
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_an_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial001.py::test_header_param_model_invalid[tutorial001_an_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_an_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial002.py::test_header_param_model_invalid[tutorial002_an_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_py310]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_an_py39]
-ERROR tests/test_tutorial/test_header_param_models/test_tutorial003.py::test_header_param_model_invalid[tutorial003_an_py310]
-= 114 failed, 3616 passed, 4 skipped, 9 xfailed, 12 errors in 220.36s (0:03:40) =
+====== 40 failed, 3690 passed, 4 skipped, 9 xfailed in 216.25s (0:03:36) =======

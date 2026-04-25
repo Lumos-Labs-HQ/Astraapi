@@ -365,8 +365,8 @@ _current_route: _ContextVar2 = _ContextVar2("_current_route", default=None)
 def _build_ws_app_map(app: Any) -> None:
     """Build endpoint->(app, route) map for all WebSocket routes."""
     global _ws_app_map, _full_app
-    _ws_app_map = {}
-    # Build middleware-wrapped app for WebSocket dispatch
+    # Don't clear — accumulate across apps (each server adds its routes)
+    # _ws_app_map persists so routes from previous servers remain accessible
     _full_app = app
     user_mw = getattr(app, "user_middleware", [])
     if user_mw:
@@ -392,7 +392,8 @@ def _build_ws_app_map(app: Any) -> None:
         routes = getattr(getattr(app, 'router', None), 'routes', []) or []
         for route in routes:
             if isinstance(route, (APIWebSocketRoute, _WebSocketRoute)):
-                _ws_app_map[id(route.endpoint)] = (route.app, route)
+                # Store (ws_app, route, endpoint_ref, full_app) — endpoint_ref prevents GC reuse
+                _ws_app_map[id(route.endpoint)] = (route.app, route, route.endpoint, _full_app)
     except Exception:
         pass
 
@@ -434,6 +435,17 @@ def _set_last_server_exception(exc: Exception) -> None:
     global _last_server_exception
     _last_server_exception = exc
     return exc
+
+
+# Lifespan state — populated by TestClient from lifespan context manager
+_lifespan_state: dict = {}
+
+def _set_lifespan_state(state: dict) -> None:
+    global _lifespan_state
+    _lifespan_state = dict(state) if state else {}
+
+def _get_lifespan_state() -> dict:
+    return _lifespan_state
 
 
 # ── Pydantic validation (initialized at import time) ─────────────────────────
@@ -1985,6 +1997,39 @@ class CppHttpProtocol(asyncio.Protocol):
                     transport.write(resp)
             return
         if isinstance(exc, RequestValidationError):
+            # Add endpoint context if missing
+            if not exc.endpoint_function:
+                try:
+                    _route = _current_route.get()
+                    if _route is None:
+                        # Try to find route from current path via app routes
+                        _path = _current_path.get()
+                        _method = _current_method.get() or 'GET'
+                        if _path:
+                            # Look up route from the app's route list
+                            try:
+                                from astraapi._routing_base import Match as _Match
+                                _scope = {"type": "http", "method": _method, "path": _path, "path_params": {}}
+                                for _r in getattr(_full_app, 'routes', []):
+                                    if hasattr(_r, 'matches'):
+                                        _m, _cs = _r.matches(_scope)
+                                        if _m == _Match.FULL:
+                                            _route = _r
+                                            break
+                            except Exception:
+                                pass
+                    if _route is not None:
+                        from astraapi.routing import _extract_endpoint_context
+                        _ctx = _extract_endpoint_context(_route.endpoint)
+                        if _ctx:
+                            exc.endpoint_function = _ctx.get('function')
+                            exc.endpoint_file = _ctx.get('file')
+                            exc.endpoint_line = _ctx.get('line')
+                            _method2 = _current_method.get() or 'GET'
+                            _path2 = _current_path.get() or '/'
+                            exc.endpoint_path = f"{_method2} {_path2}"
+                except Exception:
+                    pass
             try:
                 from astraapi._core_bridge import serialize_error_response
                 errors = [{k: v for k, v in e.items() if k != "url"} for e in exc.errors()]
@@ -2176,6 +2221,9 @@ class CppHttpProtocol(asyncio.Protocol):
                         # but signal that gen deps are already resolved (don't run _dep_solver again)
                         kwargs['__exit_stack__'] = exit_stack
                         kwargs['__gen_deps_ran__'] = True
+                    # Pass sub_response (headers set by deps) to _response_shim
+                    if len(solved) >= 4 and solved[3] is not None:
+                        kwargs['__sub_response__'] = solved[3]
                     kwargs.update(values)
             else:
                 exit_stack = None
@@ -2391,8 +2439,12 @@ class CppHttpProtocol(asyncio.Protocol):
         try:
             ep_id = id(endpoint)
             ws_entry = _ws_app_map.get(ep_id)
+            # Verify the stored endpoint is the same object (prevents GC address reuse)
+            if ws_entry is not None and ws_entry[2] is not endpoint:
+                ws_entry = None
             if ws_entry is not None:
-                ws_app, ws_route = ws_entry
+                ws_app, ws_route = ws_entry[0], ws_entry[1]
+                route_full_app = ws_entry[3] if len(ws_entry) > 3 else _full_app
                 ws.scope["route"] = ws_route
                 # Inject app exception handlers so wrap_app_handling_exceptions works
                 if "starlette.exception_handlers" not in ws.scope:
@@ -2400,8 +2452,8 @@ class CppHttpProtocol(asyncio.Protocol):
                     _status_h = {k: v for k, v in _exc_h.items() if isinstance(k, int)}
                     _cls_h = {k: v for k, v in _exc_h.items() if not isinstance(k, int)}
                     ws.scope["starlette.exception_handlers"] = (_cls_h, _status_h)
-                # Use middleware-wrapped stack if available, else direct ws_app
-                _dispatch = _full_app if (_full_app is not None and _full_app is not ws_route.app) else ws_app
+                # Use per-route full_app for dispatch (avoids cross-app pollution)
+                _dispatch = route_full_app if (route_full_app is not None and route_full_app is not ws_route.app) else ws_app
                 await _dispatch(ws.scope, ws.receive, ws.send)
             else:
                 kwargs = dict(path_params) if path_params else {}
@@ -2513,6 +2565,35 @@ async def _create_server(
     _type_handlers = {k: v for k, v in _exc_handlers_all.items()
                       if isinstance(k, type) and v not in _default_handlers}
     if _type_handlers and hasattr(core_app, 'set_type_exception_handlers'):
+        # Wrap RequestValidationError handler to inject endpoint context
+        from astraapi.exceptions import RequestValidationError as _RVE
+        if _RVE in _type_handlers:
+            _orig_rv_handler = _type_handlers[_RVE]
+            async def _rv_handler_with_ctx(request, exc, _orig=_orig_rv_handler):
+                if not exc.endpoint_function:
+                    try:
+                        from astraapi._routing_base import Match as _Match
+                        _path = _current_path.get()
+                        _method = _current_method.get() or 'GET'
+                        if _path and _full_app:
+                            _scope = {"type": "http", "method": _method, "path": _path, "path_params": {}}
+                            for _r in getattr(_full_app, 'routes', []):
+                                if hasattr(_r, 'matches'):
+                                    _m, _ = _r.matches(_scope)
+                                    if _m == _Match.FULL:
+                                        from astraapi.routing import _extract_endpoint_context
+                                        _ctx = _extract_endpoint_context(_r.endpoint)
+                                        if _ctx:
+                                            exc.endpoint_function = _ctx.get('function')
+                                            exc.endpoint_file = _ctx.get('file')
+                                            exc.endpoint_line = _ctx.get('line')
+                                            exc.endpoint_path = f"{_method} {_path}"
+                                        break
+                    except Exception:
+                        pass
+                return await _orig(request, exc)
+            _type_handlers = dict(_type_handlers)
+            _type_handlers[_RVE] = _rv_handler_with_ctx
         core_app.set_type_exception_handlers(_type_handlers)
 
     # Build WS app map for DI-wrapped WebSocket dispatch

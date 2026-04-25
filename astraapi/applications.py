@@ -1544,6 +1544,14 @@ class AstraAPI(AppBase):
                 from astraapi._response import Response as _Resp
                 _sub_resp = _Resp()
                 kwargs[_resp_param_name] = _sub_resp
+            # Collect sub_response from C++ dep_solver result (headers set by deps)
+            _cpp_sub_resp = kwargs.pop('__sub_response__', None)
+            if _cpp_sub_resp is not None:
+                if _sub_resp is None:
+                    _sub_resp = _cpp_sub_resp
+                else:
+                    for _k, _v in _cpp_sub_resp.headers.items():
+                        _sub_resp.headers[_k] = _v
             # Collect Response objects injected by deps (when C++ already ran dep_solver)
             if _dep_resp_param_names:
                 from astraapi._response import Response as _Resp
@@ -1927,9 +1935,23 @@ class AstraAPI(AppBase):
                     elif origin is _typing.Union and any(_is_upload_type(a) for a in args):
                         # Union[UploadFile, None] etc.
                         is_upload = True
+                    elif origin is _typing.Union:
+                        # Union[list[UploadFile], None] etc. — unwrap and check
+                        for _ua in args:
+                            _uo = getattr(_ua, '__origin__', None)
+                            _ua_args = getattr(_ua, '__args__', None) or ()
+                            if _uo is list:
+                                is_list = True
+                                if any(_is_upload_type(a) for a in _ua_args):
+                                    is_upload = True
+                                break
+                            elif _is_upload_type(_ua):
+                                is_upload = True
+                                break
                 from astraapi.dependencies.utils import get_validation_alias as _gva
                 _alias = _gva(bp)
-                file_param_names[bp.name] = (is_upload, is_list, _alias)
+                _fi_alias = getattr(getattr(bp, 'field_info', None), 'alias', None)
+                file_param_names[bp.name] = (is_upload, is_list, _alias, _fi_alias)
 
         _is_async = inspect.iscoroutinefunction(original_endpoint)
 
@@ -1951,19 +1973,45 @@ class AstraAPI(AppBase):
             # No file params and no aliases — original endpoint is fine as-is
             return original_endpoint
 
+        # Build set of all known aliases to clean up (regular alias != validation_alias)
+        _extra_aliases_to_remove: set = set()
+        for f in route.dependant.body_params:
+            if not isinstance(getattr(f, 'field_info', None), _FileParam2):
+                _val_alias = _gva_form(f)
+                _reg_alias = getattr(getattr(f, 'field_info', None), 'alias', None)
+                if _reg_alias and _reg_alias != f.name and _reg_alias != _val_alias:
+                    _extra_aliases_to_remove.add(_reg_alias)
+
         async def _form_shim(**kwargs: Any) -> Any:
+            # Track which fields were provided via alias (not just field name)
+            _alias_provided: set = set()
+            # Pre-scan file params to track alias provision before required check
+            for _fn, (_iu, _il, _al, _fia) in file_param_names.items():
+                if _al != _fn and kwargs.get(_al) is not None:
+                    _alias_provided.add(_fn)
             # Remap alias keys to field name keys for non-file params
             for _alias, _fname in _alias_to_name.items():
-                if _alias in kwargs and _fname not in kwargs:
+                if _alias in kwargs:
+                    # Alias sent — use it (overrides any field name injection from C++)
                     kwargs[_fname] = kwargs.pop(_alias)
-                elif _fname in kwargs and _alias not in kwargs:
-                    # Field name sent instead of alias — remove it (alias is required)
-                    kwargs.pop(_fname, None)
-            # Validate required form params — check field name (after remapping)
+                    _alias_provided.add(_fname)
+                elif _fname in kwargs:
+                    # Field name sent but alias required — only remove for optional params
+                    if _fname not in {fn for fn, _ in _required_form_params}:
+                        kwargs.pop(_fname, None)
+            # Remove regular aliases that differ from validation_alias (not accepted)
+            for _ea in _extra_aliases_to_remove:
+                kwargs.pop(_ea, None)
+            # Validate required form params
             _missing = []
             for _fname, _falias in _required_form_params:
-                if kwargs.get(_fname) is None:
-                    _missing.append(_falias)
+                if _falias != _fname:
+                    # Alias required: only valid if alias was sent (tracked above)
+                    if _fname not in _alias_provided:
+                        _missing.append(_falias)
+                else:
+                    if kwargs.get(_fname) is None:
+                        _missing.append(_falias)
             if _missing:
                 from astraapi.exceptions import RequestValidationError as _RVE
                 _errs = [{'type': 'missing', 'loc': ('body', p), 'msg': 'Field required', 'input': None} for p in _missing]
@@ -1973,11 +2021,16 @@ class AstraAPI(AppBase):
                 if _palias not in kwargs and _pn not in kwargs:
                     kwargs[_pn] = _pdef
             created_files: list[Any] = []
-            for name, (is_upload, is_list, alias) in file_param_names.items():
-                # Look up by alias first (C++ uses form field name = alias), then by field name
-                raw = kwargs.get(alias) if alias != name else None
-                if raw is None:
+            for name, (is_upload, is_list, alias, fi_alias) in file_param_names.items():
+                # Look up by alias (C++ uses form field name = alias)
+                # If alias differs from name, only accept alias (not field name)
+                if alias != name:
+                    raw = kwargs.get(alias)
+                else:
                     raw = kwargs.get(name)
+                # Track if file was provided via alias
+                if raw is not None and alias != name:
+                    _alias_provided.add(name)
                 # C++ passes UploadFile, list of UploadFile, or dict
                 if isinstance(raw, _UploadFile):
                     if is_list:
@@ -1990,7 +2043,9 @@ class AstraAPI(AppBase):
                     elif not is_upload:
                         raw.file.seek(0)
                         kwargs[name] = raw.file.read()
-                    # else: already UploadFile, leave as-is
+                    else:
+                        # Already UploadFile — assign to field name
+                        kwargs[name] = raw
                 elif isinstance(raw, list):
                     converted = []
                     for item in raw:
@@ -2014,7 +2069,16 @@ class AstraAPI(AppBase):
                             else:
                                 converted.append(d)
                         else:
-                            converted.append(item)
+                            # Raw bytes — wrap in UploadFile if needed
+                            if is_upload and isinstance(item, (bytes, bytearray)):
+                                _file_obj = io.BytesIO(item)
+                                uf = _UploadFile(filename='', file=_file_obj,
+                                                 content_type='application/octet-stream',
+                                                 headers=_Headers(raw=[]), size=len(item))
+                                converted.append(uf)
+                                created_files.append(uf)
+                            else:
+                                converted.append(item)
                     kwargs[name] = converted
                 elif isinstance(raw, dict) and 'data' in raw:
                     data = raw.get('data') or b''
@@ -2037,8 +2101,15 @@ class AstraAPI(AppBase):
                     else:
                         kwargs[name] = [data] if is_list else data
                 # Remove alias key if different from field name (endpoint expects field name)
-                if alias != name and alias in kwargs:
+                if alias != name:
                     kwargs.pop(alias, None)
+                    # Also remove the regular alias (when validation_alias is used as lookup key)
+                    if fi_alias and fi_alias != name and fi_alias != alias:
+                        kwargs.pop(fi_alias, None)
+                    # If raw was None (file sent by field name, not alias), clear field name too
+                    # so endpoint gets the default (None for optional params)
+                    if raw is None and name in kwargs:
+                        kwargs.pop(name, None)
             try:
                 if _is_async:
                     return await original_endpoint(**kwargs)
@@ -2448,6 +2519,23 @@ class AstraAPI(AppBase):
                         else None
                     )
                     dep_solver = getattr(route, '_dep_solver', None)
+                    # Wrap dep_solver to propagate sub_response (headers set by deps)
+                    if dep_solver is not None:
+                        _orig_ds = dep_solver
+                        import inspect as _insp2
+                        if _insp2.iscoroutinefunction(_orig_ds):
+                            async def _ds_wrap(kd, _s=_orig_ds):
+                                r = await _s(kd)
+                                if isinstance(r, tuple) and len(r) >= 4 and r[3] is not None:
+                                    kd['__sub_response__'] = r[3]
+                                return r
+                        else:
+                            def _ds_wrap(kd, _s=_orig_ds):
+                                r = _s(kd)
+                                if isinstance(r, tuple) and len(r) >= 4 and r[3] is not None:
+                                    kd['__sub_response__'] = r[3]
+                                return r
+                        dep_solver = _ds_wrap
                     # For dep-solver routes, mark all field specs as not-required
                     # so C++ does not return 422 for missing dep params.
                     # The dep solver handles validation and raises HTTPExceptions.
@@ -2594,6 +2682,24 @@ class AstraAPI(AppBase):
                         async def _body_injector(kwargs_dict):
                             return ({}, [], None, None)
                         dep_solver = _body_injector
+                    # Wrap dep_solver to inject __sub_response__ into kwargs
+                    # so _response_shim can apply headers set by deps (e.g. set_cookie)
+                    if dep_solver is not None:
+                        _orig_solver = dep_solver
+                        import inspect as _insp
+                        if _insp.iscoroutinefunction(_orig_solver):
+                            async def _solver_with_sub_resp(kd, _s=_orig_solver):
+                                r = await _s(kd)
+                                if isinstance(r, tuple) and len(r) >= 4 and r[3] is not None:
+                                    kd['__sub_response__'] = r[3]
+                                return r
+                        else:
+                            def _solver_with_sub_resp(kd, _s=_orig_solver):
+                                r = _s(kd)
+                                if isinstance(r, tuple) and len(r) >= 4 and r[3] is not None:
+                                    kd['__sub_response__'] = r[3]
+                                return r
+                        dep_solver = _solver_with_sub_resp
                     self._core_app.register_fast_spec(
                         route_index,
                         None,       # no JSON body param — shim handles body parsing
