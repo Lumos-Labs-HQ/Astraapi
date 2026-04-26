@@ -1508,8 +1508,8 @@ class AstraAPI(AppBase):
                 _pv_values, _pv_errors = _pv_result[0], _pv_result[1]
                 _pv_consumed = _pv_result[2] if len(_pv_result) > 2 else set()
                 if _pv_errors:
-                    from astraapi.exceptions import RequestValidationError
-                    raise RequestValidationError(_pv_errors)
+                    from astraapi.responses import JSONResponse
+                    return JSONResponse({"detail": _pv_errors}, status_code=422)
                 for _k in _pv_consumed:
                     kwargs.pop(_k, None)
                 kwargs.update(_pv_values)
@@ -1643,8 +1643,8 @@ class AstraAPI(AppBase):
                     from astraapi.dependencies.utils import request_body_to_args as _rbta
                     _bvals, _berrs = await _rbta(_body_params_shim, _parsed_body, _embed_body_shim)
                     if _berrs:
-                        from astraapi.exceptions import RequestValidationError as _RVE
-                        raise _RVE(_berrs, body=_parsed_body)
+                        from astraapi.responses import JSONResponse
+                        return JSONResponse({"detail": _berrs}, status_code=422)
                     kwargs.update(_bvals)
                 except (ValueError, TypeError):
                     pass
@@ -2021,9 +2021,9 @@ class AstraAPI(AppBase):
                     if kwargs.get(_fname) is None:
                         _missing.append(_falias)
             if _missing:
-                from astraapi.exceptions import RequestValidationError as _RVE
+                from astraapi.responses import JSONResponse
                 _errs = [{'type': 'missing', 'loc': ('body', p), 'msg': 'Field required', 'input': None} for p in _missing]
-                raise _RVE(_errs)
+                return JSONResponse({"detail": _errs}, status_code=422)
             # Inject defaults for optional params not in kwargs
             for (_pn, _palias), _pdef in _optional_form_defaults.items():
                 if _palias not in kwargs and _pn not in kwargs:
@@ -2275,8 +2275,8 @@ class AstraAPI(AppBase):
                                         _embed = getattr(_gr, "_embed_body_fields", False)
                                         _vals, _errs = await _rbta(_bp, _parsed, _embed)
                                         if _errs:
-                                            from astraapi.exceptions import RequestValidationError
-                                            raise RequestValidationError(_errs)
+                                            from astraapi.responses import JSONResponse
+                                            return JSONResponse({"detail": _errs}, status_code=422)
                                         kwargs.update(_vals)
                                 except (ValueError, KeyError):
                                     pass

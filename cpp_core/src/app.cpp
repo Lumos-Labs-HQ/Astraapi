@@ -1195,16 +1195,19 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
         std::optional<std::unique_lock<std::shared_mutex>> lock;
         if (!self->registering.load(std::memory_order_relaxed))
             lock.emplace(self->routes_mutex);
-        // Check if path already registered — merge method mask + store per-method endpoint
-        auto existing = self->router.at(path, strlen(path));
-        if (existing.has_value() && existing->route_index >= 0) {
-            int eidx = existing->route_index;
-            RouteInfo& er = self->routes[eidx];
-            // Merge method mask; Python group dispatcher handles per-method routing
+        // Check if EXACT path already registered — scan route_paths for exact string match.
+        // Must NOT use router.at() here: that does wildcard matching and would incorrectly
+        // merge /openapi.json into /{param} routes.
+        std::string_view path_sv(path);
+        int existing_idx = -1;
+        for (size_t i = 0; i < self->route_paths.size(); i++) {
+            if (self->route_paths[i] == path_sv) { existing_idx = (int)i; break; }
+        }
+        if (existing_idx >= 0) {
+            RouteInfo& er = self->routes[existing_idx];
             er.method_mask |= route.method_mask;
             er.has_body = er.has_body || route.has_body;
             er.is_multi_method = true;
-            // Clear fast spec body params so C++ does not require body for all methods
             if (er.fast_spec.has_value()) {
                 auto& fs = *er.fast_spec;
                 Py_XDECREF(fs.body_params); fs.body_params = nullptr;
@@ -1677,8 +1680,11 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
 
     // Build O(1) lookup maps — keys are std::string (owned, survive reallocation)
     auto& final_spec = *route.fast_spec;
-    for (size_t i = 0; i < final_spec.path_specs.size(); i++)
-        final_spec.path_map[final_spec.path_specs[i].field_name] = i;
+    for (size_t i = 0; i < final_spec.path_specs.size(); i++) {
+        const auto& fs = final_spec.path_specs[i];
+        // Key by alias (URL segment name), falling back to field_name
+        final_spec.path_map[!fs.alias.empty() ? fs.alias : fs.field_name] = i;
+    }
     for (size_t i = 0; i < final_spec.query_specs.size(); i++) {
         const auto& fs = final_spec.query_specs[i];
         if (!fs.alias.empty() && fs.alias != fs.field_name) {
@@ -3708,72 +3714,17 @@ static PyObject* dispatch_one_request(
             PyObject* pv_values = PyTuple_GET_ITEM(pv_result.get(), 0);  // borrowed
             PyObject* pv_errors = PyTuple_GET_ITEM(pv_result.get(), 1);  // borrowed
             if (pv_errors && PyList_Check(pv_errors) && PyList_GET_SIZE(pv_errors) > 0) {
-                // Create RequestValidationError, store for raise_server_exceptions, call handler
-                if (!s_validation_exc_type) {
-                    PyRef em(PyImport_ImportModule("astraapi.exceptions"));
-                    if (em) s_validation_exc_type = PyObject_GetAttrString(em.get(), "RequestValidationError");
-                }
-                bool handled_by_python = false;
-                if (s_validation_exc_type) {
-                    PyRef rve_args(PyTuple_Pack(1, pv_errors));
-                    PyRef rve(rve_args ? PyObject_Call(s_validation_exc_type, rve_args.get(), nullptr) : nullptr);
-                    if (rve) {
-                        // Store for raise_server_exceptions support
-                        { PyRef m(PyImport_ImportModule("astraapi._cpp_server"));
-                          if (m) { PyRef fn(PyObject_GetAttrString(m.get(), "_set_last_server_exception"));
-                            if (fn) { PyRef r(PyObject_CallOneArg(fn.get(), rve.get())); (void)r; } PyErr_Clear(); }
-                          else PyErr_Clear(); }
-                        // Call type_exception_handlers if registered
-                        if (self->type_exception_handlers && PyDict_Size(self->type_exception_handlers) > 0) {
-                            PyObject* rv_handler = nullptr;
-                            { PyObject *th_key, *th_val; Py_ssize_t th_pos = 0;
-                              while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
-                                  PyRef cn(PyObject_GetAttrString(th_key, "__name__"));
-                                  if (cn && PyUnicode_Check(cn.get())) {
-                                      const char* cns = PyUnicode_AsUTF8(cn.get());
-                                      if (cns && strcmp(cns, "RequestValidationError") == 0) { rv_handler = th_val; break; }
-                                  } else PyErr_Clear();
-                              }
-                            }
-                            if (rv_handler) {
-                                PyRef rv_result(PyObject_CallFunctionObjArgs(rv_handler, Py_None, rve.get(), nullptr));
-                                PyRef rv_final;
-                                if (rv_result && PyCoro_CheckExact(rv_result.get())) {
-                                    PyObject* cr = nullptr;
-                                    PySendResult sr = PyIter_Send(rv_result.get(), Py_None, &cr);
-                                    if (sr == PYGEN_RETURN && cr) rv_final = PyRef(cr);
-                                    else if (cr) Py_DECREF(cr);
-                                    PyErr_Clear();
-                                } else if (rv_result) { rv_final = std::move(rv_result); }
-                                else PyErr_Clear();
-                                if (rv_final) {
-                                    int hsc = 422;
-                                    PyRef sc_a(PyObject_GetAttrString(rv_final.get(), "status_code"));
-                                    if (sc_a) { hsc = (int)PyLong_AsLong(sc_a.get()); if (hsc==-1&&PyErr_Occurred()){PyErr_Clear();hsc=422;} }
-                                    PyRef body_b(PyObject_GetAttrString(rv_final.get(), "body"));
-                                    if (body_b && PyBytes_Check(body_b.get())) {
-                                        char* hb; Py_ssize_t hbl; PyBytes_AsStringAndSize(body_b.get(), &hb, &hbl);
-                                        build_and_write_http_response(sock_fd, transport, hsc, hb, (size_t)hbl, req.keep_alive,
-                                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
-                                        handled_by_python = true;
-                                    } else PyErr_Clear();
-                                }
-                            }
-                        }
-                    } else PyErr_Clear();
-                }
-                if (!handled_by_python) {
-                    PyRef err_dict(PyDict_New());
-                    if (err_dict) {
-                        if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
-                        PyDict_SetItem(err_dict.get(), s_detail_key_global, pv_errors);
-                        PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
-                        if (err_json) {
-                            char* ej_data; Py_ssize_t ej_len;
-                            PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
-                            build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
-                                       has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
-                        }
+                // Return 422 with validation errors
+                PyRef err_dict(PyDict_New());
+                if (err_dict) {
+                    if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+                    PyDict_SetItem(err_dict.get(), s_detail_key_global, pv_errors);
+                    PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
+                    if (err_json) {
+                        char* ej_data; Py_ssize_t ej_len;
+                        PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
+                        build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
+                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                     }
                 }
                 Py_DECREF(endpoint_local);
@@ -3781,6 +3732,9 @@ static PyObject* dispatch_one_request(
                 --self->counters.active_requests;
                 ++self->counters.total_errors;
                 return make_consumed_true(self, req.total_consumed);
+            } else if (pv_values && PyDict_Check(pv_values) && PyDict_GET_SIZE(pv_values) > 0) {
+                // Merge coerced/validated values back into kwargs
+                PyDict_Update(kwargs.get(), pv_values);
             }
         } else {
             PyErr_Clear();  // Don't break dispatch on validator error
