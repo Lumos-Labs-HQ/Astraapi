@@ -2584,27 +2584,35 @@ async def _create_server(
                         from astraapi._routing_base import Match as _Match
                         _path = _current_path.get()
                         _method = _current_method.get() or 'GET'
-                        if _path and _full_app:
+                        _search_app = _full_app
+                        import sys; print(f"RV_CTX: path={_path} app={_search_app} routes={len(getattr(_search_app,'routes',[]))}", file=sys.stderr)
+                        if _path and _search_app:
                             _scope = {"type": "http", "method": _method, "path": _path, "path_params": {}}
-                            for _r in getattr(_full_app, 'routes', []):
+                            for _r in getattr(_search_app, 'routes', []):
                                 if hasattr(_r, 'matches'):
-                                    _m, _ = _r.matches(_scope)
+                                    _m, _cs = _r.matches(_scope)
                                     if _m == _Match.FULL:
                                         from astraapi.routing import _extract_endpoint_context
                                         _ctx = _extract_endpoint_context(_r.endpoint)
+                                        print(f"RV_CTX: matched {_r.path} ctx={_ctx}", file=sys.stderr)
                                         if _ctx:
                                             exc.endpoint_function = _ctx.get('function')
                                             exc.endpoint_file = _ctx.get('file')
                                             exc.endpoint_line = _ctx.get('line')
                                             exc.endpoint_path = f"{_method} {_path}"
                                         break
-                    except Exception:
-                        pass
-                return await _orig(request, exc)
+                    except Exception as _e:
+                        import sys; print('_rv_handler_with_ctx ERROR:', _e, file=sys.stderr)
+                try:
+                    return await _orig(request, exc)
+                except Exception:
+                    _set_last_server_exception(exc)
+                    raise
             _type_handlers = dict(_type_handlers)
             _type_handlers[_RVE] = _rv_handler_with_ctx
             # Also update _app_exc_handlers so _dispatch_exception uses the wrapper
             _app_exc_handlers[_RVE] = _rv_handler_with_ctx
+        import sys; print("set_type_exception_handlers:", {k.__name__: v.__name__ for k,v in _type_handlers.items()}, file=sys.stderr)
         core_app.set_type_exception_handlers(_type_handlers)
 
     # Build WS app map for DI-wrapped WebSocket dispatch
