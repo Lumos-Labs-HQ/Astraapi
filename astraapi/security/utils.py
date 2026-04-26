@@ -6,5 +6,7 @@ def get_authorization_scheme_param(
 ) -> tuple[str, str]:
     if not authorization_header_value:
         return "", ""
-    scheme, _, param = authorization_header_value.partition(" ")
-    return scheme, param.strip()
+    # Normalize whitespace: strip leading/trailing, collapse multiple spaces
+    normalized = " ".join(authorization_header_value.split())
+    scheme, _, param = normalized.partition(" ")
+    return scheme, param

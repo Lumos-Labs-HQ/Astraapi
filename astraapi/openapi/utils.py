@@ -395,6 +395,9 @@ def get_openapi_path(
                     assert isinstance(process_response, dict), (
                         "An additional response must be a dict"
                     )
+                    # Deep-copy to avoid mutating the shared app-level responses dict
+                    # across multiple routes (causes duplicate anyOf entries).
+                    process_response = copy.deepcopy(process_response)
                     field = route.response_fields.get(additional_status_code)
                     additional_field_schema: Optional[dict[str, Any]] = None
                     if field:
@@ -404,6 +407,10 @@ def get_openapi_path(
                             field_mapping=field_mapping,
                             separate_input_output_schemas=separate_input_output_schemas,
                         )
+                        # Override title to use this route's operation_id, not a shared one
+                        if "title" in additional_field_schema:
+                            route_title = f"Response {additional_status_code} {route.unique_id.replace('_', ' ').title()}"
+                            additional_field_schema = {**additional_field_schema, "title": route_title}
                         media_type = route_response_media_type or "application/json"
                         additional_schema = (
                             process_response.setdefault("content", {})

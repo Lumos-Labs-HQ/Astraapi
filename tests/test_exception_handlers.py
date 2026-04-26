@@ -80,9 +80,10 @@ def test_override_server_error_exception_response():
 
 
 def test_traceback_for_dependency_with_yield():
+    import os
     client = TestClient(app, raise_server_exceptions=True)
     with pytest.raises(ValueError) as exc_info:
         client.get("/dependency-with-yield")
     last_frame = exc_info.traceback[-1]
-    assert str(last_frame.path) == __file__
+    assert os.path.realpath(str(last_frame.path)) == os.path.realpath(__file__)
     assert last_frame.lineno == raise_value_error.__code__.co_firstlineno

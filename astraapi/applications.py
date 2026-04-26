@@ -6474,3 +6474,39 @@ class AstraAPI(AppBase):
                 winloop.run(run_server(self, host, port, keep_alive_timeout=keep_alive_timeout, max_body_size=_max_bytes))
             except ImportError:
                 asyncio.run(run_server(self, host, port, keep_alive_timeout=keep_alive_timeout, max_body_size=_max_bytes))
+
+
+# Copy real (non-stringified) annotations and defaults from APIRouter to AstraAPI
+# so that inspect.signature() returns the actual types instead of string literals,
+# and DefaultPlaceholder defaults compare equal.
+# This is needed because applications.py uses `from __future__ import annotations`
+# which makes all annotations strings, while routing.py does not.
+def _copy_router_annotations() -> None:
+    import inspect as _inspect
+    from astraapi.routing import APIRouter as _APIRouter
+    _method_names = ["get", "put", "post", "delete", "options", "head", "patch", "trace"]
+    for _name in _method_names:
+        _router_method = getattr(_APIRouter, _name, None)
+        _app_method = getattr(AstraAPI, _name, None)
+        if _router_method is None or _app_method is None:
+            continue
+        try:
+            _app_method.__annotations__ = _router_method.__annotations__
+        except (AttributeError, TypeError):
+            pass
+        # Also sync defaults so DefaultPlaceholder(generate_unique_id) compares equal
+        try:
+            _router_sig = _inspect.signature(_router_method)
+            _app_sig = _inspect.signature(_app_method)
+            _new_params = []
+            for _key, _app_param in _app_sig.parameters.items():
+                _router_param = _router_sig.parameters.get(_key)
+                if _router_param is not None and _app_param.default != _router_param.default:
+                    _new_params.append(_app_param.replace(default=_router_param.default))
+                else:
+                    _new_params.append(_app_param)
+            _app_method.__signature__ = _app_sig.replace(parameters=_new_params)
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+_copy_router_annotations()
