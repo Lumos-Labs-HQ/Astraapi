@@ -12,17 +12,14 @@ _threadpool = concurrent.futures.ThreadPoolExecutor()
 
 
 async def run_in_threadpool(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Run a sync function in the default thread pool.
-
-    Submits directly to a ThreadPoolExecutor and wraps the future, bypassing
-    loop.run_in_executor() which (via uvloop) calls the deprecated
-    asyncio.iscoroutinefunction() on every call in Python 3.14+.
-    """
+    """Run a sync function in the default thread pool, propagating ContextVars."""
+    import contextvars
     loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
     if kwargs:
         func = functools.partial(func, **kwargs)
     return await asyncio.wrap_future(
-        _threadpool.submit(func, *args), loop=loop
+        _threadpool.submit(ctx.run, func, *args), loop=loop
     )
 
 

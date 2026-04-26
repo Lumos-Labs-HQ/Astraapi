@@ -1729,11 +1729,17 @@ class AstraAPI(AppBase):
             try:
                 import astraapi._cpp_server as _mw_srv
                 _mw_dispatchers = _mw_srv._http_middleware_dispatchers
-                if _mw_dispatchers and isinstance(result, _Response):
+                if _mw_dispatchers:
                     from astraapi._cpp_server import _current_raw_headers as _mw_crh, _current_method as _mw_cm, _current_path as _mw_cp
                     from astraapi.routing import _make_lightweight_request as _mw_mlr
                     _mw_req = _mw_mlr(_mw_crh.get(), _mw_cm.get() or 'GET', _mw_cp.get() or '/')
-                    _mw_resp = result
+                    # Wrap non-Response results in JSONResponse for middleware
+                    _raw_type = type(result)
+                    if not isinstance(result, _Response):
+                        from astraapi.responses import JSONResponse as _JR
+                        _mw_resp = _JR(content=result, status_code=status_code or 200)
+                    else:
+                        _mw_resp = result
                     for _mw_fn in reversed(_mw_dispatchers):
                         async def _mw_call_next(_req, _r=_mw_resp):
                             return _r
@@ -1742,6 +1748,8 @@ class AstraAPI(AppBase):
                             break
                     if _mw_resp is not None:
                         result = _mw_resp
+                        # Mark so _handle_async_di doesn't run middleware again
+                        result.__middleware_ran__ = True
             except Exception:
                 pass
 
@@ -1807,7 +1815,12 @@ class AstraAPI(AppBase):
                     _val, _errs = _response_field.validate(result, {}, loc=("response",))
                     if _errs:
                         from astraapi.exceptions import ResponseValidationError as _RVE
-                        _rve = _RVE(errors=_errs, body=result)
+                        from astraapi.routing import _extract_endpoint_context
+                        _rve_ctx = _extract_endpoint_context(original_endpoint)
+                        _dep = getattr(route, 'dependant', None)
+                        if _dep and getattr(_dep, 'path', None):
+                            _rve_ctx['path'] = f"GET {_dep.path}"
+                        _rve = _RVE(errors=_errs, body=result, endpoint_ctx=_rve_ctx)
                         try:
                             from astraapi._cpp_server import _set_last_server_exception as _slse
                             _slse(_rve)
@@ -2386,11 +2399,11 @@ class AstraAPI(AppBase):
                 endpoint = _registered_endpoint
                 _is_coro = True  # shim is always async
             elif not _has_custom_route_class and getattr(route, 'response_field', None) is not None:
-                # Fast-path route with response_model: wrap to apply model filtering.
-                # If route also has a dep_solver (Depends), use response_class_shim so
-                # dependencies are resolved before the endpoint is called.
                 _has_dep_solver_rm = getattr(route, '_dep_solver', None) is not None
-                if _has_dep_solver_rm or _has_asgi_middleware:
+                # Also use response_class_shim if there's a custom ResponseValidationError handler
+                from astraapi.exceptions import ResponseValidationError as _RVE_check
+                _has_custom_rve = _RVE_check in self.exception_handlers
+                if _has_dep_solver_rm or _has_asgi_middleware or _has_custom_rve:
                     try:
                         from astraapi.exception_handlers import http_exception_handler as _dh, request_validation_exception_handler as _dvh
                         _default_exc_handlers = {_dh, _dvh}
@@ -2745,7 +2758,7 @@ class AstraAPI(AppBase):
                     _sub_path = _full_path[len(_prefix.rstrip('/')):] or '/'
                     if not _sub_path.startswith('/'):
                         _sub_path = '/' + _sub_path
-                    # Build ASGI scope
+                    # Build ASGI headers
                     _headers = []
                     for _h in _raw_headers:
                         if isinstance(_h, (list, tuple)) and len(_h) == 2:
@@ -2753,6 +2766,27 @@ class AstraAPI(AppBase):
                             if isinstance(_hn, str): _hn = _hn.encode('latin-1')
                             if isinstance(_hv, str): _hv = _hv.encode('latin-1')
                             _headers.append((_hn, _hv))
+                    # Check if this is a WebSocket request
+                    _ws_obj = kwargs.get('websocket') or kwargs.get('ws')
+                    if _ws_obj is not None:
+                        # WebSocket request — dispatch with websocket scope
+                        _ws_scope = dict(_ws_obj.scope)
+                        _ws_scope['path'] = _sub_path
+                        _ws_scope['raw_path'] = _sub_path.encode('utf-8')
+                        _ws_scope['root_path'] = _prefix.rstrip('/')
+                        from astraapi._cpp_server import _app_exc_handlers
+                        if 'starlette.exception_handlers' not in _ws_scope:
+                            _cls_h = {k: v for k, v in _app_exc_handlers.items() if not isinstance(k, int)}
+                            _status_h = {k: v for k, v in _app_exc_handlers.items() if isinstance(k, int)}
+                            _ws_scope['starlette.exception_handlers'] = (_cls_h, _status_h)
+                        from astraapi._cpp_server import _current_root_path as _crp
+                        _prev_rp = _crp.get()
+                        _crp.set(_ws_scope['root_path'])
+                        try:
+                            await _app(_ws_scope, _ws_obj.receive, _ws_obj.send)
+                        finally:
+                            _crp.set(_prev_rp)
+                        return None
                     _scope = {
                         'type': 'http',
                         'asgi': {'version': '3.0'},
@@ -2803,6 +2837,8 @@ class AstraAPI(AppBase):
                         if _hn.lower() not in ('content-length',):
                             _r.headers[_hn] = _hv
                     return _r
+                _mount_endpoint.__mount_app__ = _app
+                _mount_endpoint.__mount_prefix__ = _prefix
                 return _mount_endpoint
             _ep = _make_mount_endpoint(_mount_app, _mount_path)
             for _mp in [_wildcard_path, _exact_path]:

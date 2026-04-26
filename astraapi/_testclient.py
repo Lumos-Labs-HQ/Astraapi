@@ -57,6 +57,15 @@ class WebSocketTestSession:
                         proto = getattr(self._error, "protocol", None)
                         code = getattr(proto, "close_code", 1006) if proto else 1006
                         reason = ""
+                    # Check if a server exception caused the close
+                    try:
+                        from astraapi._cpp_server import _pop_server_exception
+                        from astraapi.exceptions import HTTPException, RequestValidationError
+                        _srv_exc = _pop_server_exception()
+                        if _srv_exc is not None and not isinstance(_srv_exc, (HTTPException, RequestValidationError)):
+                            raise _srv_exc
+                    except (ImportError, AttributeError):
+                        pass
                     raise WebSocketDisconnect(code=code, reason=reason)
             except ImportError:
                 pass
@@ -213,6 +222,12 @@ class _SharedServer:
 from collections import OrderedDict as _OrderedDict
 _app_servers: "_OrderedDict[int, _SharedServer]" = _OrderedDict()
 _app_servers_lock = threading.Lock()
+
+# ContextVar propagation: test thread stores its context here before each request
+# so the server thread can run handlers in the same context.
+import contextvars as _cv
+_pending_test_context: _cv.Context | None = None
+_pending_test_context_lock = threading.Lock()
 
 
 class TestClient:
@@ -444,10 +459,17 @@ class TestClient:
                 self._client.cookies.set(name, value)
 
 
+    def _capture_context(self) -> None:
+        """Store current thread's ContextVar context for server thread propagation."""
+        global _pending_test_context
+        with _pending_test_context_lock:
+            _pending_test_context = _cv.copy_context()
+
     def get(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
         self._apply_cookies()
+        self._capture_context()
         resp = self._client.get(url, **kwargs)
         self._check_exc()
         return resp
@@ -456,6 +478,7 @@ class TestClient:
         self._ensure_started()
         self._sync_raise_flag()
         self._apply_cookies()
+        self._capture_context()
         resp = self._client.post(url, **kwargs)
         self._check_exc()
         return resp
@@ -464,6 +487,7 @@ class TestClient:
         self._ensure_started()
         self._sync_raise_flag()
         self._apply_cookies()
+        self._capture_context()
         resp = self._client.put(url, **kwargs)
         self._check_exc()
         return resp
@@ -472,6 +496,7 @@ class TestClient:
         self._ensure_started()
         self._sync_raise_flag()
         self._apply_cookies()
+        self._capture_context()
         resp = self._client.patch(url, **kwargs)
         self._check_exc()
         return resp
@@ -480,6 +505,7 @@ class TestClient:
         self._ensure_started()
         self._sync_raise_flag()
         self._apply_cookies()
+        self._capture_context()
         resp = self._client.delete(url, **kwargs)
         self._check_exc()
         return resp
@@ -487,6 +513,7 @@ class TestClient:
     def options(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
+        self._capture_context()
         resp = self._client.options(url, **kwargs)
         self._check_exc()
         return resp
@@ -494,6 +521,7 @@ class TestClient:
     def head(self, url: str, **kwargs: Any) -> Any:
         self._ensure_started()
         self._sync_raise_flag()
+        self._capture_context()
         resp = self._client.head(url, **kwargs)
         self._check_exc()
         return resp
@@ -502,6 +530,7 @@ class TestClient:
         self._ensure_started()
         self._sync_raise_flag()
         self._apply_cookies()
+        self._capture_context()
         resp = self._client.request(method, url, **kwargs)
         self._check_exc()
         return resp
@@ -509,21 +538,15 @@ class TestClient:
     def websocket_connect(
         self, url: str, subprotocols: list[str] | None = None, **kwargs: Any
     ) -> "WebSocketTestSession":
-        """Open a WebSocket connection to the running C++ test server.
-
-        Returns a context-manager ``WebSocketTestSession`` that provides
-        ``send_text``, ``receive_text``, ``send_json``, ``receive_json``,
-        ``send_bytes``, ``receive_bytes``, and ``close``.
-        """
         self._ensure_started()
-        # Convert http:// base_url to ws:// WebSocket URL
+        self._capture_context()
         ws_url = f"ws://127.0.0.1:{self._port}{url}"
         if not hasattr(self, "_ws_close_flag"):
             self._ws_close_flag: list = [False]
             self._ws_active: list = [0]
         self._ws_active[0] += 1
         if self._ws_active[0] == 1:
-            self._ws_close_flag[0] = False  # reset for new group
+            self._ws_close_flag[0] = False
         return WebSocketTestSession(ws_url, _explicit_close_flag=self._ws_close_flag,
                                     _active_count=self._ws_active)
 

@@ -274,17 +274,17 @@ def _extract_endpoint_context(func: Any) -> EndpointContext:
     if func_id in _endpoint_context_cache:
         return _endpoint_context_cache[func_id]
 
+    ctx: EndpointContext = {}
+    # Always capture function name first — never lose it due to file I/O errors
+    if (func_name := getattr(func, "__name__", None)) is not None:
+        ctx["function"] = func_name
     try:
-        ctx: EndpointContext = {}
-
         if (source_file := inspect.getsourcefile(func)) is not None:
             ctx["file"] = source_file
         if (line_number := inspect.getsourcelines(func)[1]) is not None:
             ctx["line"] = line_number
-        if (func_name := getattr(func, "__name__", None)) is not None:
-            ctx["function"] = func_name
     except Exception:
-        ctx = EndpointContext()
+        pass
 
     _endpoint_context_cache[func_id] = ctx
     return ctx
@@ -1286,14 +1286,16 @@ def _flatten_deps(
         if not name:
             name = getattr(sub_dep.call, '__name__', None) or f'__dep_{i}_{dep_id}'
 
-        # Collect child dependency names (these map to parameters in the parent callable)
+        # Collect child dependency names and cache_keys
         child_names = []
+        child_cache_keys = {}  # param_name -> cache_key for accurate lookup
         for child in sub_dep.dependencies:
             child_name = child.name
             if not child_name:
                 child_name = getattr(child.call, '__name__', None) or \
                     f'__dep_{id(child.call)}'
             child_names.append(child_name)
+            child_cache_keys[child_name] = child.cache_key
 
         # Collect param names this dep needs from request kwargs
         param_names: set[str] = set()
@@ -1346,6 +1348,7 @@ def _flatten_deps(
             'is_gen': getattr(sub_dep, 'is_gen_callable', False),
             'is_async_gen': getattr(sub_dep, 'is_async_gen_callable', False),
             'needs_request': bool(sub_dep.request_param_name),
+            'child_cache_keys': child_cache_keys,
             'request_param_name': sub_dep.request_param_name,
             'needs_http_connection': bool(sub_dep.http_connection_param_name),
             'http_connection_param_name': sub_dep.http_connection_param_name,
@@ -1489,6 +1492,7 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
     _HTTPBasicCreds, _base64) to eliminate sys.modules lookups on every request.
     """
     resolved = {}
+    resolved_by_key = {}  # cache_key -> result for accurate child dep lookup
     errors = []
     sub_response = None
 
@@ -1581,9 +1585,14 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
 
             dep_kwargs = {}
 
-            # Inject resolved child dependencies
+            # Inject resolved child dependencies — use cache_key for accurate lookup
+            # when the same dep name appears with different scopes (e.g. SecurityScopes)
+            _child_cks = node.get('child_cache_keys', {})
             for child_name in node['child_names']:
-                if child_name in resolved:
+                _cck = _child_cks.get(child_name)
+                if _cck is not None and _cck in resolved_by_key:
+                    dep_kwargs[child_name] = resolved_by_key[_cck]
+                elif child_name in resolved:
                     dep_kwargs[child_name] = resolved[child_name]
 
             # Inject request params from the original kwargs
@@ -1711,9 +1720,16 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                     pass
 
             result = node['call'](**dep_kwargs)
-            resolved[node['name']] = result
+            _ck = node.get('cache_key')
+            if _ck is not None:
+                resolved_by_key[_ck] = result
+            # Only set resolved[name] if not already set — first occurrence wins
+            # (prevents child deps from overwriting direct endpoint deps with same name)
+            if node['name'] not in resolved:
+                resolved[node['name']] = result
             for alias in node.get('aliases', ()):
-                resolved[alias] = result
+                if alias not in resolved:
+                    resolved[alias] = result
 
         except _exc_types:
             raise  # Propagate auth/permission errors — C++ handles these

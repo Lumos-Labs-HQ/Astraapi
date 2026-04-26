@@ -1955,10 +1955,16 @@ class CppHttpProtocol(asyncio.Protocol):
         from astraapi.exceptions import HTTPException, RequestValidationError
         from astraapi._concurrency import is_async_callable, run_in_threadpool
         # Walk MRO to find a registered app-level exception handler
+        # Use _app_exc_handlers but also fall back to _full_app.exception_handlers
+        _handlers = _app_exc_handlers
+        if _full_app is not None:
+            _live = getattr(_full_app, 'exception_handlers', {})
+            if _live and _live is not _handlers:
+                _handlers = {**_live, **_handlers}
         handler = None
         for cls in type(exc).__mro__:
-            if cls in _app_exc_handlers:
-                handler = _app_exc_handlers[cls]
+            if cls in _handlers:
+                handler = _handlers[cls]
                 break
         if handler is None and isinstance(exc, HTTPException):
             handler = _app_status_handlers.get(exc.status_code)
@@ -2283,8 +2289,9 @@ class CppHttpProtocol(asyncio.Protocol):
                 transport = self._transport
                 if transport and not transport.is_closing():
                     # Run HTTP middleware if registered (@app.middleware("http"))
-                    # Zero overhead when empty: branch not taken.
-                    if _http_middleware_dispatchers:
+                    # Skip if _response_shim already ran middleware (avoids double-run)
+                    _mw_already_ran = getattr(_raw, '__middleware_ran__', False)
+                    if _http_middleware_dispatchers and not _mw_already_ran:
                         _mw_hdrs = kwargs.get('__raw_headers__') or _current_raw_headers.get()
                         _mw_method = kwargs.get('__method__', '') or _current_method.get() or 'GET'
                         _mw_path = kwargs.get('__path__', '') or _current_path.get() or '/'
@@ -2445,6 +2452,29 @@ class CppHttpProtocol(asyncio.Protocol):
         ws = self._ws
         if not ws:
             return
+        # Propagate test thread's ContextVar context if available
+        try:
+            from astraapi._testclient import _pending_test_context, _pending_test_context_lock
+            with _pending_test_context_lock:
+                _ctx = _pending_test_context
+            if _ctx is not None:
+                # Run the coroutine inside the test thread's context
+                # by scheduling it as a task with that context
+                loop = asyncio.get_event_loop()
+                task = loop.create_task(
+                    self._handle_websocket_inner(endpoint, path_params),
+                    context=_ctx
+                )
+                await task
+                return
+        except Exception:
+            pass
+        await self._handle_websocket_inner(endpoint, path_params)
+
+    async def _handle_websocket_inner(self, endpoint: Any, path_params: dict) -> None:
+        ws = self._ws
+        if not ws:
+            return
         try:
             ep_id = id(endpoint)
             ws_entry = _ws_app_map.get(ep_id)
@@ -2465,18 +2495,83 @@ class CppHttpProtocol(asyncio.Protocol):
                 _dispatch = route_full_app if (route_full_app is not None and route_full_app is not ws_route.app) else ws_app
                 await _dispatch(ws.scope, ws.receive, ws.send)
             else:
-                kwargs = dict(path_params) if path_params else {}
-                ws_param = _ws_sig_cache.get(ep_id, "websocket")
-                kwargs[ws_param] = ws
-                await endpoint(**kwargs)
+                # Check if this is a mount endpoint — dispatch WebSocket to sub-app directly
+                _mount_app = getattr(endpoint, '__mount_app__', None)
+                _mount_prefix = getattr(endpoint, '__mount_prefix__', None)
+                # Also detect mount endpoints by __mount_path__ in path_params
+                if _mount_app is None and path_params and '__mount_path__' in path_params:
+                    # Find mount app from _full_app routes
+                    _ws_path = ws.scope.get('path', '/')
+                    if _full_app is not None:
+                        for _mr in getattr(_full_app, 'routes', []):
+                            _mp2 = getattr(_mr, 'path', '')
+                            if _mp2 and _ws_path.startswith(_mp2.rstrip('/')):
+                                _sub = getattr(_mr, 'app', None)
+                                if _sub is not None:
+                                    _mount_app = _sub
+                                    _mount_prefix = _mp2
+                                    break
+                if _mount_app is not None and _mount_prefix is not None:
+                    _ws_scope = dict(ws.scope)
+                    _full_path = _ws_scope.get('path', '/')
+                    _sub_path = _full_path[len(_mount_prefix.rstrip('/')):] or '/'
+                    if not _sub_path.startswith('/'):
+                        _sub_path = '/' + _sub_path
+                    _ws_scope['path'] = _sub_path
+                    _ws_scope['raw_path'] = _sub_path.encode('utf-8')
+                    _ws_scope['root_path'] = _mount_prefix.rstrip('/')
+                    if 'starlette.exception_handlers' not in _ws_scope:
+                        _cls_h2 = {k: v for k, v in _app_exc_handlers.items() if not isinstance(k, int)}
+                        _status_h2 = {k: v for k, v in _app_exc_handlers.items() if isinstance(k, int)}
+                        _ws_scope['starlette.exception_handlers'] = (_cls_h2, _status_h2)
+                    from astraapi._cpp_server import _current_root_path as _crp2
+                    _prev_rp2 = _crp2.get()
+                    _crp2.set(_ws_scope['root_path'])
+                    try:
+                        await _mount_app(_ws_scope, ws.receive, ws.send)
+                    finally:
+                        _crp2.set(_prev_rp2)
+                else:
+                    kwargs = dict(path_params) if path_params else {}
+                    ws_param = _ws_sig_cache.get(ep_id, "websocket")
+                    kwargs[ws_param] = ws
+                    await endpoint(**kwargs)
         except WebSocketDisconnect:
             # Normal lifecycle — client closed the connection. Not an error.
             pass
         except Exception as exc:
             ws._metrics.errors += 1
-            # Log but do NOT re-raise: _ws_task is never awaited by anyone, so
-            # re-raising produces asyncio's "Task exception was never retrieved".
-            logger.error("Unhandled exception in WebSocket endpoint", exc_info=True)
+            # Try registered exception handlers before logging
+            _handled = False
+            try:
+                _handlers = dict(_app_exc_handlers)
+                if _full_app is not None:
+                    _live = getattr(_full_app, 'exception_handlers', {})
+                    if _live:
+                        _handlers = {**_live, **_handlers}
+                for _cls in type(exc).__mro__:
+                    if _cls in _handlers:
+                        _h = _handlers[_cls]
+                        from astraapi._concurrency import is_async_callable, run_in_threadpool
+                        if is_async_callable(_h):
+                            await _h(ws, exc)
+                        else:
+                            await run_in_threadpool(_h, ws, exc)
+                        _handled = True
+                        break
+            except Exception:
+                pass
+            if not _handled:
+                # Store non-HTTP/non-WebSocket exceptions so TestClient can re-raise them
+                from astraapi.exceptions import HTTPException, RequestValidationError
+                try:
+                    from astraapi.exceptions import WebSocketException as _WSExc
+                    _is_ws_exc = isinstance(exc, _WSExc)
+                except ImportError:
+                    _is_ws_exc = False
+                if not isinstance(exc, (HTTPException, RequestValidationError)) and not _is_ws_exc:
+                    _set_last_server_exception(exc)
+                logger.error("Unhandled exception in WebSocket endpoint", exc_info=True)
         finally:
             try:
                 if not ws._closed:
@@ -2582,27 +2677,38 @@ async def _create_server(
                 if not exc.endpoint_function:
                     try:
                         from astraapi._routing_base import Match as _Match
+                        from astraapi.routing import _extract_endpoint_context
                         _path = _current_path.get()
                         _method = _current_method.get() or 'GET'
-                        _search_app = _full_app
-                        import sys; print(f"RV_CTX: path={_path} app={_search_app} routes={len(getattr(_search_app,'routes',[]))}", file=sys.stderr)
-                        if _path and _search_app:
-                            _scope = {"type": "http", "method": _method, "path": _path, "path_params": {}}
-                            for _r in getattr(_search_app, 'routes', []):
-                                if hasattr(_r, 'matches'):
+                        if _path and _full_app:
+                            def _find_fn(app, path, method):
+                                _scope = {"type": "http", "method": method, "path": path, "path_params": {}}
+                                for _r in getattr(app, 'routes', []):
+                                    if not hasattr(_r, 'matches'):
+                                        continue
                                     _m, _cs = _r.matches(_scope)
                                     if _m == _Match.FULL:
-                                        from astraapi.routing import _extract_endpoint_context
-                                        _ctx = _extract_endpoint_context(_r.endpoint)
-                                        print(f"RV_CTX: matched {_r.path} ctx={_ctx}", file=sys.stderr)
-                                        if _ctx:
-                                            exc.endpoint_function = _ctx.get('function')
-                                            exc.endpoint_file = _ctx.get('file')
-                                            exc.endpoint_line = _ctx.get('line')
-                                            exc.endpoint_path = f"{_method} {_path}"
-                                        break
-                    except Exception as _e:
-                        import sys; print('_rv_handler_with_ctx ERROR:', _e, file=sys.stderr)
+                                        _dep = getattr(_r, 'dependant', None)
+                                        return (getattr(_dep, 'call', None) if _dep else None) or _r.endpoint
+                                    # Check mounted sub-apps
+                                    if _m == _Match.PARTIAL:
+                                        _sub = getattr(_r, 'app', None)
+                                        if _sub:
+                                            _sub_path = path[len(_r.path.rstrip('/')):] or '/'
+                                            _fn = _find_fn(_sub, _sub_path, method)
+                                            if _fn:
+                                                return _fn
+                                return None
+                            _fn = _find_fn(_full_app, _path, _method)
+                            if _fn:
+                                _ctx = _extract_endpoint_context(_fn)
+                                if _ctx.get('function'):
+                                    exc.endpoint_function = _ctx.get('function')
+                                    exc.endpoint_file = _ctx.get('file')
+                                    exc.endpoint_line = _ctx.get('line')
+                                    exc.endpoint_path = f"{_method} {_path}"
+                    except Exception:
+                        pass
                 try:
                     return await _orig(request, exc)
                 except Exception:

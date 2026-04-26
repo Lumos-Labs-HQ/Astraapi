@@ -15,7 +15,7 @@ tests/test_additional_responses_custom_validationerror.py .              [  0%]
 tests/test_additional_responses_default_validationerror.py .             [  0%]
 tests/test_additional_responses_response_class.py .                      [  0%]
 tests/test_additional_responses_router.py .....                          [  0%]
-tests/test_additional_responses_union_duplicate_anyof.py F               [  0%]
+tests/test_additional_responses_union_duplicate_anyof.py .               [  0%]
 tests/test_allow_inf_nan_in_enforcing.py ........................        [  1%]
 tests/test_ambiguous_params.py ..                                        [  1%]
 tests/test_annotated.py .............                                    [  1%]
@@ -34,10 +34,10 @@ tests/test_default_response_class.py ..............                      [  3%]
 tests/test_default_response_class_router.py ..............               [  3%]
 tests/test_dependency_after_yield_raise.py ....                          [  3%]
 tests/test_dependency_after_yield_streaming.py .......                   [  3%]
-tests/test_dependency_after_yield_websockets.py .F                       [  3%]
+tests/test_dependency_after_yield_websockets.py ..                       [  3%]
 tests/test_dependency_cache.py ....                                      [  3%]
 tests/test_dependency_class.py ............                              [  4%]
-tests/test_dependency_contextmanager.py ........F.............           [  4%]
+tests/test_dependency_contextmanager.py ......................           [  4%]
 tests/test_dependency_contextvars.py .                                   [  4%]
 tests/test_dependency_duplicates.py .....                                [  5%]
 tests/test_dependency_overrides.py ................................      [  5%]
@@ -48,14 +48,14 @@ tests/test_dependency_security_overrides.py ...                          [  6%]
 tests/test_dependency_wrapped.py ............................            [  7%]
 tests/test_dependency_yield_except_httpexception.py ..                   [  7%]
 tests/test_dependency_yield_scope.py ...........                         [  7%]
-tests/test_dependency_yield_scope_websockets.py FFFF.FF                  [  7%]
+tests/test_dependency_yield_scope_websockets.py .......                  [  7%]
 tests/test_depends_hashable.py .                                         [  7%]
 tests/test_deprecated_openapi_prefix.py ..                               [  7%]
 tests/test_duplicate_models_openapi.py ..                                [  7%]
 tests/test_empty_router.py ..                                            [  7%]
 tests/test_enforce_once_required_parameter.py ...                        [  7%]
-tests/test_exception_handlers.py ....F                                   [  8%]
-tests/test_extra_routes.py ....F...                                      [  8%]
+tests/test_exception_handlers.py .....                                   [  8%]
+tests/test_extra_routes.py ........                                      [  8%]
 tests/test_file_and_form_order_issue_9116.py ....                        [  8%]
 tests/test_filter_pydantic_sub_model_pv2.py ...                          [  8%]
 tests/test_form_default.py ..                                            [  8%]
@@ -90,7 +90,7 @@ tests/test_openapi_route_extensions.py ..                                [ 12%]
 tests/test_openapi_schema_type.py ....                                   [ 13%]
 tests/test_openapi_separate_input_output_schemas.py .......              [ 13%]
 tests/test_openapi_servers.py ..                                         [ 13%]
-tests/test_operations_signatures.py F                                    [ 13%]
+tests/test_operations_signatures.py .                                    [ 13%]
 tests/test_optional_file_list.py ..                                      [ 13%]
 tests/test_orjson_response_class.py .                                    [ 13%]
 tests/test_param_class.py ..                                             [ 13%]
@@ -108,7 +108,7 @@ tests/test_regex_deprecated_body.py ....                                 [ 17%]
 tests/test_regex_deprecated_params.py ....                               [ 17%]
 tests/test_repeated_cookie_headers.py .                                  [ 17%]
 tests/test_repeated_dependency_schema.py ..                              [ 17%]
-tests/test_repeated_parameter_alias.py F.                                [ 17%]
+tests/test_repeated_parameter_alias.py ..                                [ 17%]
 tests/test_reponse_set_reponse_code_empty.py ..                          [ 17%]
 tests/test_request_body_parameters_media_type.py .                       [ 17%]
 tests/test_request_param_model_by_alias.py ......                        [ 18%]
@@ -188,7 +188,7 @@ tests/test_security_api_key_header_optional.py ...                       [ 41%]
 tests/test_security_api_key_query.py ...                                 [ 41%]
 tests/test_security_api_key_query_description.py ...                     [ 41%]
 tests/test_security_api_key_query_optional.py ...                        [ 41%]
-tests/test_security_http_base.py .F..                                    [ 41%]
+tests/test_security_http_base.py ....                                    [ 41%]
 tests/test_security_http_base_description.py ...                         [ 41%]
 tests/test_security_http_base_optional.py ...                            [ 41%]
 tests/test_security_http_basic_optional.py .....                         [ 41%]
@@ -201,7 +201,7 @@ tests/test_security_http_digest.py ....                                  [ 42%]
 tests/test_security_http_digest_description.py ....                      [ 42%]
 tests/test_security_http_digest_optional.py ....                         [ 42%]
 tests/test_security_oauth2.py ..........                                 [ 43%]
-tests/test_security_oauth2_authorization_code_bearer.py ...F.            [ 43%]
+tests/test_security_oauth2_authorization_code_bearer.py .....            [ 43%]
 tests/test_security_oauth2_authorization_code_bearer_description.py .... [ 43%]
                                                                          [ 43%]
 tests/test_security_oauth2_authorization_code_bearer_scopes_openapi.py . [ 43%]
@@ -217,7 +217,7 @@ tests/test_security_openid_connect_description.py ....                   [ 44%]
 tests/test_security_openid_connect_optional.py ....                      [ 44%]
 tests/test_security_scopes.py .                                          [ 44%]
 tests/test_security_scopes_dont_propagate.py .                           [ 44%]
-tests/test_security_scopes_sub_dependency.py F                           [ 44%]
+tests/test_security_scopes_sub_dependency.py .                           [ 44%]
 tests/test_serialize_response.py ...                                     [ 44%]
 tests/test_serialize_response_dataclass.py .......                       [ 45%]
 tests/test_serialize_response_model.py ........                          [ 45%]
@@ -572,663 +572,10 @@ tests/test_validate_response.py ......                                   [ 99%]
 tests/test_validate_response_dataclass.py ...                            [ 99%]
 tests/test_validate_response_recursive/test_validate_response_recursive.py . [ 99%]
                                                                          [ 99%]
-tests/test_validation_error_context.py FFFFF..                           [ 99%]
-tests/test_webhooks_security.py .F                                       [ 99%]
+tests/test_validation_error_context.py .......                           [ 99%]
+tests/test_webhooks_security.py ..                                       [ 99%]
 tests/test_wrapped_method_forward_reference.py .                         [ 99%]
 tests/test_ws_dependencies.py ...                                        [ 99%]
 tests/test_ws_router.py ............                                     [100%]
 
-=================================== FAILURES ===================================
-_____________________________ test_openapi_schema ______________________________
-
->   ???
-E   AssertionError: assert {'components'...: 'Route2'}}}} == {'components'...: 'Route2'}}}}
-E     
-E     Omitting 3 identical items, use -vv to show
-E     Differing items:
-E     {'paths': {'/route1': {'get': {'operationId': 'route1_route1_get', 'responses': {'200': {'content': {...}, 'descriptio...n': 'Successful Response'}, '500': {'content': {...}, 'description': 'Internal Server Error'}}, 'summary': 'Route2'}}}} != {'paths': {'/route1': {'get': {'operationId': 'route1_route1_get', 'responses': {'200': {'content': {...}, 'descriptio...n': 'Successful Response'}, '500': {'content': {...}, 'description': 'Internal Server Error'}}, 'summary': 'Route2'}}}}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_additional_responses_union_duplicate_anyof.py:48: AssertionError
------------------------------ Captured stderr call -----------------------------
-set_type_exception_handlers: {'WebSocketRequestValidationError': 'websocket_request_validation_exception_handler'}
-_________________ test_websocket_dependency_after_yield_broken _________________
-
->   ???
-
-/mnt/e/temp_git/fastapi-rust/tests/test_dependency_after_yield_websockets.py:78: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-self = <astraapi._testclient.WebSocketTestSession object at 0x7f81283b8cd0>
-
-    def __enter__(self) -> "WebSocketTestSession":
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        if not self._ready.wait(timeout=10.0):
-            raise RuntimeError("WebSocket connection timed out")
-        if self._error:
-            try:
-                import websockets.exceptions as _wse
-                from astraapi._websocket import WebSocketDisconnect
-                if isinstance(self._error, (_wse.ConnectionClosedOK, _wse.ConnectionClosedError)):
-                    rcvd = getattr(self._error, "rcvd", None)
-                    if rcvd is not None:
-                        code = getattr(rcvd, "code", 1000)
-                        reason = getattr(rcvd, "reason", "") or ""
-                        if reason.startswith("1006:"):
-                            code = 1006
-                            reason = reason[5:]
-                    else:
-                        proto = getattr(self._error, "protocol", None)
-                        code = getattr(proto, "close_code", 1006) if proto else 1006
-                        reason = ""
->                   raise WebSocketDisconnect(code=code, reason=reason)
-E                   astraapi._websocket.WebSocketDisconnect: WebSocket disconnect: code=1000, reason=
-
-astraapi/_testclient.py:60: WebSocketDisconnect
------------------------------- Captured log call -------------------------------
-ERROR    astraapi:_cpp_server.py:2479 Unhandled exception in WebSocket endpoint
-Traceback (most recent call last):
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_cpp_server.py", line 2466, in _handle_websocket
-    await _dispatch(ws.scope, ws.receive, ws.send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_app_base.py", line 134, in __call__
-    await self.router(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_routing_base.py", line 906, in __call__
-    await self.middleware_stack(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_routing_base.py", line 927, in app
-    await route.handle(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_routing_base.py", line 596, in handle
-    await self.app(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/routing.py", line 176, in app
-    await wrap_app_handling_exceptions(app, session)(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_exception_handler.py", line 92, in wrapped_app
-    raise exc
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_exception_handler.py", line 78, in wrapped_app
-    await app(scope, receive, sender)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/routing.py", line 173, in app
-    await func(session)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/routing.py", line 731, in app
-    await dependant.call(**solved_result.values)
-  File "/mnt/e/temp_git/fastapi-rust/tests/test_dependency_after_yield_websockets.py", line 59, in websocket_endpoint_broken
-  File "/mnt/e/temp_git/fastapi-rust/tests/test_dependency_after_yield_websockets.py", line 20, in __iter__
-ValueError: Session closed
-____________________________ test_background_tasks _____________________________
-
->   ???
-E   AssertionError: assert 'finished b with a: started a' == 'started b'
-E     
-E     - started b
-E     + finished b with a: started a
-
-/mnt/e/temp_git/fastapi-rust/tests/test_dependency_contextmanager.py:288: AssertionError
-_____________________________ test_function_scope ______________________________
-
->   ???
-E   KeyError: 'session_closed'
-
-/mnt/e/temp_git/fastapi-rust/tests/test_dependency_yield_scope_websockets.py:136: KeyError
------------------------------ Captured stderr call -----------------------------
-set_type_exception_handlers: {'WebSocketRequestValidationError': 'websocket_request_validation_exception_handler'}
-______________________________ test_request_scope ______________________________
-
->   ???
-E   KeyError: 'session_closed'
-
-/mnt/e/temp_git/fastapi-rust/tests/test_dependency_yield_scope_websockets.py:145: KeyError
-_______________________________ test_two_scopes ________________________________
-
->   ???
-E   KeyError: 'session_closed'
-
-/mnt/e/temp_git/fastapi-rust/tests/test_dependency_yield_scope_websockets.py:155: KeyError
-___________________________________ test_sub ___________________________________
-
->   ???
-E   KeyError: 'session_closed'
-
-/mnt/e/temp_git/fastapi-rust/tests/test_dependency_yield_scope_websockets.py:165: KeyError
-__________________________ test_named_function_scope ___________________________
-
->   ???
-E   KeyError: 'session_closed'
-
-/mnt/e/temp_git/fastapi-rust/tests/test_dependency_yield_scope_websockets.py:189: KeyError
-_________________________ test_regular_function_scope __________________________
-
->   ???
-E   KeyError: 'session_closed'
-
-/mnt/e/temp_git/fastapi-rust/tests/test_dependency_yield_scope_websockets.py:200: KeyError
-___________________ test_traceback_for_dependency_with_yield ___________________
-
->   ???
-E   AssertionError: assert '/mnt/e/temp_...n_handlers.py' == '/run/media/r...n_handlers.py'
-E     
-E     - /run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/tests/test_exception_handlers.py
-E     + /mnt/e/temp_git/fastapi-rust/tests/test_exception_handlers.py
-
-/mnt/e/temp_git/fastapi-rust/tests/test_exception_handlers.py:87: AssertionError
-_________________________________ test_options _________________________________
-
-    @contextlib.contextmanager
-    def map_httpcore_exceptions() -> typing.Iterator[None]:
-        global HTTPCORE_EXC_MAP
-        if len(HTTPCORE_EXC_MAP) == 0:
-            HTTPCORE_EXC_MAP = _load_httpcore_exceptions()
-        try:
->           yield
-
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:101: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:250: in handle_request
-    resp = self._pool.handle_request(req)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py:256: in handle_request
-    raise exc from None
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py:236: in handle_request
-    response = connection.handle_request(
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection.py:103: in handle_request
-    return self._connection.handle_request(request)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:136: in handle_request
-    raise exc
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:106: in handle_request
-    ) = self._receive_response_headers(**kwargs)
-        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:177: in _receive_response_headers
-    event = self._receive_event(timeout=timeout)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:213: in _receive_event
-    with map_exceptions({h11.RemoteProtocolError: RemoteProtocolError}):
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/usr/lib/python3.14/contextlib.py:162: in __exit__
-    self.gen.throw(value)
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-map = {<class 'h11._util.RemoteProtocolError'>: <class 'httpcore.RemoteProtocolError'>}
-
-    @contextlib.contextmanager
-    def map_exceptions(map: ExceptionMapping) -> typing.Iterator[None]:
-        try:
-            yield
-        except Exception as exc:  # noqa: PIE786
-            for from_exc, to_exc in map.items():
-                if isinstance(exc, from_exc):
->                   raise to_exc(exc) from exc
-E                   httpcore.RemoteProtocolError: illegal status line: bytearray(b'nullHTTP/1.1 200 OK')
-
-.venv/lib/python3.14/site-packages/httpcore/_exceptions.py:14: RemoteProtocolError
-
-The above exception was the direct cause of the following exception:
-
->   ???
-
-/mnt/e/temp_git/fastapi-rust/tests/test_extra_routes.py:81: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:490: in options
-    resp = self._client.options(url, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:1082: in options
-    return self.request(
-.venv/lib/python3.14/site-packages/httpx/_client.py:825: in request
-    return self.send(request, auth=auth, follow_redirects=follow_redirects)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:914: in send
-    response = self._send_handling_auth(
-.venv/lib/python3.14/site-packages/httpx/_client.py:942: in _send_handling_auth
-    response = self._send_handling_redirects(
-.venv/lib/python3.14/site-packages/httpx/_client.py:979: in _send_handling_redirects
-    response = self._send_single_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:1014: in _send_single_request
-    response = transport.handle_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:249: in handle_request
-    with map_httpcore_exceptions():
-         ^^^^^^^^^^^^^^^^^^^^^^^^^
-/usr/lib/python3.14/contextlib.py:162: in __exit__
-    self.gen.throw(value)
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-    @contextlib.contextmanager
-    def map_httpcore_exceptions() -> typing.Iterator[None]:
-        global HTTPCORE_EXC_MAP
-        if len(HTTPCORE_EXC_MAP) == 0:
-            HTTPCORE_EXC_MAP = _load_httpcore_exceptions()
-        try:
-            yield
-        except Exception as exc:
-            mapped_exc = None
-    
-            for from_exc, to_exc in HTTPCORE_EXC_MAP.items():
-                if not isinstance(exc, from_exc):
-                    continue
-                # We want to map to the most specific exception we can find.
-                # Eg if `exc` is an `httpcore.ReadTimeout`, we want to map to
-                # `httpx.ReadTimeout`, not just `httpx.TimeoutException`.
-                if mapped_exc is None or issubclass(to_exc, mapped_exc):
-                    mapped_exc = to_exc
-    
-            if mapped_exc is None:  # pragma: no cover
-                raise
-    
-            message = str(exc)
->           raise mapped_exc(message) from exc
-E           httpx.RemoteProtocolError: illegal status line: bytearray(b'nullHTTP/1.1 200 OK')
-
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:118: RemoteProtocolError
-_________________________ test_signatures_consistency __________________________
-
->   ???
-E   assert typing.Annotated[str, Doc('\n                The URL path to be used for this *path operation*.\n\n                For example, in `http://example.com/items`, the path is `/items`.\n                ')] == "Annotated[str, Doc('\\n                The URL path to be used for this *path operation*.\\n\\n                For example, in `http://example.com/items`, the path is `/items`.\\n                ')]"
-E    +  where typing.Annotated[str, Doc('\n                The URL path to be used for this *path operation*.\n\n                For example, in `http://example.com/items`, the path is `/items`.\n                ')] = <Parameter "path: Annotated[str, Doc('\n                The URL path to be used for this *path operation*.\n\n                For example, in `http://example.com/items`, the path is `/items`.\n                ')]">.annotation
-E    +  and   "Annotated[str, Doc('\\n                The URL path to be used for this *path operation*.\\n\\n                For example, in `http://example.com/items`, the path is `/items`.\\n                ')]" = <Parameter "path: "Annotated[str, Doc('\\n                The URL path to be used for this *path operation*.\\n\\n                For example, in `http://example.com/items`, the path is `/items`.\\n                ')]"">.annotation
-
-/mnt/e/temp_git/fastapi-rust/tests/test_operations_signatures.py:20: AssertionError
-_____________________________ test_get_parameters ______________________________
-
->   ???
-E   AssertionError: assert {'path': 'tes...: 'test_path'} == {'path': 'tes... 'test_query'}
-E     
-E     Omitting 1 identical items, use -vv to show
-E     Differing items:
-E     {'query': 'test_path'} != {'query': 'test_query'}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_repeated_parameter_alias.py:21: AssertionError
------------------------------ Captured stderr call -----------------------------
-set_type_exception_handlers: {'WebSocketRequestValidationError': 'websocket_request_validation_exception_handler'}
-___________________ test_security_http_base_with_whitespaces ___________________
-
-    @contextlib.contextmanager
-    def map_httpcore_exceptions() -> typing.Iterator[None]:
-        global HTTPCORE_EXC_MAP
-        if len(HTTPCORE_EXC_MAP) == 0:
-            HTTPCORE_EXC_MAP = _load_httpcore_exceptions()
-        try:
->           yield
-
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:101: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:250: in handle_request
-    resp = self._pool.handle_request(req)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py:256: in handle_request
-    raise exc from None
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py:236: in handle_request
-    response = connection.handle_request(
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection.py:103: in handle_request
-    return self._connection.handle_request(request)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:136: in handle_request
-    raise exc
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:86: in handle_request
-    self._send_request_headers(**kwargs)
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:144: in _send_request_headers
-    with map_exceptions({h11.LocalProtocolError: LocalProtocolError}):
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/usr/lib/python3.14/contextlib.py:162: in __exit__
-    self.gen.throw(value)
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-map = {<class 'h11._util.LocalProtocolError'>: <class 'httpcore.LocalProtocolError'>}
-
-    @contextlib.contextmanager
-    def map_exceptions(map: ExceptionMapping) -> typing.Iterator[None]:
-        try:
-            yield
-        except Exception as exc:  # noqa: PIE786
-            for from_exc, to_exc in map.items():
-                if isinstance(exc, from_exc):
->                   raise to_exc(exc) from exc
-E                   httpcore.LocalProtocolError: Illegal header value b'Other  foobar '
-
-.venv/lib/python3.14/site-packages/httpcore/_exceptions.py:14: LocalProtocolError
-
-The above exception was the direct cause of the following exception:
-
->   ???
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_http_base.py:25: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:451: in get
-    resp = self._client.get(url, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:1053: in get
-    return self.request(
-.venv/lib/python3.14/site-packages/httpx/_client.py:825: in request
-    return self.send(request, auth=auth, follow_redirects=follow_redirects)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:914: in send
-    response = self._send_handling_auth(
-.venv/lib/python3.14/site-packages/httpx/_client.py:942: in _send_handling_auth
-    response = self._send_handling_redirects(
-.venv/lib/python3.14/site-packages/httpx/_client.py:979: in _send_handling_redirects
-    response = self._send_single_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:1014: in _send_single_request
-    response = transport.handle_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:249: in handle_request
-    with map_httpcore_exceptions():
-         ^^^^^^^^^^^^^^^^^^^^^^^^^
-/usr/lib/python3.14/contextlib.py:162: in __exit__
-    self.gen.throw(value)
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-    @contextlib.contextmanager
-    def map_httpcore_exceptions() -> typing.Iterator[None]:
-        global HTTPCORE_EXC_MAP
-        if len(HTTPCORE_EXC_MAP) == 0:
-            HTTPCORE_EXC_MAP = _load_httpcore_exceptions()
-        try:
-            yield
-        except Exception as exc:
-            mapped_exc = None
-    
-            for from_exc, to_exc in HTTPCORE_EXC_MAP.items():
-                if not isinstance(exc, from_exc):
-                    continue
-                # We want to map to the most specific exception we can find.
-                # Eg if `exc` is an `httpcore.ReadTimeout`, we want to map to
-                # `httpx.ReadTimeout`, not just `httpx.TimeoutException`.
-                if mapped_exc is None or issubclass(to_exc, mapped_exc):
-                    mapped_exc = to_exc
-    
-            if mapped_exc is None:  # pragma: no cover
-                raise
-    
-            message = str(exc)
->           raise mapped_exc(message) from exc
-E           httpx.LocalProtocolError: Illegal header value b'Other  foobar '
-
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:118: LocalProtocolError
-_________________________ test_token_with_whitespaces __________________________
-
-    @contextlib.contextmanager
-    def map_httpcore_exceptions() -> typing.Iterator[None]:
-        global HTTPCORE_EXC_MAP
-        if len(HTTPCORE_EXC_MAP) == 0:
-            HTTPCORE_EXC_MAP = _load_httpcore_exceptions()
-        try:
->           yield
-
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:101: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:250: in handle_request
-    resp = self._pool.handle_request(req)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py:256: in handle_request
-    raise exc from None
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py:236: in handle_request
-    response = connection.handle_request(
-.venv/lib/python3.14/site-packages/httpcore/_sync/connection.py:103: in handle_request
-    return self._connection.handle_request(request)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:136: in handle_request
-    raise exc
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:86: in handle_request
-    self._send_request_headers(**kwargs)
-.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py:144: in _send_request_headers
-    with map_exceptions({h11.LocalProtocolError: LocalProtocolError}):
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-/usr/lib/python3.14/contextlib.py:162: in __exit__
-    self.gen.throw(value)
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-map = {<class 'h11._util.LocalProtocolError'>: <class 'httpcore.LocalProtocolError'>}
-
-    @contextlib.contextmanager
-    def map_exceptions(map: ExceptionMapping) -> typing.Iterator[None]:
-        try:
-            yield
-        except Exception as exc:  # noqa: PIE786
-            for from_exc, to_exc in map.items():
-                if isinstance(exc, from_exc):
->                   raise to_exc(exc) from exc
-E                   httpcore.LocalProtocolError: Illegal header value b'Bearer  testtoken '
-
-.venv/lib/python3.14/site-packages/httpcore/_exceptions.py:14: LocalProtocolError
-
-The above exception was the direct cause of the following exception:
-
->   ???
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_oauth2_authorization_code_bearer.py:41: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:451: in get
-    resp = self._client.get(url, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:1053: in get
-    return self.request(
-.venv/lib/python3.14/site-packages/httpx/_client.py:825: in request
-    return self.send(request, auth=auth, follow_redirects=follow_redirects)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:914: in send
-    response = self._send_handling_auth(
-.venv/lib/python3.14/site-packages/httpx/_client.py:942: in _send_handling_auth
-    response = self._send_handling_redirects(
-.venv/lib/python3.14/site-packages/httpx/_client.py:979: in _send_handling_redirects
-    response = self._send_single_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_client.py:1014: in _send_single_request
-    response = transport.handle_request(request)
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:249: in handle_request
-    with map_httpcore_exceptions():
-         ^^^^^^^^^^^^^^^^^^^^^^^^^
-/usr/lib/python3.14/contextlib.py:162: in __exit__
-    self.gen.throw(value)
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-    @contextlib.contextmanager
-    def map_httpcore_exceptions() -> typing.Iterator[None]:
-        global HTTPCORE_EXC_MAP
-        if len(HTTPCORE_EXC_MAP) == 0:
-            HTTPCORE_EXC_MAP = _load_httpcore_exceptions()
-        try:
-            yield
-        except Exception as exc:
-            mapped_exc = None
-    
-            for from_exc, to_exc in HTTPCORE_EXC_MAP.items():
-                if not isinstance(exc, from_exc):
-                    continue
-                # We want to map to the most specific exception we can find.
-                # Eg if `exc` is an `httpcore.ReadTimeout`, we want to map to
-                # `httpx.ReadTimeout`, not just `httpx.TimeoutException`.
-                if mapped_exc is None or issubclass(to_exc, mapped_exc):
-                    mapped_exc = to_exc
-    
-            if mapped_exc is None:  # pragma: no cover
-                raise
-    
-            message = str(exc)
->           raise mapped_exc(message) from exc
-E           httpx.LocalProtocolError: Illegal header value b'Bearer  testtoken '
-
-.venv/lib/python3.14/site-packages/httpx/_transports/default.py:118: LocalProtocolError
-_________________ test_security_scopes_sub_dependency_caching __________________
-
-client = <astraapi._testclient.TestClient object at 0x7f8084238450>
-call_counts = {'get_current_user': 2, 'get_db_session': 1, 'get_user_items': 1, 'get_user_me': 2}
-
->   ???
-E   AssertionError: assert {'user_items'... 'user_me_2'}} == {'user_items'... 'user_me_1'}}
-E     
-E     Omitting 1 identical items, use -vv to show
-E     Differing items:
-E     {'user_me': {'current_user': {'db_session': 'db_session_1', 'scopes': ['items', 'me'], 'user': 'user_2'}, 'user_me': 'user_me_2'}} != {'user_me': {'current_user': {'db_session': 'db_session_1', 'scopes': ['me'], 'user': 'user_1'}, 'user_me': 'user_me_1'}}
-E     Use -v to get more diff
-
-/mnt/e/temp_git/fastapi-rust/tests/test_security_scopes_sub_dependency.py:87: AssertionError
------------------------------ Captured stderr call -----------------------------
-set_type_exception_handlers: {'WebSocketRequestValidationError': 'websocket_request_validation_exception_handler'}
-___________ test_request_validation_error_includes_endpoint_context ____________
-
->   ???
-E   assert 'get_user' in "1 validation error:\n  {'type': 'int_parsing', 'msg': 'Input should be a valid integer, unable to parse string as an integer', 'input': 'invalid', 'loc': ('path', 'user_id')}"
-
-/mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:96: AssertionError
------------------------------ Captured stderr call -----------------------------
-set_type_exception_handlers: {'RequestValidationError': '_rv_handler_with_ctx', 'WebSocketRequestValidationError': 'websocket_validation_handler', 'ResponseValidationError': 'response_validation_handler'}
-___________ test_response_validation_error_includes_endpoint_context ___________
-
->   ???
-E   assert None is not None
-E    +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7f8131db9fd0>.exception
-
-/mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:107: AssertionError
-__________ test_websocket_validation_error_includes_endpoint_context ___________
-
->   ???
-E   assert 'websocket_endpoint' in "1 validation error:\n  {'type': 'int_parsing', 'loc': ('path', 'item_id'), 'msg': 'Input should be a valid integer, unable to parse string as an integer', 'input': 'invalid'}\n\n  Endpoint: WS /ws/{item_id}"
-
-/mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:123: AssertionError
------------------------------- Captured log call -------------------------------
-ERROR    astraapi:_cpp_server.py:2479 Unhandled exception in WebSocket endpoint
-Traceback (most recent call last):
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_cpp_server.py", line 2466, in _handle_websocket
-    await _dispatch(ws.scope, ws.receive, ws.send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_app_base.py", line 134, in __call__
-    await self.router(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_routing_base.py", line 906, in __call__
-    await self.middleware_stack(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_routing_base.py", line 927, in app
-    await route.handle(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_routing_base.py", line 596, in handle
-    await self.app(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/routing.py", line 176, in app
-    await wrap_app_handling_exceptions(app, session)(scope, receive, send)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_exception_handler.py", line 100, in wrapped_app
-    response = await handler(conn, exc)
-               ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py", line 52, in websocket_validation_handler
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/_exception_handler.py", line 78, in wrapped_app
-    await app(scope, receive, sender)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/routing.py", line 173, in app
-    await func(session)
-  File "/run/media/rana/DEV/code/Experment/lumos/tools/fastapi-cpp/astraapi/routing.py", line 726, in app
-    raise WebSocketRequestValidationError(
-    ...<2 lines>...
-    )
-astraapi.exceptions.WebSocketRequestValidationError: 1 validation error:
-  {'type': 'int_parsing', 'loc': ('path', 'item_id'), 'msg': 'Input should be a valid integer, unable to parse string as an integer', 'input': 'invalid'}
-
-  Endpoint: WS /ws/{item_id}
-________ test_subapp_request_validation_error_includes_endpoint_context ________
-
->   ???
-E   assert 'get_sub_item' in "1 validation error:\n  {'type': 'missing', 'loc': ('response', 'id'), 'msg': 'Field required', 'input': {'name': 'Widget'}}\n\n  Endpoint: GET /sub/items/"
-
-/mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:136: AssertionError
-_______ test_subapp_websocket_validation_error_includes_endpoint_context _______
-
->   ???
-E   assert None is not None
-E    +  where None = <tests.test_validation_error_context.ExceptionCapture object at 0x7f8131db9fd0>.exception
-
-/mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:148: AssertionError
-_____________________________ test_openapi_schema ______________________________
-
->   ???
-
-/mnt/e/temp_git/fastapi-rust/tests/test_webhooks_security.py:39: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-astraapi/_testclient.py:452: in get
-    self._check_exc()
-astraapi/_testclient.py:430: in _check_exc
-    raise exc
-astraapi/_cpp_server.py:1974: in _dispatch_exception
-    resp = await handler(None, exc)
-           ^^^^^^^^^^^^^^^^^^^^^^^^
-/mnt/e/temp_git/fastapi-rust/tests/test_validation_error_context.py:43: in response_validation_handler
-    ???
-astraapi/_cpp_server.py:2082: in _handle_async
-    raw = await _drive_coro(coro, first_yield)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-astraapi/_cpp_server.py:1153: in _drive_coro
-    next_yield = coro.send(result)
-                 ^^^^^^^^^^^^^^^^^
-astraapi/applications.py:2795: in _mount_endpoint
-    await _app(_scope, _receive, _send)
-astraapi/_app_base.py:134: in __call__
-    await self.router(scope, receive, send)
-astraapi/_routing_base.py:906: in __call__
-    await self.middleware_stack(scope, receive, send)
-astraapi/_routing_base.py:927: in app
-    await route.handle(scope, receive, send)
-astraapi/_routing_base.py:515: in handle
-    await self.app(scope, receive, send)
-astraapi/routing.py:150: in app
-    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
-astraapi/_exception_handler.py:92: in wrapped_app
-    raise exc
-astraapi/_exception_handler.py:78: in wrapped_app
-    await app(scope, receive, sender)
-astraapi/routing.py:136: in app
-    response = await f(request)
-               ^^^^^^^^^^^^^^^^
-astraapi/routing.py:652: in app
-    content = await serialize_response(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
-
-    async def serialize_response(
-        *,
-        field: Optional[ModelField] = None,
-        response_content: Any,
-        include: Optional[IncEx] = None,
-        exclude: Optional[IncEx] = None,
-        by_alias: bool = True,
-        exclude_unset: bool = False,
-        exclude_defaults: bool = False,
-        exclude_none: bool = False,
-        is_coroutine: bool = True,
-        endpoint_ctx: Optional[EndpointContext] = None,
-    ) -> Any:
-        if field:
-            if is_coroutine:
-                value, errors = field.validate(response_content, {}, loc=("response",))
-            else:
-                value, errors = await run_in_threadpool(
-                    field.validate, response_content, {}, loc=("response",)
-                )
-            if errors:
-                ctx = endpoint_ctx or EndpointContext()
->               raise ResponseValidationError(
-                    errors=errors,
-                    body=response_content,
-                    endpoint_ctx=ctx,
-                )
-E               astraapi.exceptions.ResponseValidationError: 1 validation error:
-E                 {'type': 'missing', 'loc': ('response', 'id'), 'msg': 'Field required', 'input': {'name': 'Widget'}}
-E               
-E                 Endpoint: GET /sub/items/
-
-astraapi/routing.py:315: ResponseValidationError
------------------------------ Captured stderr call -----------------------------
-set_type_exception_handlers: {'WebSocketRequestValidationError': 'websocket_request_validation_exception_handler'}
-=========================== short test summary info ============================
-FAILED tests/test_additional_responses_union_duplicate_anyof.py::test_openapi_schema
-FAILED tests/test_dependency_after_yield_websockets.py::test_websocket_dependency_after_yield_broken
-FAILED tests/test_dependency_contextmanager.py::test_background_tasks - Asser...
-FAILED tests/test_dependency_yield_scope_websockets.py::test_function_scope
-FAILED tests/test_dependency_yield_scope_websockets.py::test_request_scope - ...
-FAILED tests/test_dependency_yield_scope_websockets.py::test_two_scopes - Key...
-FAILED tests/test_dependency_yield_scope_websockets.py::test_sub - KeyError: ...
-FAILED tests/test_dependency_yield_scope_websockets.py::test_named_function_scope
-FAILED tests/test_dependency_yield_scope_websockets.py::test_regular_function_scope
-FAILED tests/test_exception_handlers.py::test_traceback_for_dependency_with_yield
-FAILED tests/test_extra_routes.py::test_options - httpx.RemoteProtocolError: ...
-FAILED tests/test_operations_signatures.py::test_signatures_consistency - ass...
-FAILED tests/test_repeated_parameter_alias.py::test_get_parameters - Assertio...
-FAILED tests/test_security_http_base.py::test_security_http_base_with_whitespaces
-FAILED tests/test_security_oauth2_authorization_code_bearer.py::test_token_with_whitespaces
-FAILED tests/test_security_scopes_sub_dependency.py::test_security_scopes_sub_dependency_caching
-FAILED tests/test_validation_error_context.py::test_request_validation_error_includes_endpoint_context
-FAILED tests/test_validation_error_context.py::test_response_validation_error_includes_endpoint_context
-FAILED tests/test_validation_error_context.py::test_websocket_validation_error_includes_endpoint_context
-FAILED tests/test_validation_error_context.py::test_subapp_request_validation_error_includes_endpoint_context
-FAILED tests/test_validation_error_context.py::test_subapp_websocket_validation_error_includes_endpoint_context
-FAILED tests/test_webhooks_security.py::test_openapi_schema - astraapi.except...
-====== 22 failed, 3708 passed, 4 skipped, 9 xfailed in 200.69s (0:03:20) =======
+============ 3730 passed, 4 skipped, 9 xfailed in 204.75s (0:03:24) ============
