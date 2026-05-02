@@ -88,6 +88,11 @@ static PyObject* s_upload_file_class = nullptr;       // astraapi._datastructure
 static PyObject* g_str_write = nullptr;
 static PyObject* g_str_is_closing = nullptr;
 
+// Pre-built cached error responses (allocated once at init, reused forever — zero alloc per 404/405/500)
+static PyObject* s_resp_404 = nullptr;   // HTTP/1.1 404 Not Found keep-alive
+static PyObject* s_resp_405 = nullptr;   // HTTP/1.1 405 Method Not Allowed keep-alive
+static PyObject* s_resp_500 = nullptr;   // HTTP/1.1 500 Internal Server Error keep-alive
+
 // Promoted from function-local statics for eager initialization
 static PyObject* s_ensure_future = nullptr;          // asyncio.ensure_future
 static PyObject* s_kw_body_fields = nullptr;         // "body_fields" interned string
@@ -189,6 +194,9 @@ void cleanup_cached_refs() {
     Py_CLEAR(s_upload_file_class);
     Py_CLEAR(g_str_write);
     Py_CLEAR(g_str_is_closing);
+    Py_CLEAR(s_resp_404);
+    Py_CLEAR(s_resp_405);
+    Py_CLEAR(s_resp_500);
     Py_CLEAR(s_ensure_future);
     Py_CLEAR(s_kw_body_fields);
     Py_CLEAR(s_kw_received_body);
@@ -232,6 +240,35 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     // Pre-intern transport method strings
     if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
     if (!g_str_is_closing) g_str_is_closing = PyUnicode_InternFromString("is_closing");
+
+    // Pre-build cached error responses (zero alloc per 404/405/500 on hot path)
+    if (!s_resp_404) {
+        static const char R404[] =
+            "HTTP/1.1 404 Not Found\r\n"
+            "content-type: application/json\r\n"
+            "content-length: 22\r\n"
+            "connection: keep-alive\r\n\r\n"
+            "{\"detail\":\"Not Found\"}";
+        s_resp_404 = PyBytes_FromStringAndSize(R404, sizeof(R404) - 1);
+    }
+    if (!s_resp_405) {
+        static const char R405[] =
+            "HTTP/1.1 405 Method Not Allowed\r\n"
+            "content-type: application/json\r\n"
+            "content-length: 31\r\n"
+            "connection: keep-alive\r\n\r\n"
+            "{\"detail\":\"Method Not Allowed\"}";
+        s_resp_405 = PyBytes_FromStringAndSize(R405, sizeof(R405) - 1);
+    }
+    if (!s_resp_500) {
+        static const char R500[] =
+            "HTTP/1.1 500 Internal Server Error\r\n"
+            "content-type: application/json\r\n"
+            "content-length: 35\r\n"
+            "connection: keep-alive\r\n\r\n"
+            "{\"detail\":\"Internal Server Error\"}";
+        s_resp_500 = PyBytes_FromStringAndSize(R500, sizeof(R500) - 1);
+    }
 
     // Pre-import exception types (avoids 3-8ms lazy import on first error)
     if (!s_http_exc_type) {
@@ -354,24 +391,27 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
 // since they are separate class hierarchies.
 static bool is_http_exception(PyObject* exc_type) {
     if (!exc_type) return false;
-    if (!s_http_exc_type) {
-        PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-        if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-        else PyErr_Clear();
-    }
+    // Only check astraapi.exceptions.HTTPException — starlette check removed (perf).
+    // AstraAPI's HTTPException IS the canonical exception; starlette.exceptions.HTTPException
+    // is only used by starlette internals which are not on the hot path.
     if (!s_astraapi_http_exc_type) {
         PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
         if (mod) s_astraapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
         else PyErr_Clear();
     }
-    int r;
-    if (s_http_exc_type) {
-        r = PyObject_IsSubclass(exc_type, s_http_exc_type);
+    if (s_astraapi_http_exc_type) {
+        int r = PyObject_IsSubclass(exc_type, s_astraapi_http_exc_type);
         if (r < 0) PyErr_Clear();
         if (r == 1) return true;
     }
-    if (s_astraapi_http_exc_type) {
-        r = PyObject_IsSubclass(exc_type, s_astraapi_http_exc_type);
+    // Fallback: check starlette.exceptions.HTTPException for compatibility
+    if (!s_http_exc_type) {
+        PyRef mod(PyImport_ImportModule("starlette.exceptions"));
+        if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else PyErr_Clear();
+    }
+    if (s_http_exc_type) {
+        int r = PyObject_IsSubclass(exc_type, s_http_exc_type);
         if (r < 0) PyErr_Clear();
         if (r == 1) return true;
     }
@@ -3373,9 +3413,18 @@ static PyObject* dispatch_one_request(
         }
 
         --self->counters.active_requests;
-        PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
-                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-        if (resp) write_to_transport(transport, resp.get());
+        // Use pre-built cached 404 response when no CORS (common case — zero alloc)
+        if (!has_cors) {
+            if (s_resp_404) write_to_transport(transport, s_resp_404);
+            else {
+                PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
+                if (resp) write_to_transport(transport, resp.get());
+            }
+        } else {
+            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
+                       cors_ptr, origin_sv.data, origin_sv.len));
+            if (resp) write_to_transport(transport, resp.get());
+        }
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, 404, request_start_time);
         return make_consumed_true(self, req.total_consumed);
@@ -3384,9 +3433,17 @@ static PyObject* dispatch_one_request(
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
         --self->counters.active_requests;
-        PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
-                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-        if (resp) write_to_transport(transport, resp.get());
+        if (!has_cors) {
+            if (s_resp_404) write_to_transport(transport, s_resp_404);
+            else {
+                PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
+                if (resp) write_to_transport(transport, resp.get());
+            }
+        } else {
+            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
+                       cors_ptr, origin_sv.data, origin_sv.len));
+            if (resp) write_to_transport(transport, resp.get());
+        }
         fire_post_response_hook(self, req.method.data, req.method.len,
                                 req.path.data, req.path.len, 404, request_start_time);
         return make_consumed_true(self, req.total_consumed);
@@ -3399,9 +3456,18 @@ static PyObject* dispatch_one_request(
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (UNLIKELY(!(route.method_mask & req_method))) {
             --self->counters.active_requests;
-            PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
-                       has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
-            if (resp) write_to_transport(transport, resp.get());
+            // Use pre-built cached 405 response when no CORS (common case — zero alloc)
+            if (!has_cors) {
+                if (s_resp_405) write_to_transport(transport, s_resp_405);
+                else {
+                    PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
+                    if (resp) write_to_transport(transport, resp.get());
+                }
+            } else {
+                PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
+                           cors_ptr, origin_sv.data, origin_sv.len));
+                if (resp) write_to_transport(transport, resp.get());
+            }
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, 405, request_start_time);
             return make_consumed_true(self, req.total_consumed);

@@ -1420,17 +1420,23 @@ class CppHttpProtocol(asyncio.Protocol):
                 self._sock_fd = sock.fileno()
             except (OSError, AttributeError):
                 self._sock_fd = -1
-        # Write buffer limits: 32KB high / 8KB low per connection.
-        # 100 conns × 32KB = 3.2MB vs previous 64/128KB = 6.4/12.8MB.
-        # asyncio only applies back-pressure after high-water — 32KB is
-        # still large enough for any single response body.
-        transport.set_write_buffer_limits(high=32768, low=8192)  # type: ignore[union-attr]
-        # SO_BUSY_POLL: spin-poll for 100μs before sleeping — reduces scheduler wake-up jitter
-        # at high connection counts. No-op on non-Linux / WSL without the option.
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, 46, 100)  # SO_BUSY_POLL = 46 (Linux)
-        except (OSError, AttributeError):
-            pass
+        # Write buffer limits: 64KB high / 16KB low per connection.
+        # Larger buffers prevent backpressure stalls at 10k connections.
+        # 10k conns × 64KB = 640MB max — acceptable for modern servers.
+        # asyncio only applies back-pressure after high-water.
+        transport.set_write_buffer_limits(high=65536, low=16384)  # type: ignore[union-attr]
+        if sock is not None:
+            # SO_BUSY_POLL: spin-poll for 50μs before sleeping — reduces scheduler wake-up jitter
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, 46, 50)  # SO_BUSY_POLL = 46 (Linux)
+            except (OSError, AttributeError):
+                pass
+            # TCP_USER_TIMEOUT: 5s — prevents connections hanging when peer is unresponsive.
+            # Critical for 10k connection stability (Linux default can be 20+ minutes).
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, 18, 5000)  # TCP_USER_TIMEOUT = 18, 5000ms
+            except (OSError, AttributeError):
+                pass
         if _RATE_LIMIT_ENABLED:
             peername = transport.get_extra_info("peername")
             if peername:
@@ -1509,11 +1515,13 @@ class CppHttpProtocol(asyncio.Protocol):
             return
 
         # Body size limit check (0 = unlimited, like FastAPI/Hono/Bun/Express)
-        if self._core.max_body_size > 0:
+        # Cache max_body_size locally — avoids Python→C++ attribute lookup per request
+        _mbs = self._core.max_body_size
+        if _mbs > 0:
             # Total = already buffered + incoming chunk
             # Add 8KB headroom for HTTP headers
             _total_incoming = _http_buf_len(http_buf) + len(data)
-            if _total_incoming > self._core.max_body_size + 8192:
+            if _total_incoming > _mbs + 8192:
                 transport.write(b"HTTP/1.1 413 Request Entity Too Large\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
                 transport.close()
                 return
@@ -1524,37 +1532,56 @@ class CppHttpProtocol(asyncio.Protocol):
         # Skip entirely when data is empty (called from _drain_buf for pipelined
         # request processing — no new TCP data, must not clobber _current_body).
         if self._needs_req_ctx and data:
-            _qs = b''
-            _nl = data.find(_CRLF)
-            if _nl > 0:
-                _req_line = data[:_nl]
-                _q = _req_line.find(_QUESTION)
-                if _q >= 0:
-                    _sp = _req_line.find(_SPACE, _q)
-                    _qs = _req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:]
-            _current_query_string.set(_qs)
+            # Fast minimal parse: single pass over first line + headers
+            # Avoids split() + multiple decode() calls on every request
             try:
-                _hdrs_end = data.find(_CRLFCRLF)
-                if _hdrs_end <= 0:
+                _p = 0
+                _dlen = len(data)
+                # Find end of request line
+                _nl = data.find(b'\r\n', 0, min(_dlen, 4096))
+                if _nl > 0:
+                    _req_line = data[:_nl]
+                    # Extract query string from request line
+                    _q = _req_line.find(b'?')
+                    if _q >= 0:
+                        _sp = _req_line.find(b' ', _q)
+                        _current_query_string.set(_req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:])
+                    else:
+                        _current_query_string.set(b'')
+                    # Extract method and path
+                    _sp0 = _req_line.find(b' ')
+                    if _sp0 > 0:
+                        _method = _req_line[:_sp0].decode('latin-1')
+                        _sp1 = _req_line.find(b' ', _sp0 + 1)
+                        _full_path = _req_line[_sp0 + 1:_sp1 if _sp1 > 0 else None].decode('latin-1')
+                        _current_method.set(_method)
+                        _current_path.set(_full_path.split('?')[0])
+                    # Find end of headers
+                    _hdrs_end = data.find(b'\r\n\r\n', _nl)
+                    if _hdrs_end > 0:
+                        # Parse headers: single pass, no split()
+                        _parsed_hdrs = []
+                        _pos = _nl + 2
+                        while _pos < _hdrs_end:
+                            _eol = data.find(b'\r\n', _pos, _hdrs_end + 1)
+                            if _eol < 0:
+                                _eol = _hdrs_end
+                            _colon = data.find(b':', _pos, _eol)
+                            if _colon > _pos:
+                                _hname = data[_pos:_colon].strip().lower()
+                                _hval = data[_colon + 1:_eol].strip()
+                                _parsed_hdrs.append((_hname, _hval))
+                            _pos = _eol + 2
+                        _current_raw_headers.set(_parsed_hdrs)
+                        _body_start = _hdrs_end + 4
+                        _current_body.set(data[_body_start:] if _body_start < _dlen else b'')
+                    else:
+                        _current_raw_headers.set([])
+                        _current_body.set(b'')
+                else:
+                    _current_query_string.set(b'')
+                    _current_raw_headers.set([])
                     _current_body.set(b'')
-                if _hdrs_end > 0:
-                    _hdr_block = data[:_hdrs_end]
-                    _hdr_lines = _hdr_block.split(_CRLF)
-                    _req_parts = _hdr_lines[0].split(_SPACE) if _hdr_lines else []
-                    _method = _req_parts[0].decode('latin-1') if len(_req_parts) > 0 else 'GET'
-                    _full_path = _req_parts[1].decode('latin-1') if len(_req_parts) > 1 else '/'
-                    _path_only = _full_path.split('?')[0]
-                    _parsed_hdrs = []
-                    for _hl in _hdr_lines[1:]:
-                        _colon = _hl.find(_COLON)
-                        if _colon > 0:
-                            _parsed_hdrs.append((_hl[:_colon].strip().lower(), _hl[_colon+1:].strip()))
-                    _current_raw_headers.set(_parsed_hdrs)
-                    _current_method.set(_method)
-                    _current_path.set(_path_only)
-                    # Extract body (after \r\n\r\n)
-                    _body_start = _hdrs_end + 4
-                    _current_body.set(data[_body_start:] if _body_start < len(data) else b'')
             except Exception:
                 pass
 

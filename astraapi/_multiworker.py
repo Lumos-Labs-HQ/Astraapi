@@ -64,6 +64,16 @@ def _create_listen_socket(host: str, port: int) -> _socket.socket:
         sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
     except (OSError, AttributeError):
         pass
+    # TCP_FASTOPEN: reduce latency for new connections (Linux 3.7+)
+    try:
+        sock.setsockopt(_socket.IPPROTO_TCP, 23, 5)  # TCP_FASTOPEN, queue=5
+    except (OSError, AttributeError):
+        pass
+    # TCP_DEFER_ACCEPT: don't wake up until data arrives (Linux only)
+    try:
+        sock.setsockopt(_socket.IPPROTO_TCP, 9, 1)  # TCP_DEFER_ACCEPT
+    except (OSError, AttributeError):
+        pass
     return sock
 
 

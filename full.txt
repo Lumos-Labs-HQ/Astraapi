@@ -578,4 +578,4 @@ tests/test_wrapped_method_forward_reference.py .                         [ 99%]
 tests/test_ws_dependencies.py ...                                        [ 99%]
 tests/test_ws_router.py ............                                     [100%]
 
-============ 3730 passed, 4 skipped, 9 xfailed in 204.75s (0:03:24) ============
+============ 3730 passed, 4 skipped, 9 xfailed in 194.33s (0:03:14) ============
