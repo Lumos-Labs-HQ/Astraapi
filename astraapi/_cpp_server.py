@@ -1420,23 +1420,10 @@ class CppHttpProtocol(asyncio.Protocol):
                 self._sock_fd = sock.fileno()
             except (OSError, AttributeError):
                 self._sock_fd = -1
-        # Write buffer limits: 64KB high / 16KB low per connection.
-        # Larger buffers prevent backpressure stalls at 10k connections.
-        # 10k conns × 64KB = 640MB max — acceptable for modern servers.
-        # asyncio only applies back-pressure after high-water.
-        transport.set_write_buffer_limits(high=65536, low=16384)  # type: ignore[union-attr]
-        if sock is not None:
-            # SO_BUSY_POLL: spin-poll for 50μs before sleeping — reduces scheduler wake-up jitter
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, 46, 50)  # SO_BUSY_POLL = 46 (Linux)
-            except (OSError, AttributeError):
-                pass
-            # TCP_USER_TIMEOUT: 5s — prevents connections hanging when peer is unresponsive.
-            # Critical for 10k connection stability (Linux default can be 20+ minutes).
-            try:
-                sock.setsockopt(socket.IPPROTO_TCP, 18, 5000)  # TCP_USER_TIMEOUT = 18, 5000ms
-            except (OSError, AttributeError):
-                pass
+        # Write buffer limits: 256KB high / 64KB low.
+        # Never triggers backpressure on normal responses.
+        # asyncio pauses writing only after high-water — we never want that on hot path.
+        transport.set_write_buffer_limits(high=262144, low=65536)  # type: ignore[union-attr]
         if _RATE_LIMIT_ENABLED:
             peername = transport.get_extra_info("peername")
             if peername:
@@ -3037,7 +3024,7 @@ def _setup_fd_receiver_win(
 
 async def run_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
-    keep_alive_timeout: float = 5.0,
+    keep_alive_timeout: float = 30.0,
     sock: Any = None,
     unix_sock: Any = None,
     max_body_size: int = 0,
@@ -3403,26 +3390,20 @@ async def run_server(
     # instead of per-connection call_later() timers (eliminates ~1K+ callbacks/sec)
     async def _ka_sweep() -> None:
         while not stop_event.is_set():
-            # Adaptive interval: faster sweep when few connections
-            _sweep_interval = 1.0 if active_count[0] < 500 else 5.0
-            await asyncio.sleep(_sweep_interval)
+            await asyncio.sleep(10.0)
             now = _monotonic()
-            batch: list = []
+            expired: list = []
+            checked = 0
             for p in active_connections:
-                # Lazy ka_deadline update: connection was active since last sweep
                 if p._ka_needs_reset:
                     p._ka_needs_reset = False
                     p._ka_deadline = now + p._ka_timeout
                 elif p._ka_deadline > 0 and now > p._ka_deadline:
-                    batch.append(p)
-                if len(batch) >= 100:
-                    for proto in batch:
-                        t = proto._transport
-                        if t and not t.is_closing():
-                            t.close()
-                    batch.clear()
-                    await asyncio.sleep(0)  # yield to event loop
-            for proto in batch:
+                    expired.append(p)
+                checked += 1
+                if checked % 512 == 0:
+                    await asyncio.sleep(0)  # yield every 512 conns — don't block event loop
+            for proto in expired:
                 t = proto._transport
                 if t and not t.is_closing():
                     t.close()

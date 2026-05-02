@@ -6453,7 +6453,7 @@ class AstraAPI(AppBase):
         reload_includes: Optional[Sequence[str]] = None,
         reload_excludes: Optional[Sequence[str]] = None,
         workers: int = 1,
-        keep_alive_timeout: float = 5.0,
+        keep_alive_timeout: float = 30.0,
         max_body_size: int = 0,
         max_body_size_kb: float = 0,
         max_body_size_mb: float = 0,
