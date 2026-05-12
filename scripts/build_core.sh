@@ -27,9 +27,17 @@ if not candidates:
     raise SystemExit("Could not find built extension in cpp_core/build")
 
 src = candidates[0]
+
+# Copy to project root (editable install source)
 dst = pkg_dir / src.name
 shutil.copy2(src, dst)
 print(f"Copied {src} -> {dst}")
+
+# Also copy to .venv if editable install redirects there
+venv_pkg = root / ".venv" / "lib" / f"python{sysconfig.get_python_version()}" / "site-packages" / "astraapi" / src.name
+if venv_pkg.parent.exists():
+    shutil.copy2(src, venv_pkg)
+    print(f"Copied {src} -> {venv_pkg}")
 PY
 
 echo "Build complete. You can verify with: python -c 'import astraapi._astraapi_core; print(astraapi._astraapi_core.__file__)'"

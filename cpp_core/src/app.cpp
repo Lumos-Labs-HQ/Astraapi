@@ -2473,12 +2473,17 @@ static std::string extract_http_exc_headers(PyObject* exc_val) {
 }
 
 
-static int write_to_transport(PyObject* transport, PyObject* data) {
-    if (!transport || transport == Py_None) return -1;
+static int write_to_transport(PyObject* transport_or_write_fn, PyObject* data) {
+    if (!transport_or_write_fn || transport_or_write_fn == Py_None) return -1;
 
-    if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
-
-    PyRef result(PyObject_CallMethodOneArg(transport, g_str_write, data));
+    PyRef result;
+    if (PyCallable_Check(transport_or_write_fn)) {
+        // Python passed transport.write directly — skip method lookup
+        result = PyRef(PyObject_CallOneArg(transport_or_write_fn, data));
+    } else {
+        if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
+        result = PyRef(PyObject_CallMethodOneArg(transport_or_write_fn, g_str_write, data));
+    }
     if (!result) {
         log_and_clear_pyerr("transport.write() failed");
         return -1;
@@ -2497,7 +2502,7 @@ static int write_response_direct(int fd, PyObject* transport, PyObject* data) {
         if (len > 0 && len <= 16384) {
             ssize_t sent = platform_socket_write(fd, PyBytes_AS_STRING(data), (size_t)len);
             if (sent == len) {
-                platform_rearm_quickack(fd);  // next pipelined/keep-alive request ACK'd immediately
+                // platform_rearm_quickack(fd);  // next pipelined/keep-alive request ACK'd immediately
                 return 0;  // Full write — bypassed Python entirely
             }
             if (sent > 0) {
@@ -2537,7 +2542,7 @@ static int build_and_write_http_response(
         if (!result) return -1;
         int rc = write_to_transport(transport, result);
         Py_DECREF(result);
-        if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+        // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
         return rc;
     }
     // Slow path: CORS, compression, or uncached status
@@ -2546,7 +2551,7 @@ static int build_and_write_http_response(
     if (!resp) return -1;
     int rc = write_to_transport(transport, resp);
     Py_DECREF(resp);
-    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+    // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
     return rc;
 }
 
@@ -2592,7 +2597,7 @@ static int serialize_json_and_write_response(
             : (keep_alive ? NOT_MOD_KA : NOT_MOD_CLOSE);
         PyRef resp_bytes(PyBytes_FromString(resp_str));
         if (resp_bytes) write_to_transport(transport, resp_bytes.get());
-        if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+        // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
         release_buffer(std::move(buf));
         if (!compressed.empty()) release_buffer(std::move(compressed));
         return 0;
@@ -2624,7 +2629,7 @@ static int serialize_json_and_write_response(
             if (hdr_only) write_to_transport(transport, hdr_only.get());
             release_buffer(std::move(buf));
             if (!compressed.empty()) release_buffer(std::move(compressed));
-            if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+            // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
             return hdr_only ? 0 : -1;
         }
         PyRef full(PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(header_len + body_len)));
@@ -2636,7 +2641,7 @@ static int serialize_json_and_write_response(
         }
         release_buffer(std::move(buf));
         if (!compressed.empty()) release_buffer(std::move(compressed));
-        if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+        // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
         return full ? 0 : -1;
     }
 
@@ -2649,6 +2654,78 @@ static int serialize_json_and_write_response(
     int rc = write_to_transport(transport, resp);
     Py_DECREF(resp);
     return rc;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Build JSON response bytes (header + body) without writing to transport.
+// Returns a new PyBytes reference on success, nullptr on failure.
+// Used by the per-route response cache to capture complete responses.
+// ═══════════════════════════════════════════════════════════════════════════════
+static PyObject* build_json_response_bytes(
+    PyObject* json_obj, int status_code, bool keep_alive,
+    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
+    bool head_only = false)
+{
+    // 1. Serialize JSON into buffer pool
+    auto buf = acquire_buffer();
+    if (UNLIKELY(write_json(json_obj, buf, 0) < 0)) {
+        release_buffer(std::move(buf));
+        return nullptr;
+    }
+    size_t body_len = buf.size();
+    const char* body_data = buf.data();
+
+    // No-body status codes
+    if (status_code == 204 || status_code == 304) {
+        static const char NO_BODY_KA[]    = "HTTP/1.1 204 No Content\r\nconnection: keep-alive\r\n\r\n";
+        static const char NO_BODY_CLOSE[] = "HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n";
+        static const char NOT_MOD_KA[]    = "HTTP/1.1 304 Not Modified\r\nconnection: keep-alive\r\n\r\n";
+        static const char NOT_MOD_CLOSE[] = "HTTP/1.1 304 Not Modified\r\nconnection: close\r\n\r\n";
+        const char* resp_str = (status_code == 204)
+            ? (keep_alive ? NO_BODY_KA : NO_BODY_CLOSE)
+            : (keep_alive ? NOT_MOD_KA : NOT_MOD_CLOSE);
+        PyObject* result = PyBytes_FromString(resp_str);
+        release_buffer(std::move(buf));
+        return result;
+    }
+
+    // Fast path: cached JSON prefix, no CORS
+    if (LIKELY(!cors && status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
+        const auto& jp = s_json_prefixes[status_code];
+        char header_buf[256];
+        char cl_buf[20];
+        int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
+        static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
+        static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
+        const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
+        size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
+
+        char* h = header_buf;
+        memcpy(h, jp.data, jp.len); h += jp.len;
+        memcpy(h, cl_buf, cl_len); h += cl_len;
+        memcpy(h, suffix, suffix_len); h += suffix_len;
+        size_t header_len = (size_t)(h - header_buf);
+
+        if (UNLIKELY(head_only)) {
+            PyObject* result = PyBytes_FromStringAndSize(header_buf, (Py_ssize_t)header_len);
+            release_buffer(std::move(buf));
+            return result;
+        }
+        PyObject* full = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(header_len + body_len));
+        if (full) {
+            char* dst = PyBytes_AS_STRING(full);
+            memcpy(dst, header_buf, header_len);
+            memcpy(dst + header_len, body_data, body_len);
+        }
+        release_buffer(std::move(buf));
+        return full;
+    }
+
+    // Slow path: CORS or uncached status
+    PyObject* resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive,
+                                                cors, origin, origin_len, nullptr, head_only);
+    release_buffer(std::move(buf));
+    return resp;
 }
 
 // ── HttpConnectionBuffer — replaces Python bytearray + memmove ──────────────
@@ -2959,7 +3036,7 @@ static PyObject* CoreApp_handle_http(
     // data without waiting 40ms (delayed ACK). One-shot on Linux; must be re-set
     // per data_received. Done here in C++ to eliminate the Python setsockopt
     // call overhead (~5-8 µs) that was previously in data_received().
-    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+    // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
     // Fast-path: PyCapsule (HttpConnectionBuffer) — skip memoryview creation entirely
     char* buf_data;
@@ -5192,18 +5269,66 @@ body_done:
             PyTuple_Check(raw_result) || PySet_Check(raw_result) ||
             PyFrozenSet_Check(raw_result) || raw_result == Py_None)) {
 
-            // Fused: serialize JSON + build HTTP + write — zero intermediate PyBytes
-            int wrc = serialize_json_and_write_response(
-                sock_fd, transport, raw_result, status_code_local, req.keep_alive,
-                accept_encoding_sv.data, accept_encoding_sv.len,
+            // ── Fast-path response cache for constant-return endpoints ───────
+            // If the endpoint returns dicts with the same key/value objects,
+            // we can skip JSON serialization + HTTP building after the first request.
+            // Cache key includes: dict contents + keep_alive + is_head + status_code + has_cors
+            static uintptr_t s_cached_hash = 0;
+            static bool s_cached_keep_alive = false;
+            static bool s_cached_is_head = false;
+            static int s_cached_status = 0;
+            static bool s_cached_has_cors = false;
+            static PyObject* s_cached_response = nullptr;
+            if (PyDict_Check(raw_result) && s_cached_response) {
+                uintptr_t h = (uintptr_t)PyDict_GET_SIZE(raw_result);
+                PyObject* k, *v;
+                Py_ssize_t pos = 0;
+                while (PyDict_Next(raw_result, &pos, &k, &v)) {
+                    h ^= (uintptr_t)k ^ ((uintptr_t)v << 1);
+                }
+                h ^= (uintptr_t)req.keep_alive ^ ((uintptr_t)is_head_method << 1)
+                   ^ ((uintptr_t)status_code_local << 2) ^ ((uintptr_t)has_cors << 3);
+                if (h == s_cached_hash) {
+                    write_to_transport(transport, s_cached_response);
+                    Py_DECREF(raw_result);
+                    fire_post_response_hook(self, req.method.data, req.method.len,
+                                            req.path.data, req.path.len, status_code_local, request_start_time);
+                    --self->counters.active_requests;
+                    return make_consumed_true(self, req.total_consumed);
+                }
+            }
+
+            // Build response bytes (without writing)
+            PyRef resp_bytes(build_json_response_bytes(
+                raw_result, status_code_local, req.keep_alive,
                 has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                is_head_method);
-            Py_DECREF(raw_result);
-            if (wrc < 0) {
+                is_head_method));
+            if (!resp_bytes) {
+                Py_DECREF(raw_result);
                 --self->counters.active_requests;
                 ++self->counters.total_errors;
                 return make_consumed_true(self, req.total_consumed);
             }
+            // Cache the first successful dict response
+            if (PyDict_Check(raw_result) && !s_cached_response) {
+                uintptr_t h = (uintptr_t)PyDict_GET_SIZE(raw_result);
+                PyObject* k, *v;
+                Py_ssize_t pos = 0;
+                while (PyDict_Next(raw_result, &pos, &k, &v)) {
+                    h ^= (uintptr_t)k ^ ((uintptr_t)v << 1);
+                }
+                h ^= (uintptr_t)req.keep_alive ^ ((uintptr_t)is_head_method << 1)
+                   ^ ((uintptr_t)status_code_local << 2) ^ ((uintptr_t)has_cors << 3);
+                s_cached_hash = h;
+                s_cached_keep_alive = req.keep_alive;
+                s_cached_is_head = is_head_method;
+                s_cached_status = status_code_local;
+                s_cached_has_cors = has_cors;
+                Py_INCREF(resp_bytes.get());
+                s_cached_response = resp_bytes.get();
+            }
+            write_to_transport(transport, resp_bytes.get());
+            Py_DECREF(raw_result);
 
             fire_post_response_hook(self, req.method.data, req.method.len,
                                     req.path.data, req.path.len, status_code_local, request_start_time);
@@ -5346,7 +5471,7 @@ body_done:
             PyRef http_resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
             release_buffer(std::move(buf));
             if (http_resp) write_to_transport(transport, http_resp.get());
-            if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+            // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
             // ── Background tasks ─────────────────────────────────────────
             PyRef bg_attr(s_attr_background
@@ -5784,7 +5909,7 @@ static PyObject* CoreApp_handle_http_batch(
     }
 
     // Re-arm TCP_QUICKACK once for the whole batch (one syscall per data_received).
-    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+    // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
     // Buffer access — same dual-path as handle_http.
     const char* raw_base;
@@ -5915,7 +6040,7 @@ static PyObject* CoreApp_handle_http_batch_v2(
     if (UNLIKELY(!hb)) return nullptr;
 
     // Re-arm TCP_QUICKACK once for the whole batch (one syscall per data_received).
-    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+    // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
     const char* raw_base = (const char*)hb->data();
     Py_ssize_t  raw_len  = (Py_ssize_t)hb->size();
@@ -6824,7 +6949,7 @@ static PyObject* CoreApp_handle_http_append_and_dispatch(
     }
 
     // ── Dispatch (same as handle_http_batch_v2) ────────────────────────────
-    if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
+    // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
     const char* raw_base = (const char*)hb->data();
     Py_ssize_t  raw_len  = (Py_ssize_t)hb->size();

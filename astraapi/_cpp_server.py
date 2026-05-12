@@ -1332,7 +1332,8 @@ class CppHttpProtocol(asyncio.Protocol):
     __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_pending_tasks_discard", "_active_count", "_sock_fd", "_core_batch", "_core_append_dispatch",
              "_loop_create_task",  # cached bound method — saves LOAD_ATTR per async create_task
              "_ka_needs_reset",    # flag: True = received data, sweep updates _ka_deadline lazily
-             "_needs_req_ctx")     # per-app flag: skip header parse when False
+             "_needs_req_ctx",     # per-app flag: skip header parse when False
+             "_transport_write")   # cached bound method — skips PyObject_CallMethodOneArg in C++
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -1379,6 +1380,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._connections_set = connections_set
         self._active_count = None
         self._transport = None
+        self._transport_write = None
         _http_buf_clear(self._http_buf)  # reuse existing C++ buffer
         self._ka_deadline = 0.0
         self._ka_needs_reset = False
@@ -1391,6 +1393,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle = None
         self._ws_pong_received = True
         self._ws_task = None
+        self._transport_write = None
         if self._pending_tasks is not None:
             self._pending_tasks.clear()  # reuse existing set's backing store
         else:
@@ -1408,6 +1411,7 @@ class CppHttpProtocol(asyncio.Protocol):
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = transport  # type: ignore[assignment]
+        self._transport_write = transport.write  # type: ignore[union-attr]  # cached for C++ fast path
         sock: socket.socket | None = transport.get_extra_info("socket")  # type: ignore[union-attr]
         if sock is not None:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -1577,7 +1581,7 @@ class CppHttpProtocol(asyncio.Protocol):
         if core_ad is not None:
             # Single C++ call: appends data + dispatches
             # Returns: 0=done+empty, 1=done+partial, -1=need-more, -2=error, -3=overflow, tuple=async
-            result = core_ad(http_buf, data, transport, sock_fd)
+            result = core_ad(http_buf, data, self._transport_write, sock_fd)
             if result.__class__ is int:
                 if result >= 0:
                     self._ka_needs_reset = True  # lazy: sweep updates actual deadline
