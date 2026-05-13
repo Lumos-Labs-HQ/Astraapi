@@ -2358,13 +2358,19 @@ class AstraAPI(AppBase):
                                             getattr(d, 'cookie_params', []) +
                                             getattr(d, 'query_params', []))
                         for _hf in _all_model_params:
-                            if _lis(_hf.type_, _BM) and getattr(getattr(_hf.type_, 'model_config', None), 'get', lambda *a: None)('extra') == 'forbid':
+                            # Any model-based param (Query/Header/Cookie with BaseModel type)
+                            # needs the raw ContextVar data to handle extra fields correctly.
+                            if _lis(_hf.type_, _BM):
                                 return True
                         for _sub in getattr(d, 'dependencies', []):
                             if _dep_needs_ctx(_sub, _visited): return True
                         return False
                     _dep = getattr(route, 'dependant', None)
                     if _dep and _dep_needs_ctx(_dep):
+                        _srv_mod._needs_request_context = True
+                    # Non-fast-path routes with body params use the ASGI shim which reads
+                    # _current_body ContextVar — they need request context populated.
+                    elif not getattr(route, '_fast_path_eligible', False) and _dep and getattr(_dep, 'body_params', None):
                         _srv_mod._needs_request_context = True
                 except Exception:
                     pass
@@ -2588,15 +2594,32 @@ class AstraAPI(AppBase):
                                 _errs = [e for e in _errs if e.get('type') != 'missing']
                                 return (_vals, _errs, _consumed)
                             # Validate required params of override deps (including sub-deps)
-                            # Also check query string for params not extracted by C++ FieldSpec
+                            # Also check query string for params not extracted by C++ FieldSpec.
+                            # When dependency_overrides are active, the override dep may need
+                            # query params that weren't in the original route's batch_specs.
+                            # Read from _current_query_string ContextVar (populated when
+                            # _needs_req_ctx=True) OR fall back to re-parsing from C++ raw buf.
                             from astraapi.dependencies.utils import get_dependant
                             from urllib.parse import parse_qs
+                            _qs_params: set = set()
                             try:
                                 from astraapi._cpp_server import _current_query_string
                                 _qs_bytes = _current_query_string.get()
-                                _qs_params = set(parse_qs(_qs_bytes.decode('latin-1'), keep_blank_values=True).keys()) if _qs_bytes else set()
+                                if not _qs_bytes:
+                                    # _needs_req_ctx=False path: ContextVar not populated.
+                                    # Re-parse from the C++ http buffer via the raw request.
+                                    # The query string is in kwargs_dict as __query_string__
+                                    # if C++ injected it, otherwise we can't recover it here.
+                                    # Best effort: check kwargs_dict for any injected qs.
+                                    _raw_qs = kwargs_dict.get('__query_string__', b'')
+                                    if isinstance(_raw_qs, str):
+                                        _raw_qs = _raw_qs.encode('latin-1')
+                                    _qs_bytes = _raw_qs
+                                if _qs_bytes:
+                                    _qs_params = set(parse_qs(_qs_bytes.decode('latin-1'), keep_blank_values=True).keys())
                             except Exception:
-                                _qs_params = set()
+                                pass
+                            # kwargs_dict already contains C++-extracted params — include them
                             _available = set(kwargs_dict.keys()) | _qs_params
                             errors = []
                             visited = set()
@@ -2864,12 +2887,23 @@ class AstraAPI(AppBase):
 
         # Register plain Route objects (from router.route() decorator)
         from astraapi._routing_base import Route as _PlainRoute
+        # Pre-compute internal OpenAPI/docs paths — these are served by C++ and
+        # never need Python header context. Only user-registered plain Routes do.
+        _internal_paths = {
+            getattr(self, 'openapi_url', '/openapi.json') or '',
+            getattr(self, 'docs_url', '/docs') or '',
+            getattr(self, 'redoc_url', '/redoc') or '',
+            getattr(self, 'swagger_ui_oauth2_redirect_url', '/docs/oauth2-redirect') or '',
+        }
         for route in self.routes:
             if not isinstance(route, _PlainRoute) or isinstance(route, (APIRoute, APIWebSocketRoute)):
                 continue
             _ep = route.endpoint
             _methods = list(route.methods) if route.methods else ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
-            _srv_mod._needs_request_context = True
+            # Only set _needs_request_context for user-registered plain Routes,
+            # not for internal OpenAPI/docs routes that C++ serves directly.
+            if getattr(route, 'path', '') not in _internal_paths:
+                _srv_mod._needs_request_context = True
             _shim = self._make_asgi_route_shim(route)
             try:
                 self._core_app.add_route(

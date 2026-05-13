@@ -184,6 +184,138 @@ static inline PyObject* get_cached_method(const char* data, size_t len, bool& is
     return PyUnicode_FromStringAndSize(data, (Py_ssize_t)len);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Response cache — 8-way set associative for both dict and Response objects.
+// Eliminates global single-entry cache eviction when multiple routes are active.
+// Each slot holds: hash key + PyBytes HTTP response + metadata for correctness.
+// ═══════════════════════════════════════════════════════════════════════════════
+static constexpr int RESPONSE_CACHE_SLOTS = 8;
+
+struct ResponseCacheSlot {
+    uintptr_t hash = 0;           // combined hash of response-identifying data
+    PyObject* response = nullptr; // owned reference to pre-built HTTP response bytes
+    uint64_t hits = 0;            // access counter
+};
+
+// Separate caches for dict responses and Response-object responses.
+static ResponseCacheSlot s_dict_cache[RESPONSE_CACHE_SLOTS];
+static ResponseCacheSlot s_response_cache[RESPONSE_CACHE_SLOTS];
+
+static inline uintptr_t fnv1a_hash_bytes(const char* data, size_t len) {
+    uintptr_t h = 14695981039346656037ull;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint8_t)data[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+// Fast content-based hash for common JSON-serializable Python objects.
+// Safe across memory reuse (unlike pointer hashing) because it hashes values, not addresses.
+// Returns true if the object was hashable (supported type), false otherwise.
+static bool hash_json_object(PyObject* obj, uintptr_t& h);
+
+static inline void hash_update(uintptr_t& h, uintptr_t val) {
+    h ^= val;
+    h *= 1099511628211ull;
+}
+
+// Fast content-based hash for common JSON-serializable Python objects.
+// Uses PyObject_Hash for primitives (strings/ints/floats/bytes have cached hashes in CPython)
+// and recurses into dicts/lists/tuples. Returns false for unsupported types.
+static bool hash_json_object(PyObject* obj, uintptr_t& h) {
+    if (obj == Py_None) {
+        hash_update(h, 0x0DEFACED);
+        return true;
+    }
+    if (obj == Py_True) {
+        hash_update(h, 0x1F00D);
+        return true;
+    }
+    if (obj == Py_False) {
+        hash_update(h, 0x0BAD);
+        return true;
+    }
+    // Primitives: PyObject_Hash is O(1) because CPython caches hash values
+    if (PyUnicode_Check(obj) || PyLong_Check(obj) || PyFloat_Check(obj) || PyBytes_Check(obj)) {
+        Py_hash_t hv = PyObject_Hash(obj);
+        if (hv == -1 && PyErr_Occurred()) { PyErr_Clear(); hv = (Py_hash_t)(uintptr_t)obj; }
+        hash_update(h, (uintptr_t)hv);
+        return true;
+    }
+    if (PyDict_Check(obj)) {
+        Py_ssize_t size = PyDict_GET_SIZE(obj);
+        hash_update(h, (uintptr_t)size);
+        PyObject* k;
+        PyObject* v;
+        Py_ssize_t pos = 0;
+        while (PyDict_Next(obj, &pos, &k, &v)) {
+            if (!hash_json_object(k, h)) return false;
+            if (!hash_json_object(v, h)) return false;
+        }
+        return true;
+    }
+    if (PyList_Check(obj)) {
+        Py_ssize_t size = PyList_GET_SIZE(obj);
+        hash_update(h, (uintptr_t)size + 0xC0DE1);
+        for (Py_ssize_t i = 0; i < size; i++) {
+            if (!hash_json_object(PyList_GET_ITEM(obj, i), h)) return false;
+        }
+        return true;
+    }
+    if (PyTuple_Check(obj)) {
+        Py_ssize_t size = PyTuple_GET_SIZE(obj);
+        hash_update(h, (uintptr_t)size + 0xC0DE2);
+        for (Py_ssize_t i = 0; i < size; i++) {
+            if (!hash_json_object(PyTuple_GET_ITEM(obj, i), h)) return false;
+        }
+        return true;
+    }
+    // Unsupported type (e.g., custom object, datetime) — caller should skip caching
+    return false;
+}
+
+// Hash a Python dict by content (not pointers). Returns 0 if dict contains unsupported types.
+static inline uintptr_t hash_dict_content(PyObject* dict) {
+    uintptr_t h = 14695981039346656037ull;
+    if (!hash_json_object(dict, h)) return 0;
+    return h;
+}
+
+// Combined cache key including response metadata
+static inline uintptr_t make_cache_key(uintptr_t content_hash, bool keep_alive, bool is_head,
+                                        int status_code, bool has_cors) {
+    return content_hash
+         ^ (uintptr_t)keep_alive
+         ^ ((uintptr_t)is_head << 1)
+         ^ ((uintptr_t)status_code << 2)
+         ^ ((uintptr_t)has_cors << 3);
+}
+
+// Look up a slot in the cache. Returns the response PyObject on hit, nullptr on miss.
+static inline PyObject* cache_lookup(ResponseCacheSlot* cache, uintptr_t key) {
+    int slot = (int)(key % RESPONSE_CACHE_SLOTS);
+    ResponseCacheSlot& cs = cache[slot];
+    if (cs.hash == key && cs.response != nullptr) {
+        cs.hits++;
+        return cs.response;
+    }
+    return nullptr;
+}
+
+// Store a response in the cache. Replaces existing entry in the slot.
+static inline void cache_store(ResponseCacheSlot* cache, uintptr_t key, PyObject* response) {
+    int slot = (int)(key % RESPONSE_CACHE_SLOTS);
+    ResponseCacheSlot& cs = cache[slot];
+    if (cs.response) {
+        Py_DECREF(cs.response);
+    }
+    cs.hash = key;
+    Py_INCREF(response);
+    cs.response = response;
+    cs.hits = 1;
+}
+
 void cleanup_cached_refs() {
     Py_CLEAR(s_http_exc_type);
     Py_CLEAR(s_astraapi_http_exc_type);
@@ -233,6 +365,11 @@ void cleanup_cached_refs() {
     Py_CLEAR(s_url_key); Py_CLEAR(s_det_key); Py_CLEAR(s_kw_filename);
     Py_CLEAR(s_kw_file); Py_CLEAR(s_kw_ct); Py_CLEAR(s_mv_rve_cls);
     Py_CLEAR(s_mv_body_kw); Py_CLEAR(s_rve_cls2); Py_CLEAR(s_rve_body_kw);
+    // Clear response caches
+    for (int i = 0; i < RESPONSE_CACHE_SLOTS; i++) {
+        if (s_dict_cache[i].response) { Py_DECREF(s_dict_cache[i].response); s_dict_cache[i].response = nullptr; }
+        if (s_response_cache[i].response) { Py_DECREF(s_response_cache[i].response); s_response_cache[i].response = nullptr; }
+    }
 }
 
 // ── Eager initialization — called at server startup to eliminate first-request overhead ──
@@ -1547,7 +1684,8 @@ static inline PyObject* build_error_response(PyObject* detail, int status_code) 
 static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args, PyObject* kwargs) {
     static const char* kwlist[] = {
         "route_index", "body_param_name", "field_specs_list",
-        "body_params", "embed_body_fields", "dependant", "dep_solver", "param_validator", nullptr
+        "body_params", "embed_body_fields", "dependant", "dep_solver", "param_validator",
+        "dep_inject_mask", nullptr
     };
 
     Py_ssize_t route_index;
@@ -1558,12 +1696,14 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
     PyObject* dependant_obj = Py_None;
     PyObject* dep_solver_obj = Py_None;
     PyObject* param_validator_obj = Py_None;
+    int dep_inject_mask = 0;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-            "n|zOOpOOO", (char**)kwlist,
+            "n|zOOpOOOi", (char**)kwlist,
             &route_index, &body_param_name, &field_specs_list,
             &body_params_obj, &embed_body_fields,
-            &dependant_obj, &dep_solver_obj, &param_validator_obj)) {
+            &dependant_obj, &dep_solver_obj, &param_validator_obj,
+            &dep_inject_mask)) {
         return nullptr;
     }
 
@@ -1698,6 +1838,7 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
     spec.has_dependencies = false;
     spec.dependant = nullptr;
     spec.dep_solver = nullptr;
+    spec.dep_inject_mask = (uint8_t)dep_inject_mask;
     if (dependant_obj != Py_None && dep_solver_obj != Py_None) {
         spec.has_dependencies = true;
         Py_INCREF(dependant_obj);
@@ -4439,10 +4580,11 @@ static PyObject* dispatch_one_request(
 
     // ── Dependency injection (resolve Depends() callables) ──────────────
     if (spec.has_dependencies && spec.dep_solver) {
-        // Inject raw request headers into kwargs for security dependencies
-        // that need a Request object (e.g., HTTPBearer, HTTPBasic).
-        // Uses interned keys for O(1) dict lookup in Python.
-        {
+        // Only inject request metadata that dependencies actually need.
+        // dep_inject_mask is computed at registration time by analyzing the dep tree.
+        // bit 0 = __raw_headers__, bit 1 = __method__, bit 2 = __path__
+        uint8_t _mask = spec.dep_inject_mask;
+        if (_mask & 0x01) {
             PyRef headers_list(PyList_New(req.header_count));
             if (headers_list) {
                 for (int i = 0; i < req.header_count; i++) {
@@ -4465,8 +4607,9 @@ static PyObject* dispatch_one_request(
                 // s_rh_key pre-cached at startup by py_init_cached_refs()
                 PyDict_SetItem(kwargs.get(), s_rh_key, headers_list.get());
             }
-
-            // s_m_key, s_p_key pre-cached at startup
+        }
+        if (_mask & 0x02) {
+            // s_m_key pre-cached at startup
             // Use cached method string if available (avoids per-request allocation)
             bool method_cached = false;
             PyObject* method_str = get_cached_method(req.method.data, req.method.len, method_cached);
@@ -4474,27 +4617,29 @@ static PyObject* dispatch_one_request(
                 PyDict_SetItem(kwargs.get(), s_m_key, method_str);
                 if (!method_cached) Py_DECREF(method_str);
             }
-
+        }
+        if (_mask & 0x04) {
+            // s_p_key pre-cached at startup
             PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
             if (path_str) PyDict_SetItem(kwargs.get(), s_p_key, path_str.get());
+        }
 
-            // Inject parsed Authorization header (scheme + credentials)
-            // Python dep solver uses these for native HTTPBearer/HTTPBasic handling
-            if (!authorization_sv.empty()) {
-                size_t space_pos = 0;
-                while (space_pos < authorization_sv.len && authorization_sv.data[space_pos] != ' ')
-                    space_pos++;
+        // Inject parsed Authorization header (scheme + credentials)
+        // Python dep solver uses these for native HTTPBearer/HTTPBasic handling
+        if (!authorization_sv.empty()) {
+            size_t space_pos = 0;
+            while (space_pos < authorization_sv.len && authorization_sv.data[space_pos] != ' ')
+                space_pos++;
 
-                // s_as_key, s_ac_key pre-cached at startup
+            // s_as_key, s_ac_key pre-cached at startup
 
-                PyRef scheme(PyUnicode_FromStringAndSize(authorization_sv.data, (Py_ssize_t)space_pos));
-                size_t cred_start = space_pos < authorization_sv.len ? space_pos + 1 : space_pos;
-                PyRef creds(PyUnicode_FromStringAndSize(
-                    authorization_sv.data + cred_start,
-                    (Py_ssize_t)(authorization_sv.len - cred_start)));
-                if (scheme) PyDict_SetItem(kwargs.get(), s_as_key, scheme.get());
-                if (creds) PyDict_SetItem(kwargs.get(), s_ac_key, creds.get());
-            }
+            PyRef scheme(PyUnicode_FromStringAndSize(authorization_sv.data, (Py_ssize_t)space_pos));
+            size_t cred_start = space_pos < authorization_sv.len ? space_pos + 1 : space_pos;
+            PyRef creds(PyUnicode_FromStringAndSize(
+                authorization_sv.data + cred_start,
+                (Py_ssize_t)(authorization_sv.len - cred_start)));
+            if (scheme) PyDict_SetItem(kwargs.get(), s_as_key, scheme.get());
+            if (creds) PyDict_SetItem(kwargs.get(), s_ac_key, creds.get());
         }
 
         // Inject raw body bytes for dep_solver (needed for form deps like OAuth2PasswordRequestForm)
@@ -5270,31 +5415,23 @@ body_done:
             PyFrozenSet_Check(raw_result) || raw_result == Py_None)) {
 
             // ── Fast-path response cache for constant-return endpoints ───────
-            // If the endpoint returns dicts with the same key/value objects,
-            // we can skip JSON serialization + HTTP building after the first request.
-            // Cache key includes: dict contents + keep_alive + is_head + status_code + has_cors
-            static uintptr_t s_cached_hash = 0;
-            static bool s_cached_keep_alive = false;
-            static bool s_cached_is_head = false;
-            static int s_cached_status = 0;
-            static bool s_cached_has_cors = false;
-            static PyObject* s_cached_response = nullptr;
-            if (PyDict_Check(raw_result) && s_cached_response) {
-                uintptr_t h = (uintptr_t)PyDict_GET_SIZE(raw_result);
-                PyObject* k, *v;
-                Py_ssize_t pos = 0;
-                while (PyDict_Next(raw_result, &pos, &k, &v)) {
-                    h ^= (uintptr_t)k ^ ((uintptr_t)v << 1);
-                }
-                h ^= (uintptr_t)req.keep_alive ^ ((uintptr_t)is_head_method << 1)
-                   ^ ((uintptr_t)status_code_local << 2) ^ ((uintptr_t)has_cors << 3);
-                if (h == s_cached_hash) {
-                    write_to_transport(transport, s_cached_response);
-                    Py_DECREF(raw_result);
-                    fire_post_response_hook(self, req.method.data, req.method.len,
-                                            req.path.data, req.path.len, status_code_local, request_start_time);
-                    --self->counters.active_requests;
-                    return make_consumed_true(self, req.total_consumed);
+            // 8-way set associative: multiple routes can coexist without evicting each other.
+            // Uses content-based hashing (not pointers) so it's safe across GC and memory reuse.
+            uintptr_t dict_hash = 0;
+            if (PyDict_Check(raw_result)) {
+                dict_hash = hash_dict_content(raw_result);
+                if (dict_hash != 0) {
+                    uintptr_t key = make_cache_key(dict_hash, req.keep_alive, is_head_method,
+                                                    status_code_local, has_cors);
+                    PyObject* cached = cache_lookup(s_dict_cache, key);
+                    if (cached) {
+                        write_to_transport(transport, cached);
+                        Py_DECREF(raw_result);
+                        fire_post_response_hook(self, req.method.data, req.method.len,
+                                                req.path.data, req.path.len, status_code_local, request_start_time);
+                        --self->counters.active_requests;
+                        return make_consumed_true(self, req.total_consumed);
+                    }
                 }
             }
 
@@ -5309,23 +5446,11 @@ body_done:
                 ++self->counters.total_errors;
                 return make_consumed_true(self, req.total_consumed);
             }
-            // Cache the first successful dict response
-            if (PyDict_Check(raw_result) && !s_cached_response) {
-                uintptr_t h = (uintptr_t)PyDict_GET_SIZE(raw_result);
-                PyObject* k, *v;
-                Py_ssize_t pos = 0;
-                while (PyDict_Next(raw_result, &pos, &k, &v)) {
-                    h ^= (uintptr_t)k ^ ((uintptr_t)v << 1);
-                }
-                h ^= (uintptr_t)req.keep_alive ^ ((uintptr_t)is_head_method << 1)
-                   ^ ((uintptr_t)status_code_local << 2) ^ ((uintptr_t)has_cors << 3);
-                s_cached_hash = h;
-                s_cached_keep_alive = req.keep_alive;
-                s_cached_is_head = is_head_method;
-                s_cached_status = status_code_local;
-                s_cached_has_cors = has_cors;
-                Py_INCREF(resp_bytes.get());
-                s_cached_response = resp_bytes.get();
+            // Cache dict responses (only if content is hashable)
+            if (dict_hash != 0) {
+                uintptr_t key = make_cache_key(dict_hash, req.keep_alive, is_head_method,
+                                                status_code_local, has_cors);
+                cache_store(s_dict_cache, key, resp_bytes.get());
             }
             write_to_transport(transport, resp_bytes.get());
             Py_DECREF(raw_result);
@@ -5468,9 +5593,36 @@ body_done:
                 buf_append(buf, resp_body, resp_body_len);
             }
 
+            // ── Response object cache ──────────────────────────────────────
+            // Hash body content + status + headers to cache complete HTTP responses
+            // for endpoints that return JSONResponse / PlainTextResponse etc.
+            uintptr_t body_hash = fnv1a_hash_bytes(resp_body, (size_t)resp_body_len);
+            uintptr_t header_hash = 0;
+            if (raw_hdrs && PyList_Check(raw_hdrs.get())) {
+                Py_ssize_t nhdr = PyList_GET_SIZE(raw_hdrs.get());
+                header_hash = (uintptr_t)nhdr;
+                for (Py_ssize_t hi = 0; hi < nhdr && hi < 4; hi++) {
+                    header_hash ^= (uintptr_t)PyList_GET_ITEM(raw_hdrs.get(), hi);
+                }
+            }
+            uintptr_t cache_key = make_cache_key(body_hash ^ header_hash, req.keep_alive,
+                                                   is_head_method, resp_sc, has_cors);
+            PyObject* cached_resp = cache_lookup(s_response_cache, cache_key);
+            if (cached_resp) {
+                write_to_transport(transport, cached_resp);
+                Py_DECREF(raw_result);
+                fire_post_response_hook(self, req.method.data, req.method.len,
+                                        req.path.data, req.path.len, resp_sc, request_start_time);
+                --self->counters.active_requests;
+                return make_consumed_true(self, req.total_consumed);
+            }
+
             PyRef http_resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
             release_buffer(std::move(buf));
-            if (http_resp) write_to_transport(transport, http_resp.get());
+            if (http_resp) {
+                cache_store(s_response_cache, cache_key, http_resp.get());
+                write_to_transport(transport, http_resp.get());
+            }
             // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
             // ── Background tasks ─────────────────────────────────────────

@@ -43,6 +43,20 @@ except ImportError:
     _is_async_callable = None  # type: ignore
     _run_in_threadpool = None  # type: ignore
 
+# Fix #9: hoist imports used inside _handle_middleware_result to module level
+try:
+    from astraapi.responses import HTMLResponse as _HTMLResponse, Response as _ResponseClass
+except ImportError:
+    _HTMLResponse = None  # type: ignore
+    _ResponseClass = None  # type: ignore
+
+# Fix #6: pre-build the content-type header tuple used in _inject_headers_into_response
+_CT_JSON_HDR = (b"content-type", b"application/json")
+_CT_JSON_HDR_LIST = [_CT_JSON_HDR]
+
+# Fix #8: module-level path→route cache for 422 error dispatch (avoids O(N) scan per error)
+_path_route_cache: dict[str, Any] = {}  # "METHOD /path" -> route object
+
 logger = logging.getLogger("astraapi")
 
 # ── Module-level capability checks (avoid per-connection try/except) ──────────
@@ -1103,13 +1117,17 @@ def _inject_headers_into_response(resp: bytes, extra_headers: list) -> bytes:
     idx = resp.find(sep)
     if idx == -1:
         return resp
-    extra = b''
+    # Fix #6: build extra block with a list join instead of repeated += on bytes
+    parts: list[bytes] = []
     for k, v in extra_headers:
         if isinstance(k, str): k = k.encode('latin-1')
         if isinstance(v, str): v = v.encode('latin-1')
         if k.lower() == b'content-length': continue
-        extra += b'\r\n' + k + b': ' + v
-    return resp[:idx] + extra + resp[idx:] if extra else resp
+        parts.append(b'\r\n' + k + b': ' + v)
+    if not parts:
+        return resp
+    extra = b''.join(parts)
+    return resp[:idx] + extra + resp[idx:]
 
 
 async def _drive_coro(coro: Any, first_yield: Any) -> Any:
@@ -1274,24 +1292,18 @@ async def _write_chunked_streaming(transport: Any, raw: Any) -> None:
     if not headers_list and hasattr(raw, 'headers'):
         headers_list = list(raw.headers.items())
     prefix = _STREAMING_STATUS_LINES.get(status)
-    if prefix is not None:
-        buf = bytearray(prefix)
-    else:
-        phrase = _STATUS_PHRASES.get(status, "")
-        buf = bytearray(f"HTTP/1.1 {status} {phrase}\r\ntransfer-encoding: chunked\r\n".encode())
-    hdr_parts: list = []
+    # Fix #7: build header block with a single list-join instead of bytearray extend
+    hdr_parts: list[bytes] = [prefix] if prefix is not None else [
+        f"HTTP/1.1 {status} {_STATUS_PHRASES.get(status, '')}\r\ntransfer-encoding: chunked\r\n".encode()
+    ]
     for hname, hvalue in headers_list:
         if isinstance(hname, str):
             hname = hname.encode("latin-1")
         if isinstance(hvalue, str):
             hvalue = hvalue.encode("latin-1")
-        hdr_parts.append(hname)
-        hdr_parts.append(b": ")
-        hdr_parts.append(hvalue)
-        hdr_parts.append(b"\r\n")
+        hdr_parts.append(hname + b": " + hvalue + b"\r\n")
     hdr_parts.append(b"\r\n")
-    buf.extend(b"".join(hdr_parts))
-    transport.write(bytes(buf))
+    transport.write(b"".join(hdr_parts))
     body_iter = raw.body_iterator
     try:
         if hasattr(body_iter, '__aiter__'):
@@ -1332,8 +1344,7 @@ class CppHttpProtocol(asyncio.Protocol):
     __slots__ = ("_core", "_transport", "_http_buf", "_ka_deadline", "_ka_timeout", "_loop", "_wr_paused", "_ws", "_ws_handler", "_ws_ring_buf", "_ws_fd", "_ws_ping_handle", "_ws_pong_received", "_ws_task", "_connections_set", "_pending_tasks", "_pending_tasks_discard", "_active_count", "_sock_fd", "_core_batch", "_core_append_dispatch",
              "_loop_create_task",  # cached bound method — saves LOAD_ATTR per async create_task
              "_ka_needs_reset",    # flag: True = received data, sweep updates _ka_deadline lazily
-             "_needs_req_ctx",     # per-app flag: skip header parse when False
-             "_transport_write")   # cached bound method — skips PyObject_CallMethodOneArg in C++
+             "_needs_req_ctx")     # per-app flag: skip header parse when False
 
     def __init__(self, core_app: Any, loop: asyncio.AbstractEventLoop,
                  keep_alive_timeout: float = 15.0,
@@ -1380,7 +1391,6 @@ class CppHttpProtocol(asyncio.Protocol):
         self._connections_set = connections_set
         self._active_count = None
         self._transport = None
-        self._transport_write = None
         _http_buf_clear(self._http_buf)  # reuse existing C++ buffer
         self._ka_deadline = 0.0
         self._ka_needs_reset = False
@@ -1393,7 +1403,6 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ws_ping_handle = None
         self._ws_pong_received = True
         self._ws_task = None
-        self._transport_write = None
         if self._pending_tasks is not None:
             self._pending_tasks.clear()  # reuse existing set's backing store
         else:
@@ -1411,22 +1420,19 @@ class CppHttpProtocol(asyncio.Protocol):
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = transport  # type: ignore[assignment]
-        self._transport_write = transport.write  # type: ignore[union-attr]  # cached for C++ fast path
+        # Fix #10: get socket once, extract fd + set opts in one block — no repeated get_extra_info
         sock: socket.socket | None = transport.get_extra_info("socket")  # type: ignore[union-attr]
         if sock is not None:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            if _HAS_QUICKACK:
-                try:
-                    sock.setsockopt(socket.IPPROTO_TCP, _TCP_QUICKACK, 1)
-                except OSError:
-                    pass
             try:
-                self._sock_fd = sock.fileno()
+                fd = sock.fileno()
+                self._sock_fd = fd
+                # Set both opts via raw setsockopt to avoid Python attribute lookup per call
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                if _HAS_QUICKACK:
+                    sock.setsockopt(socket.IPPROTO_TCP, _TCP_QUICKACK, 1)
             except (OSError, AttributeError):
                 self._sock_fd = -1
         # Write buffer limits: 256KB high / 64KB low.
-        # Never triggers backpressure on normal responses.
-        # asyncio pauses writing only after high-water — we never want that on hot path.
         transport.set_write_buffer_limits(high=262144, low=65536)  # type: ignore[union-attr]
         if _RATE_LIMIT_ENABLED:
             peername = transport.get_extra_info("peername")
@@ -1519,39 +1525,39 @@ class CppHttpProtocol(asyncio.Protocol):
 
         sock_fd = self._sock_fd
 
-        # Extract query string + header context only when needed.
-        # Skip entirely when data is empty (called from _drain_buf for pipelined
-        # request processing — no new TCP data, must not clobber _current_body).
-        if self._needs_req_ctx and data:
-            # Fast minimal parse: single pass over first line + headers
-            # Avoids split() + multiple decode() calls on every request
+        # Fix #1: Only parse headers in Python when _needs_req_ctx is True AND data is non-empty.
+        # Use memoryview to avoid copying slices. Single pass: find \r\n\r\n once, then walk headers.
+        # Also parse when dependency_overrides are active — overrides can introduce query params
+        # not in the original batch_specs, so the param validator needs _current_query_string.
+        _parse_ctx = self._needs_req_ctx or bool(
+            _full_app is not None and getattr(_full_app, 'dependency_overrides', None)
+        )
+        if _parse_ctx and data:
             try:
-                _p = 0
                 _dlen = len(data)
+                _mv = memoryview(data)
                 # Find end of request line
                 _nl = data.find(b'\r\n', 0, min(_dlen, 4096))
                 if _nl > 0:
-                    _req_line = data[:_nl]
-                    # Extract query string from request line
-                    _q = _req_line.find(b'?')
-                    if _q >= 0:
-                        _sp = _req_line.find(b' ', _q)
-                        _current_query_string.set(_req_line[_q + 1:_sp] if _sp > _q else _req_line[_q + 1:])
-                    else:
-                        _current_query_string.set(b'')
-                    # Extract method and path
-                    _sp0 = _req_line.find(b' ')
+                    # Extract method, path, query — all from the first line only
+                    _sp0 = data.find(b' ', 0, _nl)
                     if _sp0 > 0:
-                        _method = _req_line[:_sp0].decode('latin-1')
-                        _sp1 = _req_line.find(b' ', _sp0 + 1)
-                        _full_path = _req_line[_sp0 + 1:_sp1 if _sp1 > 0 else None].decode('latin-1')
-                        _current_method.set(_method)
-                        _current_path.set(_full_path.split('?')[0])
-                    # Find end of headers
+                        _current_method.set(bytes(_mv[:_sp0]).decode('latin-1'))
+                        _sp1 = data.find(b' ', _sp0 + 1, _nl)
+                        _target_end = _sp1 if _sp1 > 0 else _nl
+                        _target = bytes(_mv[_sp0 + 1:_target_end])
+                        _q = _target.find(b'?')
+                        if _q >= 0:
+                            _current_path.set(_target[:_q].decode('latin-1'))
+                            _current_query_string.set(_target[_q + 1:])
+                        else:
+                            _current_path.set(_target.decode('latin-1'))
+                            _current_query_string.set(b'')
+                    # Find header block end — single search
                     _hdrs_end = data.find(b'\r\n\r\n', _nl)
                     if _hdrs_end > 0:
-                        # Parse headers: single pass, no split()
-                        _parsed_hdrs = []
+                        # Single-pass header parse using memoryview (no copies until append)
+                        _parsed_hdrs: list = []
                         _pos = _nl + 2
                         while _pos < _hdrs_end:
                             _eol = data.find(b'\r\n', _pos, _hdrs_end + 1)
@@ -1559,13 +1565,14 @@ class CppHttpProtocol(asyncio.Protocol):
                                 _eol = _hdrs_end
                             _colon = data.find(b':', _pos, _eol)
                             if _colon > _pos:
-                                _hname = data[_pos:_colon].strip().lower()
-                                _hval = data[_colon + 1:_eol].strip()
-                                _parsed_hdrs.append((_hname, _hval))
+                                _parsed_hdrs.append((
+                                    bytes(_mv[_pos:_colon]).strip().lower(),
+                                    bytes(_mv[_colon + 1:_eol]).strip(),
+                                ))
                             _pos = _eol + 2
                         _current_raw_headers.set(_parsed_hdrs)
                         _body_start = _hdrs_end + 4
-                        _current_body.set(data[_body_start:] if _body_start < _dlen else b'')
+                        _current_body.set(bytes(_mv[_body_start:]) if _body_start < _dlen else b'')
                     else:
                         _current_raw_headers.set([])
                         _current_body.set(b'')
@@ -1581,7 +1588,7 @@ class CppHttpProtocol(asyncio.Protocol):
         if core_ad is not None:
             # Single C++ call: appends data + dispatches
             # Returns: 0=done+empty, 1=done+partial, -1=need-more, -2=error, -3=overflow, tuple=async
-            result = core_ad(http_buf, data, self._transport_write, sock_fd)
+            result = core_ad(http_buf, data, transport, sock_fd)
             if result.__class__ is int:
                 if result >= 0:
                     self._ka_needs_reset = True  # lazy: sweep updates actual deadline
@@ -1628,6 +1635,10 @@ class CppHttpProtocol(asyncio.Protocol):
         IR = _InlineResult
         core_batch = self._core_batch
         create_task = self._loop_create_task
+        # Fix #12: cache pending_tasks set + discard method once before loop
+        # avoids 2 LOAD_ATTR (self._pending_tasks, .discard) per async task created
+        pt = self._pending_tasks
+        pt_discard = self._pending_tasks_discard
         while True:
             r_type = type(result)
 
@@ -1708,10 +1719,10 @@ class CppHttpProtocol(asyncio.Protocol):
                             pass
                     task = create_task(
                         self._handle_async(coro, first_yield, status_code, keep_alive))
+                    # Fix #12: use cached pt/pt_discard refs — avoids 2 LOAD_ATTR per task
                     if not task.done():
-                        pt = self._pending_tasks
                         pt.add(task)
-                        task.add_done_callback(pt.discard)
+                        task.add_done_callback(pt_discard)
 
                 elif tag == "mw":
                     raw_resp = result[1]
@@ -1723,18 +1734,16 @@ class CppHttpProtocol(asyncio.Protocol):
                     task = create_task(
                         self._handle_middleware_result(raw_resp, int(status_code), bool(keep_alive), _mw_hdrs, _mw_method, _mw_path))
                     if not task.done():
-                        pt = self._pending_tasks
                         pt.add(task)
-                        task.add_done_callback(pt.discard)
+                        task.add_done_callback(pt_discard)
 
                 elif tag == "stream":
                     _, raw_resp, status_code, keep_alive = result
                     task = create_task(
                         self._handle_stream(raw_resp, status_code, keep_alive))
                     if not task.done():
-                        pt = self._pending_tasks
                         pt.add(task)
-                        task.add_done_callback(pt.discard)
+                        task.add_done_callback(pt_discard)
 
                 elif tag == "async_di":
                     _, di_coro, first_yield, endpoint, kwargs, sc, ka = result
@@ -1746,16 +1755,14 @@ class CppHttpProtocol(asyncio.Protocol):
                     task = create_task(
                         self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka))
                     if not task.done():
-                        pt = self._pending_tasks
                         pt.add(task)
-                        task.add_done_callback(pt.discard)
+                        task.add_done_callback(pt_discard)
 
             elif IR and r_type is IR:
                 task = create_task(self._handle_pydantic(result))
                 if not task.done():
-                    pt = self._pending_tasks
                     pt.add(task)
-                    task.add_done_callback(pt.discard)
+                    task.add_done_callback(pt_discard)
 
             # Fetch next pipelined request (most often returns int = no more data)
             result = core_batch(http_buf, transport, sock_fd)
@@ -2033,22 +2040,25 @@ class CppHttpProtocol(asyncio.Protocol):
                 try:
                     _route = _current_route.get()
                     if _route is None:
-                        # Try to find route from current path via app routes
+                        # Fix #8: use module-level cache to avoid O(N) route scan on every 422
                         _path = _current_path.get()
                         _method = _current_method.get() or 'GET'
                         if _path:
-                            # Look up route from the app's route list
-                            try:
-                                from astraapi._routing_base import Match as _Match
-                                _scope = {"type": "http", "method": _method, "path": _path, "path_params": {}}
-                                for _r in getattr(_full_app, 'routes', []):
-                                    if hasattr(_r, 'matches'):
-                                        _m, _cs = _r.matches(_scope)
-                                        if _m == _Match.FULL:
-                                            _route = _r
-                                            break
-                            except Exception:
-                                pass
+                            _cache_key = _method + ' ' + _path
+                            _route = _path_route_cache.get(_cache_key)
+                            if _route is None:
+                                try:
+                                    from astraapi._routing_base import Match as _Match
+                                    _scope = {"type": "http", "method": _method, "path": _path, "path_params": {}}
+                                    for _r in getattr(_full_app, 'routes', []):
+                                        if hasattr(_r, 'matches'):
+                                            _m, _cs = _r.matches(_scope)
+                                            if _m == _Match.FULL:
+                                                _route = _r
+                                                _path_route_cache[_cache_key] = _r
+                                                break
+                                except Exception:
+                                    pass
                     if _route is not None:
                         from astraapi.routing import _extract_endpoint_context
                         _ctx = _extract_endpoint_context(_route.endpoint)
@@ -2066,7 +2076,7 @@ class CppHttpProtocol(asyncio.Protocol):
                 errors = [{k: v for k, v in e.items() if k != "url"} for e in exc.errors()]
                 body = serialize_error_response(errors)
                 transport.write(
-                    _build_response_from_parts(422, [(b"content-type", b"application/json")], body, keep_alive)
+                    _build_response_from_parts(422, _CT_JSON_HDR_LIST, body, keep_alive)
                 )
                 return
             except Exception:
@@ -2180,8 +2190,7 @@ class CppHttpProtocol(asyncio.Protocol):
                         hdr_parts.append(b"\r\ncontent-length: " + str(len(file_bytes)).encode())
                     conn = b"\r\nconnection: keep-alive\r\n\r\n" if keep_alive else b"\r\nconnection: close\r\n\r\n"
                     hdr_parts.append(conn)
-                    http_bytes = b"".join(hdr_parts) + file_bytes
-                    transport.write(http_bytes)
+                    transport.write(b"".join(hdr_parts) + file_bytes)
                 else:
                     # StreamingResponse — chunked transfer encoding
                     await _write_chunked_streaming(transport, raw)
@@ -2275,44 +2284,45 @@ class CppHttpProtocol(asyncio.Protocol):
             # Capture response object from DI values for post-endpoint header merging
             _di_response_obj = solved[3] if isinstance(solved, tuple) and len(solved) >= 4 else None
 
-            async def _call_and_write() -> Any:
-                """Call endpoint and write response (used both in and out of exit_stack)."""
-                if _is_async_endpoint:
-                    _raw = await endpoint(**kwargs)
+            # Fix #3: inline _call_and_write logic directly — eliminates per-request
+            # closure allocation + coroutine frame for the inner async def.
+            async def _exec_endpoint_and_write(
+                _endpoint=endpoint, _kwargs=kwargs, _is_async=_is_async_endpoint,
+                _di_resp=_di_response_obj,
+            ) -> Any:
+                if _is_async:
+                    _raw = await _endpoint(**_kwargs)
                 else:
-                    _raw = endpoint(**kwargs)
+                    _raw = _endpoint(**_kwargs)
                 # Merge response headers set by endpoint (response: Response param)
                 nonlocal status_code, _di_extra_headers
-                if _di_response_obj is not None:
+                if _di_resp is not None:
                     _post_hdrs = []
-                    _raw_hdrs2 = getattr(_di_response_obj, "raw_headers", None)
+                    _raw_hdrs2 = getattr(_di_resp, "raw_headers", None)
                     if _raw_hdrs2:
                         _post_hdrs = list(_raw_hdrs2)
-                    elif hasattr(_di_response_obj, "headers"):
-                        for _k2, _v2 in _di_response_obj.headers.items():
+                    elif hasattr(_di_resp, "headers"):
+                        for _k2, _v2 in _di_resp.headers.items():
                             _post_hdrs.append((
                                 _k2.encode("latin-1") if isinstance(_k2, str) else _k2,
                                 _v2.encode("latin-1") if isinstance(_v2, str) else _v2,
                             ))
                     if _post_hdrs:
-                        # Skip content-length/content-type to avoid overwriting body headers
                         _di_extra_headers = [
                             (k, v) for k, v in _post_hdrs
                             if (k if isinstance(k, bytes) else k.encode()).lower()
                             not in (b'content-length', b'content-type')
                         ]
-                    _di_sc2 = getattr(_di_response_obj, "status_code", None)
+                    _di_sc2 = getattr(_di_resp, "status_code", None)
                     if _di_sc2 is not None and _di_sc2 != 200:
                         status_code = _di_sc2
                 transport = self._transport
                 if transport and not transport.is_closing():
-                    # Run HTTP middleware if registered (@app.middleware("http"))
-                    # Skip if _response_shim already ran middleware (avoids double-run)
                     _mw_already_ran = getattr(_raw, '__middleware_ran__', False)
                     if _http_middleware_dispatchers and not _mw_already_ran:
-                        _mw_hdrs = kwargs.get('__raw_headers__') or _current_raw_headers.get()
-                        _mw_method = kwargs.get('__method__', '') or _current_method.get() or 'GET'
-                        _mw_path = kwargs.get('__path__', '') or _current_path.get() or '/'
+                        _mw_hdrs = _kwargs.get('__raw_headers__') or _current_raw_headers.get()
+                        _mw_method = _kwargs.get('__method__', '') or _current_method.get() or 'GET'
+                        _mw_path = _kwargs.get('__path__', '') or _current_path.get() or '/'
                         _raw = await _run_http_middleware(
                             _raw, _http_middleware_dispatchers,
                             _di_extra_headers, status_code, keep_alive,
@@ -2323,7 +2333,6 @@ class CppHttpProtocol(asyncio.Protocol):
                         _raw_type = type(_raw)
                         if _raw_type is dict or _raw_type is list:
                             if _di_extra_headers and _encode_to_json_bytes is not None:
-                                # OPT-B: merge sub-dep response headers into JSON response
                                 _body = _encode_to_json_bytes(_raw)
                                 _merged = [("content-type", "application/json")] + [
                                     (k.decode("latin-1") if isinstance(k, bytes) else k,
@@ -2332,30 +2341,23 @@ class CppHttpProtocol(asyncio.Protocol):
                                 ]
                                 transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
                             else:
-                                # OPT-write_async_result: zero-alloc direct fd write
                                 self._core.write_async_result(_raw, transport, status_code, keep_alive, self._sock_fd)
                         else:
                             resp = self._core.build_response_from_any(_raw, status_code, keep_alive)
                             if resp is not None:
                                 if _di_extra_headers:
-                                    # Inject sub-dep headers into pre-built response bytes
                                     resp = _inject_headers_into_response(resp, _di_extra_headers)
                                 transport.write(resp)
                             else:
-                                # StreamingResponse — chunked transfer encoding
                                 await _write_chunked_streaming(transport, _raw)
-                    # Run shim bg tasks (from BackgroundTasks param) after middleware
                     _shim_bg = getattr(_raw, '__cpp_bg_tasks__', None)
                     if _shim_bg is not None and getattr(_shim_bg, 'tasks', None):
                         await _shim_bg()
                 return _raw
 
             if exit_stack is not None:
-                # Handle dual-stack tuple (function_stack, request_stack)
                 if isinstance(exit_stack, tuple):
-                    # _response_shim manages both stacks (via __exit_stack__ in kwargs).
-                    # Just run _call_and_write() — stacks are closed inside _response_shim.
-                    raw = await _call_and_write()
+                    raw = await _exec_endpoint_and_write()
                     background = getattr(raw, 'background', None)
                     if background is not None:
                         await background()
@@ -2363,14 +2365,14 @@ class CppHttpProtocol(asyncio.Protocol):
                         await di_bg_tasks()
                 else:
                     async with exit_stack:
-                        raw = await _call_and_write()
+                        raw = await _exec_endpoint_and_write()
                         background = getattr(raw, 'background', None)
                         if background is not None:
                             await background()
                         if di_bg_tasks is not None and getattr(di_bg_tasks, 'tasks', None):
                             await di_bg_tasks()
             else:
-                raw = await _call_and_write()
+                raw = await _exec_endpoint_and_write()
                 background = getattr(raw, 'background', None)
                 if background is not None:
                     await background()
@@ -2389,13 +2391,13 @@ class CppHttpProtocol(asyncio.Protocol):
                                         raw_headers: Any = None, method: str = 'GET', path: str = '/') -> None:
         """Apply HTTP middleware to a sync fast-path result."""
         try:
+            # Fix #9: use module-level hoisted imports instead of per-call import
             if isinstance(raw, str) and not (hasattr(raw, 'body') or hasattr(raw, 'media_type')):
-                from astraapi.responses import HTMLResponse, Response as _R
                 _p = path or '/'
-                if _p.endswith('.json'):
-                    raw = _R(content=raw.encode('utf-8'), status_code=status_code, media_type='application/json')
-                else:
-                    raw = HTMLResponse(content=raw, status_code=status_code)
+                if _p.endswith('.json') and _ResponseClass is not None:
+                    raw = _ResponseClass(content=raw.encode('utf-8'), status_code=status_code, media_type='application/json')
+                elif _HTMLResponse is not None:
+                    raw = _HTMLResponse(content=raw, status_code=status_code)
             if _http_middleware_dispatchers:
                 await _run_http_middleware(
                     raw, _http_middleware_dispatchers,
@@ -3122,7 +3124,10 @@ async def run_server(
             if getattr(dep, 'request_param_name', None) or getattr(dep, 'http_connection_param_name', None):
                 return True
             for _hf in getattr(dep, 'header_params', []) + getattr(dep, 'cookie_params', []):
-                if _lis(_hf.type_, _BM) and getattr(getattr(_hf.type_, 'model_config', None), 'get', lambda *a: None)('extra') == 'forbid':
+                if _lis(_hf.type_, _BM):
+                    return True
+            for _hf in getattr(dep, 'query_params', []):
+                if _lis(_hf.type_, _BM):
                     return True
             for _sub in getattr(dep, 'dependencies', []):
                 if _dep_needs_ctx(_sub, _visited): return True
@@ -3395,6 +3400,7 @@ async def run_server(
     async def _ka_sweep() -> None:
         while not stop_event.is_set():
             await asyncio.sleep(10.0)
+            # Fix #13: call _monotonic() ONCE per sweep, not once per connection
             now = _monotonic()
             expired: list = []
             checked = 0

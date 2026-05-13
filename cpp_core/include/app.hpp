@@ -107,6 +107,8 @@ struct FastRouteSpec {
     bool has_dependencies = false;
     PyObject* dependant;          // Python Dependant object (strong ref, or NULL)
     PyObject* dep_solver;         // Python callable: _fast_solve_deps (strong ref, or NULL)
+    uint8_t dep_inject_mask = 0;  // Bitmask: what injected data dependencies need
+                                  // bit 0 = __raw_headers__, bit 1 = __method__, bit 2 = __path__
 
     // Param validation (Pydantic TypeAdapters for query/header/cookie/path constraints)
     PyObject* param_validator;    // Python callable: _validate_params (strong ref, or NULL)

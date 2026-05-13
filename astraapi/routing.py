@@ -329,6 +329,19 @@ async def serialize_response(
         )
 
     else:
+        # Fix #4: try C++ json_writer first (handles datetime/UUID/Pydantic/dataclasses).
+        # Only fall back to Python jsonable_encoder for types C++ can't handle.
+        try:
+            from astraapi._core_bridge import encode_to_json_bytes as _enc
+            if _enc is not None:
+                _raw_type = type(response_content)
+                if _raw_type is dict or _raw_type is list or _raw_type is str or _raw_type is int or _raw_type is float or _raw_type is bool or response_content is None:
+                    return response_content  # pass-through — C++ serializes at write time
+                # For Pydantic models, use model_dump() which C++ json_writer handles
+                if hasattr(response_content, 'model_dump'):
+                    return response_content.model_dump()
+        except Exception:
+            pass
         return jsonable_encoder(response_content)
 
 
@@ -552,30 +565,40 @@ def get_request_handler(
                     body_bytes = await request.body()
                     if body_bytes:
                         json_body: Any = Undefined
-                        # Single Core call does content-type check
-                        # + JSON parse with GIL released. Also pre-parses
-                        # query string for use by solve_dependencies later.
-                        raw_hdrs = request.scope.get("headers", [])
-                        qs = request.scope.get(
-                            "query_string", b""
-                        ).decode("latin-1")
-                        req_result = process_request(
-                            query_string=qs,
-                            raw_headers=raw_hdrs,
-                            body=body_bytes,
+                        # Fix #14: skip process_request if C++ already parsed headers/query
+                        # (set by _cpp_server.py data_received via ContextVar).
+                        # Only call process_request when the scope doesn't already have
+                        # pre-parsed data from the C++ fast path.
+                        _already_parsed = (
+                            "_core_query_params" in request.scope
+                            and "_core_headers" in request.scope
                         )
-                        if req_result["json_body"] is not None:
-                            json_body = req_result["json_body"]
-                        # Cache parsed data for solve_dependencies
-                        request.scope[
-                            "_core_query_params"
-                        ] = req_result["query_params"]
-                        request.scope[
-                            "_core_headers"
-                        ] = req_result["headers"]
-                        request.scope[
-                            "_core_cookies"
-                        ] = req_result["cookies"]
+                        if not _already_parsed:
+                            raw_hdrs = request.scope.get("headers", [])
+                            qs = request.scope.get(
+                                "query_string", b""
+                            ).decode("latin-1")
+                            req_result = process_request(
+                                query_string=qs,
+                                raw_headers=raw_hdrs,
+                                body=body_bytes,
+                            )
+                            if req_result["json_body"] is not None:
+                                json_body = req_result["json_body"]
+                            request.scope["_core_query_params"] = req_result["query_params"]
+                            request.scope["_core_headers"] = req_result["headers"]
+                            request.scope["_core_cookies"] = req_result["cookies"]
+                        else:
+                            # C++ already parsed — just JSON-decode the body
+                            try:
+                                from astraapi._core_bridge import parse_json_bytes as _pjb
+                                if _pjb is not None:
+                                    json_body = _pjb(body_bytes)
+                                else:
+                                    import json as _json
+                                    json_body = _json.loads(body_bytes)
+                            except Exception:
+                                pass
                         if json_body != Undefined:
                             body = json_body
                         else:

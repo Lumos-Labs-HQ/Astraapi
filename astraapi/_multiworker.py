@@ -304,13 +304,15 @@ def _run_fork_supervisor(
     # no IPC, no lock contention. Falls back to master-accept if unavailable.
     use_reuseport = _HAS_REUSEPORT
     if use_reuseport:
-        # Verify SO_REUSEPORT actually works (some containers block it)
+        # Fix #11: verify SO_REUSEPORT actually works (some containers/kernels block it)
         try:
             _test = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
             _test.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEPORT, 1)
+            _test.bind((host, port if port != 0 else 0))
             _test.close()
         except (OSError, AttributeError):
             use_reuseport = False
+            print(f"  [multiworker] SO_REUSEPORT unavailable — falling back to master-accept+SCM_RIGHTS")
 
     if use_reuseport:
         # Close the parent's listen socket BEFORE forking — it was created
