@@ -3108,6 +3108,10 @@ async def run_server(
 
     core_app = app._core_app
 
+    # Sync routes if not yet done
+    if hasattr(app, "_sync_routes_to_core"):
+        app._sync_routes_to_core()
+
     # Determine if any route needs Request context (raw headers/body/method/path)
     # If not, skip the expensive per-request header parse in data_received
     # _sync_routes_to_core already set this; run_server recomputes as authoritative final value

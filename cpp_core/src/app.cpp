@@ -7392,8 +7392,5 @@ int register_app_types(PyObject* module) {
     Py_INCREF(&PreparedRequestType);
     PyModule_AddObject(module, "PreparedRequest", (PyObject*)&PreparedRequestType);
 
-    // Register cleanup for module-level cached refs
-    Py_AtExit(cleanup_cached_refs);
-
     return 0;
 }
