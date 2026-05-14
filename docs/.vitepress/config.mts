@@ -7,16 +7,19 @@ export default defineConfig({
   lang: 'en-US',
 
   head: [
-    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }],
+    ['link', { rel: 'icon', type: 'image/png', href: '/icon.png' }],
     ['meta', { name: 'theme-color', content: '#00b894' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'AstraAPI' }],
     ['meta', { property: 'og:title', content: 'AstraAPI — FastAPI-compatible, C++ powered, built-in workers' }],
     ['meta', { property: 'og:description', content: 'AstraAPI is a FastAPI-compatible Python web framework with a C++ core, built-in multi-worker server, and zero-copy HTTP pipeline. No gunicorn or uvicorn required.' }],
+    ['meta', { property: 'og:image', content: '/icon.png' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: '/icon.png' }],
   ],
 
   themeConfig: {
-    logo: '/logo.svg',
+    logo: { src: '/icon.png', alt: 'AstraAPI' },
     siteTitle: 'AstraAPI',
 
     search: {
@@ -24,7 +27,7 @@ export default defineConfig({
     },
 
     editLink: {
-      pattern: 'https://github.com/your-org/astraapi/edit/main/docs_web/:path',
+      pattern: 'https://github.com/your-org/astraapi/edit/main/docs/:path',
       text: 'Edit this page on GitHub',
     },
 

@@ -1,0 +1,19 @@
+/* Rounded navbar logo */
+.VPNavBarTitle .logo {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.VPNavBarTitle .VPImage {
+  border-radius: 12px;
+}
+
+/* Also round the logo in the sidebar (mobile) */
+.VPSidebar .logo {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.VPSidebar .VPImage {
+  border-radius: 12px;
+}
