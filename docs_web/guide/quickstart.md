@@ -43,14 +43,14 @@ if __name__ == "__main__":
 python main.py
 ```
 
-You should see output similar to:
+You will see:
 
 ```
-INFO: AstraAPI server running on http://0.0.0.0:8000
-INFO: C++ core initialized
-INFO: uvloop detected and active
-INFO: Pre-warmed 1024 protocol objects
+C++ HTTP server running on http://127.0.0.1:8000
+Press Ctrl+C to stop
 ```
+
+AstraAPI auto-detects uvloop (Linux/macOS) or winloop (Windows) and uses the best available event loop. No configuration needed.
 
 ## 3. Test It
 
@@ -84,6 +84,6 @@ AstraAPI spawns 4 independent worker processes, each with its own event loop and
 
 ## What is Next?
 
-- Explore the [Features](../features/routing) — routing, validation, auth, and more
-- Read the [Architecture](../architecture/) to understand the speed
-- Check [Benchmarks](../performance/benchmarks) to see how fast it really is
+- Explore the [Features](../features/routing)
+- Read the [Architecture](../architecture/)
+- Check [Benchmarks](../performance/benchmarks)

@@ -1,10 +1,10 @@
 # Installation
 
-AstraAPI supports Python 3.10+ and provides pre-built wheels for Linux, macOS, and Windows. The C++ core compiles automatically during installation if a wheel is not available.
+AstraAPI supports Python 3.12+ and provides pre-built wheels for Linux, macOS, and Windows. The C++ core compiles automatically during installation if a wheel is not available.
 
 ## Requirements
 
-- Python 3.10, 3.11, 3.12, 3.13, or 3.14
+- Python 3.12, 3.13, or 3.14
 - A C++ compiler (GCC 11+, Clang 14+, or MSVC 2022+) if building from source
 - CMake 3.20+
 
@@ -20,15 +20,40 @@ pip install astraapi
 uv add astraapi
 ```
 
-## Optional: uvloop
+## What You Get Out of the Box
 
-While AstraAPI works with the standard `asyncio` event loop, **uvloop is strongly recommended** for production:
+AstraAPI's `pyproject.toml` already includes these performance-critical packages:
+
+| Package | Purpose | Platform |
+|---------|---------|----------|
+| `uvloop` | Faster asyncio event loop | Linux/macOS |
+| `winloop` | Faster asyncio event loop | Windows |
+| `orjson` | Fast JSON serialization | All |
+| `watchfiles` | Hot reload file watcher | All |
+
+You do **not** need to install these separately. They are already dependencies.
+
+## Optional Extras
+
+For additional features, install with extras:
 
 ```bash
-pip install uvloop
+# Standard extras: test client, templates, forms, email validation, settings
+pip install "astraapi[standard]"
+
+# All extras: everything above + ujson, pyyaml, itsdangerous
+pip install "astraapi[all]"
 ```
 
-AstraAPI automatically detects and uses uvloop when available — no code changes needed.
+| Extra | Packages | Purpose |
+|-------|----------|---------|
+| `httpx` | TestClient HTTP requests | Testing |
+| `jinja2` | Template rendering | HTML templates |
+| `python-multipart` | Form and file upload parsing | Forms/files |
+| `email-validator` | Email field validation | Validation |
+| `pydantic-settings` | Settings management | Configuration |
+| `pydantic-extra-types` | Extra Pydantic types | Validation |
+| `ujson` | UJSONResponse | Alternative JSON |
 
 ## Build from Source
 
@@ -46,35 +71,26 @@ The build uses `scikit-build-core` and CMake. It automatically:
 2. Links optional system libraries (libdeflate, brotli, zlib)
 3. Copies the shared object to the package directory
 
+### Optional System Libraries
+
+For maximum performance, install these before building:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install libdeflate-dev libbrotli-dev
+
+# macOS
+brew install libdeflate brotli
+```
+
+If libdeflate is available, AstraAPI uses it for 2-3x faster gzip compression. Otherwise, it falls back to zlib.
+
 ## Verify Installation
 
 ```python
 import astraapi
 print(astraapi.__version__)
 ```
-
-## What You Do NOT Need
-
-Unlike FastAPI, AstraAPI does **not** require:
-
-| Package | Why Not Needed |
-|---------|---------------|
-| `uvicorn` | AstraAPI has a built-in server |
-| `gunicorn` | AstraAPI has built-in multi-worker support |
-| `hypercorn` | Not needed |
-| `daphne` | Not needed |
-
-You can still use these if you have existing infrastructure, but they are not required.
-
-## Optional Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `uvloop` | Faster asyncio event loop (strongly recommended) |
-| `ujson` | Faster JSON for `UJSONResponse` |
-| `orjson` | Faster JSON for `ORJSONResponse` |
-| `httpx` | Async HTTP client for testing |
-| `pytest-asyncio` | For running async test suites |
 
 ## Troubleshooting
 
@@ -89,14 +105,19 @@ Install CMake:
 - macOS: `brew install cmake`
 - Windows: `choco install cmake` or download from cmake.org
 
-### Segfault on shutdown
+### libdeflate not found warning
 
-This was a known issue in early versions where cleanup hooks were registered twice. Upgrade to the latest version:
+If you see this at startup:
+```
+[astraapi] libdeflate not found; using zlib (2-3x slower compression).
+```
 
+Install libdeflate and rebuild:
 ```bash
-pip install -U astraapi
+sudo apt-get install libdeflate-dev
+pip install --no-binary :all: astraapi
 ```
 
 ## Next Steps
 
-- [**Quick Start**](./quickstart) — write your first app
+- [Quick Start](./quickstart) — write your first app

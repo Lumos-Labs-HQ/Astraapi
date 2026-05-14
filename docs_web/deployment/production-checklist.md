@@ -24,7 +24,7 @@ async def security_headers(request, call_next):
 
 ## Performance
 
-- [ ] **uvloop installed** — pip install uvloop
+- [ ] **uvloop present** — already included in dependencies
 - [ ] **Multiple workers** — match CPU core count
 - [ ] **Kernel tuned** — somaxconn, tcp_tw_reuse
 - [ ] **Static files offloaded** — CDN or Nginx
@@ -73,7 +73,7 @@ async def logging_middleware(request, call_next):
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8000
     workers: int = 1
     secret_key: str
@@ -118,7 +118,7 @@ def health():
 if __name__ == "__main__":
     workers = int(os.getenv("WORKERS", os.cpu_count() or 1))
     app.run(
-        host="0.0.0.0",
+        host="127.0.0.1",
         port=int(os.getenv("PORT", 8000)),
         workers=workers,
         backlog=65535,

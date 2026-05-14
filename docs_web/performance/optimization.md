@@ -2,13 +2,12 @@
 
 Get the most out of AstraAPI with these production tuning tips.
 
-## 1. Use uvloop
+## 1. Use uvloop (Already Included)
 
-```bash
-pip install uvloop
-```
+uvloop is already included in AstraAPI's dependencies. AstraAPI automatically detects and uses it. No action needed.
 
-AstraAPI automatically detects and uses uvloop. No code changes needed.
+On Linux/macOS: uvloop is used automatically.
+On Windows: winloop is used automatically.
 
 uvloop replaces Python's default asyncio event loop with a Cython implementation. It provides:
 - Faster socket polling
@@ -169,7 +168,7 @@ perf report
 
 ## Quick Checklist
 
-- [ ] uvloop installed
+- [ ] uvloop present (already included)
 - [ ] Multiple workers matching CPU cores
 - [ ] Backlog increased to 65535
 - [ ] Kernel TCP settings tuned

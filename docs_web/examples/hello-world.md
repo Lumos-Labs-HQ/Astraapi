@@ -57,7 +57,7 @@ def health():
     return {"status": "healthy"}
 
 if __name__ == "__main__":
-    app.run(port=8000, workers=1)
+    app.run(port=8000)
 ```
 
 ## Project Structure

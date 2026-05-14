@@ -17,25 +17,29 @@ if __name__ == "__main__":
     app.run(port=8000)
 ```
 
-## app.run() Options
+Output:
+```
+C++ HTTP server running on http://127.0.0.1:8000
+Press Ctrl+C to stop
+```
+
+## app.run() Parameters
 
 ```python
 app.run(
-    host="0.0.0.0",
-    port=8000,
-    workers=1,              # Number of process workers
-    backlog=65535,          # Kernel listen backlog
-    reload=False,           # Auto-reload on file change (dev only)
+    host="127.0.0.1",       # Bind address (default: 127.0.0.1)
+    port=8000,              # Bind port
+    reload=False,           # Hot reload (development only)
+    reload_dirs=None,       # Directories to watch for reload
+    reload_includes=None,   # Extra glob patterns for reload
+    reload_excludes=None,   # Paths to exclude from reload
+    workers=1,              # Number of worker processes
+    keep_alive_timeout=30.0,# HTTP keep-alive timeout in seconds
+    max_body_size=0,        # Max request body size in bytes (0 = unlimited)
+    max_body_size_kb=0,     # Alternative: body size in KB
+    max_body_size_mb=0,     # Alternative: body size in MB
 )
 ```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `host` | `"0.0.0.0"` | Bind address |
-| `port` | `8000` | Bind port |
-| `workers` | `1` | Process workers (use os.cpu_count() for production) |
-| `backlog` | `65535` | OS listen backlog |
-| `reload` | `False` | Auto-reload on file change (dev only, single worker) |
 
 ## Multi-Worker Deployment
 
@@ -61,45 +65,53 @@ AstraAPI's worker manager is entirely custom and built into the framework:
 
 **All platforms:**
 - Each worker is a fully independent OS process with its own GIL, memory space, and event loop.
-- **CPU affinity pinning**: Workers are pinned to dedicated cores via os.sched_setaffinity() (Linux) or SetProcessAffinityMask (Windows) to eliminate cross-core cache thrashing.
+- **CPU affinity pinning**: Workers are pinned to dedicated cores to eliminate cross-core cache thrashing.
 - **Supervision**: The parent monitors children and restarts crashed workers with exponential backoff.
 - **Zero shared state**: No locks, no IPC during request processing.
 
-### Pre-Fork Model
+## Auto-Tuning
 
-Before forking, the parent calls:
-1. `app._sync_routes_to_core()` — registers all routes with C++
-2. `core_app.freeze_routes()` — freezes the route table as read-only
-3. Pre-warms protocol pools and C++ buffer pools
-4. Calls `gc.freeze()` — moves all startup objects to a permanent generation
+When you call `app.run()`, AstraAPI automatically applies these optimizations:
 
-Children inherit the frozen route table via **Copy-on-Write (COW)** pages.
+- **RLIMIT_NOFILE** - Raises file descriptor limit to 65536
+- **somaxconn** - Sets kernel listen queue to 65535
+- **tcp_max_syn_backlog** - Sets TCP SYN backlog to 65535
+- **tcp_tw_reuse** - Reuses TIME_WAIT sockets
+- **tcp_fin_timeout** - Reduces FIN timeout to 10s
+- **ip_local_port_range** - Expands ephemeral port range
+- **TCP_FASTOPEN** - Reduces 1-RTT for new connections
+- **TCP_DEFER_ACCEPT** - Delivers connections only when data arrives
+- **TCP_NODELAY** - Disables Nagle's algorithm
+- **GC disable + freeze** - Moves startup objects to permanent generation
+- **Eager task factory** - Python 3.12+ async task optimization
+- **C++ route warmup** - Warms instruction cache before first request
+- **Buffer pool prewarm** - Pre-allocates thread-local response buffers
+- **Protocol pool prewarm** - Pre-allocates 1024 protocol objects
+- **CORS sync** - Automatically syncs CORS config to C++ core
+- **libdeflate check** - Warns if libdeflate is not available
 
-## Event Loop Priority
+All of this happens automatically. You do not need to configure anything.
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ASTRAAPI_MAX_CONNECTIONS` | `0` (unlimited) | Maximum concurrent connections |
+| `ASTRAAPI_PREWARM_CONNS` | `1024` (single) / `512` (worker) | Protocol pool pre-warm size |
+| `ASTRAAPI_CPU_AFFINITY` | `""` | CPU cores to pin to (e.g., `"0,1,2,3"`) |
+| `ASTRAAPI_RT_PRIORITY` | `0` | Real-time SCHED_FIFO priority (Linux, requires root) |
+| `ASTRAAPI_MAX_BODY_SIZE` | `0` (unlimited) | Max request body size in bytes |
+| `ASTRAAPI_WS_PING_INTERVAL` | `30.0` | WebSocket ping interval in seconds |
+
+## Event Loop
 
 AstraAPI tries event loops in this order:
 
-1. **uvloop** — fastest, Cython-based (Linux/macOS)
-2. **winloop** — uvloop equivalent for Windows
-3. **asyncio** — Python's built-in loop (fallback)
+1. **uvloop** - fastest, Cython-based (Linux/macOS, already included)
+2. **winloop** - uvloop equivalent for Windows (already included)
+3. **asyncio** - Python's built-in loop (fallback)
 
-No code changes needed — AstraAPI auto-detects and uses the best available loop.
-
-```bash
-pip install uvloop  # Strongly recommended for production
-```
-
-## TCP Optimizations
-
-AstraAPI applies several low-level TCP optimizations automatically:
-
-| Option | Purpose |
-|--------|---------|
-| `TCP_NODELAY` | Disables Nagle's algorithm for low latency |
-| `TCP_QUICKACK` | Re-armed per read to reduce ACK latency |
-| `TCP_FASTOPEN` | Reduces 1-RTT for new connections |
-| `TCP_DEFER_ACCEPT` | Do not wake worker until data arrives |
-| `TCP_CORK` | Batches segments during WebSocket write bursts |
+No code changes needed. AstraAPI auto-detects and uses the best available loop.
 
 ## Keep-Alive
 
@@ -109,17 +121,9 @@ AstraAPI uses a **batch sweep** for HTTP keep-alive instead of per-connection ti
 - Each protocol has a `_ka_needs_reset` flag set on every request
 - During the sweep: reset flags update deadlines; expired connections are closed
 
-This eliminates **~20,000 timer callbacks per second** at 200K req/s.
+This eliminates ~20,000 timer callbacks per second at 200K req/s.
 
-## Pre-Warming
-
-Before accepting connections, AstraAPI pre-warms multiple layers:
-
-1. **Protocol Object Pool** — 1024 objects (single-process) or 512 per worker
-2. **C++ Buffer Pool** — thread-local response buffers
-3. **Cached Refs** — pre-imports modules and interns strings
-4. **Route Warmup** — exercises parse, route, serialize to warm instruction cache
-5. **GC Freeze** — moves startup objects to permanent generation
+The timeout is controlled by `keep_alive_timeout` (default: 30 seconds).
 
 ## Development Mode
 
@@ -129,6 +133,11 @@ if __name__ == "__main__":
 ```
 
 Auto-reloads the server when Python files change. Only works with `workers=1`.
+
+Watch additional patterns:
+```python
+app.run(port=8000, reload=True, reload_includes=["*.yaml", "*.json"])
+```
 
 ## Docker
 
@@ -145,7 +154,7 @@ EXPOSE 8000
 CMD ["python", "main.py"]
 ```
 
-No gunicorn or uvicorn in the container — just `python main.py`.
+No gunicorn or uvicorn in the container. Just `python main.py`.
 
 ```python
 # main.py
@@ -163,29 +172,31 @@ if __name__ == "__main__":
     app.run(port=8000, workers=workers)
 ```
 
-## Environment Variables
+## systemd Service
 
-| Variable | Description |
-|----------|-------------|
-| `ASTRAAPI_PREWARM_CONNS` | Protocol pool pre-warm size (default: 1024 single / 512 per worker) |
+```ini
+[Unit]
+Description=AstraAPI Server
+After=network.target
 
-## Performance Mode
+[Service]
+User=astraapi
+Group=astraapi
+WorkingDirectory=/opt/astraapi
+Environment="PATH=/opt/astraapi/.venv/bin"
+Environment="WORKERS=4"
+ExecStart=/opt/astraapi/.venv/bin/python main.py
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=5
+PrivateTmp=true
 
-For benchmarking or maximum throughput:
-
-```python
-import uvloop
-uvloop.install()
-
-app.run(
-    port=8000,
-    workers=6,
-    backlog=65535,
-)
+[Install]
+WantedBy=multi-user.target
 ```
 
-This configuration:
-- Uses uvloop for faster event loop
-- Pre-warms protocol objects to eliminate allocation at high concurrency
-- Freezes GC to prevent collection pauses
-- Sets a large kernel backlog to handle connection bursts
+```bash
+sudo systemctl enable astraapi
+sudo systemctl start astraapi
+sudo systemctl status astraapi
+```
