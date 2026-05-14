@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f8f9fa"/>
+      <stop offset="100%" style="stop-color:#e9ecef"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00b894"/>
+      <stop offset="100%" style="stop-color:#00cec9"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="300" fill="url(#bg)" rx="12"/>
+  <rect x="30" y="30" width="160" height="240" fill="white" rx="8" stroke="#dee2e6" stroke-width="2"/>
+  <rect x="210" y="30" width="160" height="240" fill="white" rx="8" stroke="#dee2e6" stroke-width="2"/>
+  <text x="110" y="60" font-family="monospace" font-size="14" fill="#495057" text-anchor="middle">Python</text>
+  <text x="290" y="60" font-family="monospace" font-size="14" fill="#495057" text-anchor="middle">C++ Core</text>
+  <rect x="50" y="80" width="120" height="20" fill="#e9ecef" rx="4"/>
+  <rect x="50" y="110" width="80" height="20" fill="#e9ecef" rx="4"/>
+  <rect x="50" y="140" width="100" height="20" fill="#e9ecef" rx="4"/>
+  <rect x="230" y="80" width="120" height="30" fill="url(#accent)" rx="4"/>
+  <rect x="230" y="120" width="120" height="30" fill="url(#accent)" rx="4" opacity="0.8"/>
+  <rect x="230" y="160" width="120" height="30" fill="url(#accent)" rx="4" opacity="0.6"/>
+  <path d="M 190 130 L 210 130" stroke="#00b894" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M 210 170 L 190 170" stroke="#00cec9" stroke-width="3" marker-end="url(#arrow)"/>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#00b894"/>
+    </marker>
+  </defs>
+  <text x="200" y="200" font-family="monospace" font-size="12" fill="#6c757d" text-anchor="middle">Zero-Copy Bridge</text>
+</svg>

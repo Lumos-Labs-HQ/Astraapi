@@ -26,6 +26,11 @@ archive.zip
 .*.sw?
 .cache
 
+# vitepress
+*/.vitepress/dist
+*/.vitepress/cache
+*/node_modules/
+*/bun.lock
 
 # macOS
 .DS_Store
