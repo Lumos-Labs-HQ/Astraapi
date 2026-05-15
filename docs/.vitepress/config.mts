@@ -1,6 +1,7 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
+  base: "/Astraapi/",
   title: "AstraAPI",
   titleTemplate: ":title — AstraAPI",
   description:
@@ -8,7 +9,7 @@ export default defineConfig({
   lang: "en-US",
 
   head: [
-    ["link", { rel: "icon", type: "image/png", href: "/icon.png" }],
+    ["link", { rel: "icon", type: "image/png", href: "./icon.png" }],
     ["meta", { name: "theme-color", content: "#00b894" }],
     ["meta", { property: "og:type", content: "website" }],
     ["meta", { property: "og:site_name", content: "AstraAPI" }],
@@ -47,7 +48,7 @@ export default defineConfig({
   ],
 
   themeConfig: {
-    logo: { src: "/icon.png", alt: "AstraAPI" },
+    logo: { src: "./icon.png", alt: "AstraAPI" },
     siteTitle: "AstraAPI",
 
     nav: [
