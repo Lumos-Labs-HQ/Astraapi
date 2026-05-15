@@ -38,7 +38,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           uv venv
-          uv pip install -e ".[dev]"
+          uv pip install -e ".[dev,standard]"
 
       - name: Build C++ core
         run: |
