@@ -1,7 +1,7 @@
 import { defineConfig } from "vitepress";
 
 export default defineConfig({
-  base: "/Astraapi/",
+  base: "/",
   title: "AstraAPI",
   titleTemplate: ":title — AstraAPI",
   description:
