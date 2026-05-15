@@ -3,6 +3,16 @@ name: Tests
 on:
   push:
     branches: [main]
+    paths:
+      - 'astraapi/**'
+      - 'core/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - 'docs_src/**'
+      - 'tests/**'
+      - '.github/workflows/tests.yml'
+
+
   pull_request:
     branches: [main]
 
@@ -47,12 +57,3 @@ jobs:
 
       - name: Run tests
         run: .venv/bin/python -m pytest tests/ -x -q --tb=short
-
-      - name: Run tests with coverage
-        run: .venv/bin/python -m pytest tests/ --cov=astraapi --cov-report=xml --tb=short
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
