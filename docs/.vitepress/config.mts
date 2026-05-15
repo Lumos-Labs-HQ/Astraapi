@@ -73,8 +73,9 @@ export default defineConfig({
         link: "/examples/hello-world",
         activeMatch: "/examples/",
       },
+
       {
-        text: "v0.2.0",
+        text: "v0.2.1",
         items: [
           {
             text: "Release Notes",
@@ -226,6 +227,7 @@ export default defineConfig({
 
     socialLinks: [
       { icon: "github", link: "https://github.com/Lumos-Labs-HQ/Astraapi" },
+      { icon: "pypi", link: "https://pypi.org/project/astraapi/" },
     ],
 
     footer: {
