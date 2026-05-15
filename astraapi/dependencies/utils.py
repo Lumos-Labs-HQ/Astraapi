@@ -1024,7 +1024,7 @@ def _core_query_params_to_args(
         len(fields) == 1
         and lenient_issubclass(fields[0].type_, BaseModel)
     ):
-        from starlette.datastructures import QueryParams as _QP
+        from astraapi.datastructures import QueryParams as _QP
         flat: dict[str, Any] = {}
         for key, vals in core_parsed.items():
             if vals and len(vals) == 1:
