@@ -2,9 +2,11 @@
 #include <Python.h>
 #include "streaming_multipart.hpp"
 #include "pyref.hpp"
+#include "platform.hpp"
 #include <cstring>
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 
 // ── Static Python object cache ────────────────────────────────────────────────
 PyObject* StreamingMultipartParser::s_bytes_io_cls_   = nullptr;
@@ -372,22 +374,23 @@ PyObject* StreamingMultipartParser::build_kwargs(PyObject* existing_kwargs) cons
             if (!data_bytes) { if (!existing_kwargs) Py_DECREF(kwargs); return nullptr; }
             file_obj = PyObject_CallOneArg(s_bytes_io_cls_, data_bytes.get());
         } else {
-            // Large file: write to real tempfile via C fwrite (no Python overhead)
+            // Large file: write to real tempfile via C FILE* (no Python overhead)
             // Then open it as a Python file object
-            char tmppath[256];
-            snprintf(tmppath, sizeof(tmppath), "/tmp/astraapi_upload_XXXXXX");
-            int fd = mkstemp(tmppath);
-            if (fd >= 0) {
-                // Write all data via C write() — no Python GIL overhead
-                const uint8_t* ptr = file.data_buf.data();
-                size_t remaining = file.data_buf.size();
-                while (remaining > 0) {
-                    ssize_t written = write(fd, ptr, remaining);
-                    if (written <= 0) break;
-                    ptr += written;
-                    remaining -= written;
-                }
-                close(fd);
+            char tmppath[512];
+            auto tmpdir = std::filesystem::temp_directory_path();
+            static int tmp_counter = 0;
+#ifdef _WIN32
+            snprintf(tmppath, sizeof(tmppath), "%s\\astraapi_upload_%d_%d.tmp",
+                     tmpdir.string().c_str(), static_cast<int>(_getpid()), tmp_counter++);
+#else
+            snprintf(tmppath, sizeof(tmppath), "%s/astraapi_upload_%d_%d.tmp",
+                     tmpdir.string().c_str(), static_cast<int>(getpid()), tmp_counter++);
+#endif
+            FILE* fp = std::fopen(tmppath, "wb+");
+            if (fp) {
+                // Write all data via C fwrite() — no Python GIL overhead
+                size_t written = std::fwrite(file.data_buf.data(), 1, file.data_buf.size(), fp);
+                std::fclose(fp);
                 // Open as Python file object (seeked to start)
                 PyRef path_str(PyUnicode_FromString(tmppath));
                 PyRef mode_str(PyUnicode_FromString("r+b"));
@@ -405,10 +408,10 @@ PyObject* StreamingMultipartParser::build_kwargs(PyObject* existing_kwargs) cons
                     }
                     if (!file_obj) PyErr_Clear();
                 }
-                // Schedule file deletion on close via a wrapper? 
-                // For now: use Python's tempfile.NamedTemporaryFile delete=True behavior
-                // by registering an atexit or using os.unlink after close.
-                // Simplest: use Python's tempfile module to get auto-delete
+                // Unlink temp file after opening (Python now has its own fd/handle)
+                if (file_obj) {
+                    std::remove(tmppath);
+                }
                 if (!file_obj) {
                     // Fallback: BytesIO (memory)
                     PyRef data_bytes(PyBytes_FromStringAndSize(
@@ -417,7 +420,7 @@ PyObject* StreamingMultipartParser::build_kwargs(PyObject* existing_kwargs) cons
                         file_obj = PyObject_CallOneArg(s_bytes_io_cls_, data_bytes.get());
                 }
             } else {
-                // mkstemp failed: fallback to BytesIO
+                // fopen failed: fallback to BytesIO
                 PyRef data_bytes(PyBytes_FromStringAndSize(
                     (const char*)file.data_buf.data(), file_size));
                 if (data_bytes)
