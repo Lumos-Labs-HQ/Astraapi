@@ -1,3 +1,4 @@
+#define NOMINMAX
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "streaming_multipart.hpp"
@@ -85,7 +86,7 @@ size_t StreamingMultipartParser::bmh_search(const uint8_t* data, size_t len) con
 // ── Main feed() ───────────────────────────────────────────────────────────────
 FeedResult StreamingMultipartParser::feed(const uint8_t* data, size_t len) {
     if (state_ == MultipartState::DONE)  return FeedResult::DONE;
-    if (state_ == MultipartState::ERROR) return FeedResult::ERROR;
+    if (state_ == MultipartState::ERR) return FeedResult::ERR;
 
     if (max_body_size_ > 0) {
         total_bytes_ += len;
@@ -160,7 +161,7 @@ FeedResult StreamingMultipartParser::process_header(
     const char* end = p + len;
     const char* found = std::search(p, end, "\r\n\r\n", "\r\n\r\n" + 4);
     if (found == end) {
-        if (cur_header_buf_.size() + len > 65536) return FeedResult::ERROR;
+        if (cur_header_buf_.size() + len > 65536) return FeedResult::ERR;
         cur_header_buf_.append(p, len);
         consumed = len;
         return FeedResult::NEED_MORE;
@@ -379,13 +380,8 @@ PyObject* StreamingMultipartParser::build_kwargs(PyObject* existing_kwargs) cons
             char tmppath[512];
             auto tmpdir = std::filesystem::temp_directory_path();
             static int tmp_counter = 0;
-#ifdef _WIN32
-            snprintf(tmppath, sizeof(tmppath), "%s\\astraapi_upload_%d_%d.tmp",
-                     tmpdir.string().c_str(), static_cast<int>(_getpid()), tmp_counter++);
-#else
-            snprintf(tmppath, sizeof(tmppath), "%s/astraapi_upload_%d_%d.tmp",
-                     tmpdir.string().c_str(), static_cast<int>(getpid()), tmp_counter++);
-#endif
+            snprintf(tmppath, sizeof(tmppath), "%s/astraapi_upload_%d.tmp",
+                     tmpdir.string().c_str(), tmp_counter++);
             FILE* fp = std::fopen(tmppath, "wb+");
             if (fp) {
                 // Write all data via C fwrite() — no Python GIL overhead

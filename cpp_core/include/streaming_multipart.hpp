@@ -13,8 +13,8 @@
 // Python endpoint just receives UploadFile — no SpooledTemporaryFile, no FormData.
 // Small files (< 1MB): io.BytesIO. Large files (>= 1MB): real tmpfile via C fwrite.
 
-enum class MultipartState : uint8_t { PREAMBLE, PART_HEADER, PART_DATA, DONE, ERROR };
-enum class FeedResult      : uint8_t { NEED_MORE, DONE, ERROR, SIZE_EXCEEDED };
+enum class MultipartState : uint8_t { PREAMBLE, PART_HEADER, PART_DATA, DONE, ERR };
+enum class FeedResult      : uint8_t { NEED_MORE, DONE, ERR, SIZE_EXCEEDED };
 
 struct MultipartField { std::string name, value; };
 
