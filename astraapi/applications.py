@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import re
 import inspect
 import threading
@@ -62,6 +63,10 @@ _BATCH_SPEC_TYPE = {"": 0, "str": 0, "int": 1, "float": 2, "bool": 3}
 # Serialises concurrent _sync_routes_to_core calls across all app instances.
 # Prevents data races in C++ route registration (shared module-level state).
 _global_sync_lock = threading.Lock()
+
+# Monotonic counter for unique app instance IDs — used by TestClient to avoid
+# server reuse when Python's memory allocator reuses object addresses (id()).
+_app_instance_counter = itertools.count(1)
 
 
 class AstraAPI(AppBase):
@@ -1016,6 +1021,9 @@ class AstraAPI(AppBase):
         self._core_app = CoreApp()
         self._core_app.redirect_slashes = bool(redirect_slashes)
         self._routes_synced: bool = False
+        # Unique ID for this app instance — prevents TestClient server reuse
+        # when id(app) gets recycled by Python's allocator.
+        self._app_instance_id = next(_app_instance_counter)
 
     # ── Lazy router + webhooks properties ─────────────────────────────────
     # Defers `from astraapi import routing` (and thus pydantic) until the
@@ -1337,6 +1345,7 @@ class AstraAPI(AppBase):
             if _body is None:
                 from astraapi._cpp_server import _current_body as _cb
                 _body = _cb.get() if hasattr(_cb, 'get') else b''
+
             kwargs.pop('__auth_scheme__', None); kwargs.pop('__auth_credentials__', None)
             kwargs.pop('__content_type__', None); kwargs.pop('__deps_ran__', None)
             _qs = _cqs.get() if hasattr(_cqs, 'get') else b''
@@ -2517,9 +2526,14 @@ class AstraAPI(AppBase):
                 if _has_custom_route_class:
                     async def _body_injector(kwargs_dict):
                         return ({}, [], None, None)
+                    # dep_inject_mask = 0x01|0x02|0x04 = 7 so C++ injects
+                    # __raw_headers__, __method__, __path__ into kwargs.
+                    # Without this, _asgi_shim falls back to ContextVars which
+                    # race when multiple connections are active on the same loop.
                     self._core_app.register_fast_spec(
                         route_index, None, None, None, False,
                         _registered_endpoint, _body_injector,
+                        dep_inject_mask=0x07,
                     )
                 # Register fast-path metadata for eligible routes
                 elif getattr(route, '_fast_path_eligible', False):

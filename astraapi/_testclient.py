@@ -321,7 +321,9 @@ class TestClient:
             except ImportError:
                 raise RuntimeError("httpx must be installed to use TestClient. Install it with: pip install httpx")
 
-            app_id = id(self.app)
+            # Use _app_instance_id (monotonic counter) instead of id(self.app) to
+            # avoid server reuse when Python's allocator recycles object addresses.
+            app_id = getattr(self.app, '_app_instance_id', id(self.app))
             with _app_servers_lock:
                 shared = _app_servers.get(app_id)
                 need_start = shared is None or shared.thread is None or not shared.thread.is_alive()
@@ -581,16 +583,15 @@ class TestClient:
         self.close()
         # When used as context manager, actually stop the server so lifespan shutdown runs
         shared = self._shared_server
+        _app_id = getattr(self.app, '_app_instance_id', id(self.app))
         if shared is None:
             # Already cleared by close() — look up by app id
-            app_id = id(self.app)
             with _app_servers_lock:
-                shared = _app_servers.pop(app_id, None)
+                shared = _app_servers.pop(_app_id, None)
         else:
             self._shared_server = None
-            app_id = id(self.app)
             with _app_servers_lock:
-                _app_servers.pop(app_id, None)
+                _app_servers.pop(_app_id, None)
         if shared is not None:
             shared.stop()
 

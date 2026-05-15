@@ -1532,6 +1532,7 @@ class CppHttpProtocol(asyncio.Protocol):
         _parse_ctx = self._needs_req_ctx or bool(
             _full_app is not None and getattr(_full_app, 'dependency_overrides', None)
         )
+
         if _parse_ctx and data:
             try:
                 _dlen = len(data)
