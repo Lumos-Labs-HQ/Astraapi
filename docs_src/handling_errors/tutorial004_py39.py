@@ -1,12 +1,11 @@
 from astraapi import AstraAPI, HTTPException
 from astraapi.exceptions import RequestValidationError
 from astraapi.responses import PlainTextResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 app = AstraAPI()
 
 
-@app.exception_handler(StarletteHTTPException)
+@app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     return PlainTextResponse(str(exc.detail), status_code=exc.status_code)
 

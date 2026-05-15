@@ -4,12 +4,11 @@ from astraapi.exception_handlers import (
     request_validation_exception_handler,
 )
 from astraapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 app = AstraAPI()
 
 
-@app.exception_handler(StarletteHTTPException)
+@app.exception_handler(HTTPException)
 async def custom_http_exception_handler(request, exc):
     print(f"OMG! An HTTP error!: {repr(exc)}")
     return await http_exception_handler(request, exc)

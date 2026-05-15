@@ -1,174 +1,236 @@
-import { defineConfig } from 'vitepress'
+import { defineConfig } from "vitepress";
 
 export default defineConfig({
-  title: 'AstraAPI',
-  titleTemplate: ':title — AstraAPI',
-  description: 'The FastAPI-compatible framework powered by C++. Built-in workers, zero-copy I/O, no external server needed.',
-  lang: 'en-US',
+  title: "AstraAPI",
+  titleTemplate: ":title — AstraAPI",
+  description:
+    "FastAPI-compatible Python web framework with C++ core. Built-in workers, zero-copy I/O. Python 3.12+.",
+  lang: "en-US",
 
   head: [
-    ['link', { rel: 'icon', type: 'image/png', href: '/icon.png' }],
-    ['meta', { name: 'theme-color', content: '#00b894' }],
-    ['meta', { property: 'og:type', content: 'website' }],
-    ['meta', { property: 'og:site_name', content: 'AstraAPI' }],
-    ['meta', { property: 'og:title', content: 'AstraAPI — FastAPI-compatible, C++ powered, built-in workers' }],
-    ['meta', { property: 'og:description', content: 'AstraAPI is a FastAPI-compatible Python web framework with a C++ core, built-in multi-worker server, and zero-copy HTTP pipeline. No gunicorn or uvicorn required.' }],
-    ['meta', { property: 'og:image', content: '/icon.png' }],
-    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
-    ['meta', { name: 'twitter:image', content: '/icon.png' }],
+    ["link", { rel: "icon", type: "image/png", href: "/icon.png" }],
+    ["meta", { name: "theme-color", content: "#00b894" }],
+    ["meta", { property: "og:type", content: "website" }],
+    ["meta", { property: "og:site_name", content: "AstraAPI" }],
+    [
+      "meta",
+      {
+        property: "og:title",
+        content: "AstraAPI — FastAPI-compatible, C++ powered",
+      },
+    ],
+    [
+      "meta",
+      {
+        property: "og:description",
+        content:
+          "FastAPI-compatible Python web framework with C++ core. Built-in workers, zero-copy I/O. Python 3.12+.",
+      },
+    ],
+    [
+      "meta",
+      {
+        property: "og:image",
+        content:
+          "https://raw.githubusercontent.com/Lumos-Labs-HQ/Astraapi/main/docs/public/icon.png",
+      },
+    ],
+    ["meta", { name: "twitter:card", content: "summary_large_image" }],
+    [
+      "meta",
+      {
+        name: "twitter:image",
+        content:
+          "https://raw.githubusercontent.com/Lumos-Labs-HQ/Astraapi/main/docs/public/icon.png",
+      },
+    ],
   ],
 
   themeConfig: {
-    logo: { src: '/icon.png', alt: 'AstraAPI' },
-    siteTitle: 'AstraAPI',
+    logo: { src: "/icon.png", alt: "AstraAPI" },
+    siteTitle: "AstraAPI",
+
+    nav: [
+      { text: "Guide", link: "/guide/getting-started", activeMatch: "/guide/" },
+      {
+        text: "Architecture",
+        link: "/architecture/",
+        activeMatch: "/architecture/",
+      },
+      {
+        text: "Features",
+        link: "/features/routing",
+        activeMatch: "/features/",
+      },
+      {
+        text: "Performance",
+        link: "/performance/benchmarks",
+        activeMatch: "/performance/",
+      },
+      {
+        text: "Examples",
+        link: "/examples/hello-world",
+        activeMatch: "/examples/",
+      },
+      {
+        text: "v0.2.0",
+        items: [
+          {
+            text: "Release Notes",
+            link: "https://github.com/Lumos-Labs-HQ/Astraapi/releases",
+          },
+          { text: "Contributing", link: "/contributing/" },
+        ],
+      },
+    ],
 
     search: {
-      provider: 'local',
+      provider: "local",
     },
 
     editLink: {
-      pattern: 'https://github.com/your-org/astraapi/edit/main/docs/:path',
-      text: 'Edit this page on GitHub',
+      pattern: "https://github.com/Lumos-Labs-HQ/Astraapi/edit/main/docs/:path",
+      text: "Edit this page on GitHub",
     },
 
-    nav: [
-      { text: 'Guide', link: '/guide/getting-started', activeMatch: '/guide/' },
-      { text: 'Architecture', link: '/architecture/', activeMatch: '/architecture/' },
-      { text: 'Features', link: '/features/routing', activeMatch: '/features/' },
-      { text: 'Performance', link: '/performance/benchmarks', activeMatch: '/performance/' },
-      { text: 'Examples', link: '/examples/hello-world', activeMatch: '/examples/' },
-    ],
-
     sidebar: {
-      '/guide/': [
+      "/guide/": [
         {
-          text: 'Getting Started',
+          text: "Getting Started",
           items: [
-            { text: 'Why AstraAPI?', link: '/guide/getting-started' },
-            { text: 'Installation', link: '/guide/installation' },
-            { text: 'Quick Start', link: '/guide/quickstart' },
+            { text: "Why AstraAPI?", link: "/guide/getting-started" },
+            { text: "Installation", link: "/guide/installation" },
+            { text: "Quick Start", link: "/guide/quickstart" },
           ],
         },
         {
-          text: 'Fundamentals',
+          text: "Fundamentals",
           items: [
-            { text: 'Create an App', link: '/guide/create-app' },
-            { text: 'Run the Server', link: '/guide/run-server' },
-            { text: 'Project Structure', link: '/guide/project-structure' },
-          ],
-        },
-      ],
-      '/architecture/': [
-        {
-          text: 'Architecture',
-          items: [
-            { text: 'Overview', link: '/architecture/' },
-            { text: 'C++ Core', link: '/architecture/cpp-core' },
-            { text: 'Python Asyncio Bridge', link: '/architecture/python-bridge' },
-            { text: 'HTTP Pipeline', link: '/architecture/http-pipeline' },
-            { text: 'Memory Model', link: '/architecture/memory-model' },
-            { text: 'Zero-Copy & Caching', link: '/architecture/zero-copy' },
+            { text: "Create an App", link: "/guide/create-app" },
+            { text: "Run the Server", link: "/guide/run-server" },
+            { text: "Project Structure", link: "/guide/project-structure" },
           ],
         },
       ],
-      '/features/': [
+      "/architecture/": [
         {
-          text: 'Routing',
+          text: "Architecture",
           items: [
-            { text: 'Basic Routing', link: '/features/routing' },
-            { text: 'Path Parameters', link: '/features/path-params' },
-            { text: 'Query Parameters', link: '/features/query-params' },
-          ],
-        },
-        {
-          text: 'Request',
-          items: [
-            { text: 'Request Body', link: '/features/request-body' },
-            { text: 'Headers & Cookies', link: '/features/headers-cookies' },
-            { text: 'Form Data', link: '/features/form-data' },
-            { text: 'File Uploads', link: '/features/file-uploads' },
-          ],
-        },
-        {
-          text: 'Response',
-          items: [
-            { text: 'JSON & HTML Responses', link: '/features/responses' },
-            { text: 'Streaming Response', link: '/features/streaming' },
-            { text: 'WebSockets', link: '/features/websockets' },
-            { text: 'Background Tasks', link: '/features/background-tasks' },
-          ],
-        },
-        {
-          text: 'Advanced',
-          items: [
-            { text: 'Dependency Injection', link: '/features/dependencies' },
-            { text: 'Middleware', link: '/features/middleware' },
-            { text: 'Exception Handling', link: '/features/exception-handling' },
-            { text: 'Validation', link: '/features/validation' },
-            { text: 'Security', link: '/features/security' },
-            { text: 'CORS', link: '/features/cors' },
-            { text: 'GZip Compression', link: '/features/gzip' },
-            { text: 'Static Files', link: '/features/static-files' },
-            { text: 'OpenAPI & Docs', link: '/features/openapi-docs' },
+            { text: "Overview", link: "/architecture/" },
+            { text: "C++ Core", link: "/architecture/cpp-core" },
+            {
+              text: "Python Asyncio Bridge",
+              link: "/architecture/python-bridge",
+            },
+            { text: "HTTP Pipeline", link: "/architecture/http-pipeline" },
+            { text: "Memory Model", link: "/architecture/memory-model" },
+            { text: "Zero-Copy & Caching", link: "/architecture/zero-copy" },
           ],
         },
       ],
-      '/performance/': [
+      "/features/": [
         {
-          text: 'Performance',
+          text: "Routing",
           items: [
-            { text: 'Benchmarks', link: '/performance/benchmarks' },
-            { text: 'Optimization Guide', link: '/performance/optimization' },
+            { text: "Basic Routing", link: "/features/routing" },
+            { text: "Path Parameters", link: "/features/path-params" },
+            { text: "Query Parameters", link: "/features/query-params" },
+          ],
+        },
+        {
+          text: "Request",
+          items: [
+            { text: "Request Body", link: "/features/request-body" },
+            { text: "Headers & Cookies", link: "/features/headers-cookies" },
+            { text: "Form Data", link: "/features/form-data" },
+            { text: "File Uploads", link: "/features/file-uploads" },
+          ],
+        },
+        {
+          text: "Response",
+          items: [
+            { text: "JSON & HTML Responses", link: "/features/responses" },
+            { text: "Streaming Response", link: "/features/streaming" },
+            { text: "WebSockets", link: "/features/websockets" },
+            { text: "Background Tasks", link: "/features/background-tasks" },
+          ],
+        },
+        {
+          text: "Advanced",
+          items: [
+            { text: "Dependency Injection", link: "/features/dependencies" },
+            { text: "Middleware", link: "/features/middleware" },
+            {
+              text: "Exception Handling",
+              link: "/features/exception-handling",
+            },
+            { text: "Validation", link: "/features/validation" },
+            { text: "Security", link: "/features/security" },
+            { text: "CORS", link: "/features/cors" },
+            { text: "GZip Compression", link: "/features/gzip" },
+            { text: "Static Files", link: "/features/static-files" },
+            { text: "OpenAPI & Docs", link: "/features/openapi-docs" },
           ],
         },
       ],
-      '/testing/': [
+      "/performance/": [
         {
-          text: 'Testing',
+          text: "Performance",
           items: [
-            { text: 'Test Client', link: '/testing/' },
-            { text: 'Async Testing', link: '/testing/async-tests' },
-            { text: 'Database Testing', link: '/testing/database-tests' },
+            { text: "Benchmarks", link: "/performance/benchmarks" },
+            { text: "Optimization Guide", link: "/performance/optimization" },
           ],
         },
       ],
-      '/deployment/': [
+      "/testing/": [
         {
-          text: 'Deployment',
+          text: "Testing",
           items: [
-            { text: 'Deploy with Docker', link: '/deployment/docker' },
-            { text: 'Built-in Workers', link: '/deployment/workers' },
-            { text: 'Production Checklist', link: '/deployment/production-checklist' },
+            { text: "Test Client", link: "/testing/" },
+            { text: "Async Testing", link: "/testing/async-tests" },
+            { text: "Database Testing", link: "/testing/database-tests" },
           ],
         },
       ],
-      '/examples/': [
+      "/deployment/": [
         {
-          text: 'Examples',
+          text: "Deployment",
           items: [
-            { text: 'Hello World', link: '/examples/hello-world' },
-            { text: 'CRUD API', link: '/examples/crud-api' },
-            { text: 'Real-time Chat', link: '/examples/realtime-chat' },
+            { text: "Deploy with Docker", link: "/deployment/docker" },
+            { text: "Built-in Workers", link: "/deployment/workers" },
+            {
+              text: "Production Checklist",
+              link: "/deployment/production-checklist",
+            },
           ],
         },
       ],
-      '/contributing/': [
+      "/examples/": [
         {
-          text: 'Contributing',
+          text: "Examples",
           items: [
-            { text: 'Contributing Guide', link: '/contributing/' },
+            { text: "Hello World", link: "/examples/hello-world" },
+            { text: "CRUD API", link: "/examples/crud-api" },
+            { text: "Real-time Chat", link: "/examples/realtime-chat" },
           ],
+        },
+      ],
+      "/contributing/": [
+        {
+          text: "Contributing",
+          items: [{ text: "Contributing Guide", link: "/contributing/" }],
         },
       ],
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/your-org/astraapi' },
+      { icon: "github", link: "https://github.com/Lumos-Labs-HQ/Astraapi" },
     ],
 
     footer: {
-      message: 'Released under the MIT License.',
-      copyright: 'Copyright © 2025 AstraAPI Contributors',
+      message:
+        '<a href="https://github.com/Lumos-Labs-HQ/Astraapi">GitHub</a> · <a href="https://github.com/Lumos-Labs-HQ/Astraapi/releases">Releases</a> · <a href="https://github.com/Lumos-Labs-HQ/Astraapi/blob/main/LICENSE">MIT License</a>',
+      copyright: "Made with ⚡ by Lumos Labs HQ · Inspired by FastAPI",
     },
   },
 
@@ -176,9 +238,9 @@ export default defineConfig({
 
   markdown: {
     theme: {
-      light: 'github-light',
-      dark: 'github-dark',
+      light: "github-light",
+      dark: "github-dark",
     },
     lineNumbers: true,
   },
-})
+});
