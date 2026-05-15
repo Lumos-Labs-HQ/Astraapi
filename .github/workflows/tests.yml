@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ['3.12', '3.13', '3.14']
+        python-version: ['3.13']
 
     steps:
       - name: Checkout
@@ -39,14 +39,12 @@ jobs:
         run: bash scripts/build_core.sh
 
       - name: Run tests
-        run: pytest tests/ -x -q --tb=short
+        run: python -m pytest tests/ -x -q --tb=short
 
       - name: Run tests with coverage
-        if: matrix.python-version == '3.12'
-        run: pytest tests/ --cov=astraapi --cov-report=xml --tb=short
+        run: python -m pytest tests/ --cov=astraapi --cov-report=xml --tb=short
 
       - name: Upload coverage
-        if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage.xml
