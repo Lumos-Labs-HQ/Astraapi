@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${ROOT_DIR}/cpp_core/build"
 PKG_DIR="${ROOT_DIR}/astraapi"
 
-cmake -S "${ROOT_DIR}/cpp_core" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release
+PYTHON_EXE="$(python -c 'import sys; print(sys.executable)')"
+cmake -S "${ROOT_DIR}/cpp_core" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Release \
+    -DPython3_EXECUTABLE="${PYTHON_EXE}"
 cmake --build "${BUILD_DIR}" -j"$(nproc)"
 
 export ASTRAAPI_ROOT_DIR="${ROOT_DIR}"
