@@ -83,7 +83,7 @@ When you call `app.run()`, AstraAPI automatically applies these optimizations:
 - **TCP_DEFER_ACCEPT** - Delivers connections only when data arrives
 - **TCP_NODELAY** - Disables Nagle's algorithm
 - **GC disable + freeze** - Moves startup objects to permanent generation
-- **Eager task factory** - Python 3.12+ async task optimization
+- **Eager task factory** - Python 3.14+ async task optimization
 - **C++ route warmup** - Warms instruction cache before first request
 - **Buffer pool prewarm** - Pre-allocates thread-local response buffers
 - **Protocol pool prewarm** - Pre-allocates 1024 protocol objects
@@ -142,7 +142,7 @@ app.run(port=8000, reload=True, reload_includes=["*.yaml", "*.json"])
 ## Docker
 
 ```dockerfile
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 COPY requirements.txt .

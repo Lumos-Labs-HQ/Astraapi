@@ -5,7 +5,7 @@ export default defineConfig({
   title: "AstraAPI",
   titleTemplate: ":title — AstraAPI",
   description:
-    "FastAPI-compatible Python web framework with C++ core. Built-in workers, zero-copy I/O. Python 3.12+.",
+    "FastAPI-compatible Python web framework with C++ core. Built-in workers, zero-copy I/O. Python 3.14+.",
   lang: "en-US",
 
   head: [
@@ -25,7 +25,7 @@ export default defineConfig({
       {
         property: "og:description",
         content:
-          "FastAPI-compatible Python web framework with C++ core. Built-in workers, zero-copy I/O. Python 3.12+.",
+          "FastAPI-compatible Python web framework with C++ core. Built-in workers, zero-copy I/O. Python 3.14+.",
       },
     ],
     [

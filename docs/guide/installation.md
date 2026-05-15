@@ -1,10 +1,10 @@
 # Installation
 
-AstraAPI supports Python 3.12+ and provides pre-built wheels for Linux, macOS, and Windows. The C++ core compiles automatically during installation if a wheel is not available.
+AstraAPI supports Python 3.14+ and provides pre-built wheels for Linux, macOS, and Windows. The C++ core compiles automatically during installation if a wheel is not available.
 
 ## Requirements
 
-- Python 3.12, 3.13, or 3.14
+- Python 3.14 or newer
 - A C++ compiler (GCC 11+, Clang 14+, or MSVC 2022+) if building from source
 - CMake 3.20+
 

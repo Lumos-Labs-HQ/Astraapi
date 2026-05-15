@@ -4,11 +4,11 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "astraapi"
-version = "0.2.0"
+version = "0.2.1"
 description = "AstraAPI framework, high performance, easy to learn, fast to code, ready for production"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 authors = [
     { name = "Rana718", email = "ranadolui718@gmail.com" },
 ]
@@ -31,8 +31,6 @@ classifiers = [
     "Framework :: Pydantic :: 2",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
     "Topic :: Internet :: WWW/HTTP",

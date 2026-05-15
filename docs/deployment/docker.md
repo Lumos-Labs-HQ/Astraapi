@@ -6,7 +6,7 @@ Deploy AstraAPI with Docker for consistent, reproducible production environments
 
 ```dockerfile
 # Build stage
-FROM python:3.12-slim as builder
+FROM python:3.14-slim as builder
 
 WORKDIR /app
 
@@ -18,7 +18,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # Production stage
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 
@@ -38,7 +38,7 @@ CMD ["python", "main.py"]
 
 ```dockerfile
 # Builder stage — compile C++ core
-FROM python:3.12-slim as builder
+FROM python:3.14-slim as builder
 
 WORKDIR /app
 
@@ -55,7 +55,7 @@ RUN pip install --no-cache-dir uv && \
     uv sync --no-dev
 
 # Runtime stage
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 

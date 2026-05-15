@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://pypi.org/project/astraapi"><img src="https://img.shields.io/badge/pypi-v0.2.0-blue?logo=pypi" alt="PyPI"></a>
   <a href="https://github.com/Lumos-Labs-HQ/Astraapi/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
-  <img src="https://img.shields.io/badge/python-3.12%2B-blue" alt="Python">
+  <img src="https://img.shields.io/badge/python-3.14%2B-blue" alt="Python">
   <img src="https://img.shields.io/badge/C++-20-orange" alt="C++20">
 </p>
 
@@ -55,7 +55,7 @@ Press Ctrl+C to stop
 pip install astraapi
 ```
 
-Python 3.12+
+Python 3.14+
 
 ## Quick Start
 
