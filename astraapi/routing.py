@@ -1419,13 +1419,33 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
                 value = value.encode('latin-1')
             header_list.append((name, value))
 
-    # Get body bytes from ContextVar for request.body() support
-    _body_bytes = b''
-    try:
+    # Create a receive channel for request.body() support.
+    # When the C++ core dispatches before the full body has arrived,
+    # yielding with asyncio.sleep(0) gives the event loop a chance to
+    # process the remaining data_received chunk(s) before we read
+    # _current_body.
+    _has_body = False
+    for _hn, _hv in (header_list or []):
+        _hn_s = _hn.lower() if isinstance(_hn, str) else _hn.lower().decode('latin-1')
+        if _hn_s == 'content-length':
+            try:
+                _has_body = int(_hv if isinstance(_hv, str) else _hv.decode('latin-1')) > 0
+            except ValueError:
+                pass
+            break
+
+    _receive_call_count = 0
+
+    async def _receive():
+        nonlocal _receive_call_count
+        _receive_call_count += 1
         from astraapi._cpp_server import _current_body as _cb
-        _body_bytes = _cb.get() or b''
-    except Exception:
-        pass
+        body = _cb.get() or b''
+        if not body and _has_body and _receive_call_count <= 2:
+            import asyncio
+            await asyncio.sleep(0)
+            body = _cb.get() or b''
+        return {"type": "http.request", "body": body, "more_body": False}
 
     _root_path = ''
     try:
@@ -1469,7 +1489,6 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
         "query_string": _qs,
         "headers": header_list,
         "root_path": _root_path,
-        "_body": _body_bytes,
         "scheme": _scheme_hdr,
         "server": _server_tuple,
         "client": ("testclient", 50000) if any(
@@ -1502,9 +1521,7 @@ def _make_lightweight_request(raw_headers, method, path, app=None, route_id=None
             pass
     if _route is not None:
         scope["route"] = _route
-    _req = Request(scope)
-    if _body_bytes:
-        _req._body = _body_bytes
+    _req = Request(scope, receive=_receive)
     return _req
 
 

@@ -1539,7 +1539,14 @@ class CppHttpProtocol(asyncio.Protocol):
                 _mv = memoryview(data)
                 # Find end of request line
                 _nl = data.find(b'\r\n', 0, min(_dlen, 4096))
+                _is_new_request = False
                 if _nl > 0:
+                    _sp0 = data.find(b' ', 0, _nl)
+                    if _sp0 > 0:
+                        _method = bytes(_mv[:_sp0])
+                        if _method in (b'GET', b'POST', b'PUT', b'DELETE', b'PATCH', b'HEAD', b'OPTIONS', b'TRACE', b'CONNECT'):
+                            _is_new_request = True
+                if _is_new_request:
                     # Extract method, path, query — all from the first line only
                     _sp0 = data.find(b' ', 0, _nl)
                     if _sp0 > 0:
@@ -1578,9 +1585,11 @@ class CppHttpProtocol(asyncio.Protocol):
                         _current_raw_headers.set([])
                         _current_body.set(b'')
                 else:
-                    _current_query_string.set(b'')
-                    _current_raw_headers.set([])
-                    _current_body.set(b'')
+                    # Not a new HTTP request line — append to accumulated body.
+                    # This handles the case where the request body is split across
+                    # multiple data_received chunks (C++ fast path may dispatch
+                    # before the full body has arrived).
+                    _current_body.set((_current_body.get(None) or b'') + data)
             except Exception:
                 pass
 
