@@ -138,6 +138,20 @@ class ModelField:
             return None, _regenerate_error_with_loc(
                 errors=exc.errors(include_url=False), loc_prefix=loc
             )
+        except (TypeError, AttributeError) as exc:
+            # Pydantic v2 validate_python with from_attributes=True can raise
+            # TypeError/AttributeError when re-validating model instances that
+            # contain nested dicts (e.g. model_construct bypass) or when
+            # computed fields access missing attributes.
+            return None, _regenerate_error_with_loc(
+                errors=[{
+                    "type": "response_validation_error",
+                    "loc": loc,
+                    "msg": str(exc),
+                    "input": value,
+                }],
+                loc_prefix=loc,
+            )
 
     def serialize(
         self,

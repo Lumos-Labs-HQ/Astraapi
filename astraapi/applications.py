@@ -1241,15 +1241,33 @@ class AstraAPI(AppBase):
                 except Exception:
                     pass
                 raise exc
-            return response_field.serialize(
-                value,
-                include=response_model_include,
-                exclude=response_model_exclude,
-                by_alias=response_model_by_alias,
-                exclude_unset=response_model_exclude_unset,
-                exclude_defaults=response_model_exclude_defaults,
-                exclude_none=response_model_exclude_none,
-            )
+            try:
+                return response_field.serialize(
+                    value,
+                    include=response_model_include,
+                    exclude=response_model_exclude,
+                    by_alias=response_model_by_alias,
+                    exclude_unset=response_model_exclude_unset,
+                    exclude_defaults=response_model_exclude_defaults,
+                    exclude_none=response_model_exclude_none,
+                )
+            except (TypeError, AttributeError) as _ser_exc:
+                from astraapi.exceptions import ResponseValidationError
+                _rve = ResponseValidationError(
+                    errors=[{
+                        "type": "response_serialization_error",
+                        "loc": ("response",),
+                        "msg": str(_ser_exc),
+                        "input": raw,
+                    }],
+                    body=raw,
+                )
+                try:
+                    from astraapi._cpp_server import _set_last_server_exception
+                    _set_last_server_exception(_rve)
+                except Exception:
+                    pass
+                raise _rve
 
         _response_model_shim.__name__ = getattr(original_endpoint, "__name__", "_response_model_shim")
         return _response_model_shim
@@ -1836,15 +1854,39 @@ class AstraAPI(AppBase):
                         except Exception:
                             pass
                         raise _rve
-                    result = _response_field.serialize(
-                        _val,
-                        include=_rm_include,
-                        exclude=_rm_exclude,
-                        by_alias=_rm_by_alias,
-                        exclude_unset=_rm_exclude_unset,
-                        exclude_defaults=_rm_exclude_defaults,
-                        exclude_none=_rm_exclude_none,
-                    )
+                    try:
+                        result = _response_field.serialize(
+                            _val,
+                            include=_rm_include,
+                            exclude=_rm_exclude,
+                            by_alias=_rm_by_alias,
+                            exclude_unset=_rm_exclude_unset,
+                            exclude_defaults=_rm_exclude_defaults,
+                            exclude_none=_rm_exclude_none,
+                        )
+                    except (TypeError, AttributeError) as _ser_exc:
+                        from astraapi.exceptions import ResponseValidationError as _RVE
+                        from astraapi.routing import _extract_endpoint_context
+                        _rve_ctx = _extract_endpoint_context(original_endpoint)
+                        _dep = getattr(route, 'dependant', None)
+                        if _dep and getattr(_dep, 'path', None):
+                            _rve_ctx['path'] = f"GET {_dep.path}"
+                        _rve = _RVE(
+                            errors=[{
+                                "type": "response_serialization_error",
+                                "loc": ("response",),
+                                "msg": str(_ser_exc),
+                                "input": result,
+                            }],
+                            body=result,
+                            endpoint_ctx=_rve_ctx,
+                        )
+                        try:
+                            from astraapi._cpp_server import _set_last_server_exception as _slse
+                            _slse(_rve)
+                        except Exception:
+                            pass
+                        raise _rve
                 # Not a Response — wrap using the route's response_class
                 if _is_redirect:
                     # Pass only the URL; let RedirectResponse use its own default status_code
