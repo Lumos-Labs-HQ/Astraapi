@@ -370,6 +370,46 @@ def _set_http_middleware_dispatchers(dispatchers: list) -> None:
 # Maps raw WS endpoint function id -> (route.app, route) for DI-wrapped dispatch.
 _ws_app_map: dict = {}  # id(endpoint) -> (app_callable, route)
 _full_app: Any = None  # full ASGI app (with middleware) for WS dispatch
+_orig_app: Any = None  # original app (before middleware wrapping) for config lookup
+
+
+def _get_cors_headers_for_origin(origin: str, app: Any) -> list:
+    """Build CORS response headers for the given Origin based on CORSMiddleware config.
+    Returns list of (bytes, bytes) header tuples (empty if CORS not configured or origin denied)."""
+    if not origin:
+        return []
+    origin = origin.strip()
+    # Find CORSMiddleware in user_middleware
+    for mw in getattr(app, "user_middleware", []):
+        cls = getattr(mw, "cls", None) or (mw[0] if isinstance(mw, (list, tuple)) else None)
+        if cls and getattr(cls, "__name__", "") == "CORSMiddleware":
+            kw = getattr(mw, "kwargs", {}) or (mw[2] if isinstance(mw, (list, tuple)) and len(mw) > 2 else {})
+            allow_origins = kw.get("allow_origins", [])
+            allow_credentials = kw.get("allow_credentials", False)
+            expose_headers = kw.get("expose_headers", [])
+            allow_all = "*" in allow_origins
+            if not allow_all:
+                origin_lower = origin.lower()
+                if origin_lower not in [o.lower() for o in allow_origins]:
+                    # Check regex if provided
+                    regex = kw.get("allow_origin_regex")
+                    if not regex or not __import__("re").compile(regex).fullmatch(origin):
+                        return []
+            headers = []
+            if allow_all:
+                headers.append((b"access-control-allow-origin", b"*"))
+            else:
+                headers.append((b"access-control-allow-origin", origin.encode("latin-1")))
+                headers.append((b"vary", b"Origin"))
+            if allow_credentials:
+                headers.append((b"access-control-allow-credentials", b"true"))
+            if expose_headers:
+                headers.append(
+                    (b"access-control-expose-headers", ", ".join(expose_headers).encode("latin-1"))
+                )
+            return headers
+    return []
+
 
 # ContextVar: current route for scope["route"] injection in C++ fast path
 from contextvars import ContextVar as _ContextVar2
@@ -378,10 +418,11 @@ _current_route: _ContextVar2 = _ContextVar2("_current_route", default=None)
 
 def _build_ws_app_map(app: Any) -> None:
     """Build endpoint->(app, route) map for all WebSocket routes."""
-    global _ws_app_map, _full_app
+    global _ws_app_map, _full_app, _orig_app
     # Don't clear — accumulate across apps (each server adds its routes)
     # _ws_app_map persists so routes from previous servers remain accessible
     _full_app = app
+    _orig_app = app
     user_mw = getattr(app, "user_middleware", [])
     if user_mw:
         # Build middleware stack: innermost = router, outermost = first middleware
@@ -1987,6 +2028,17 @@ class CppHttpProtocol(asyncio.Protocol):
         transport = self._transport
         if not transport or transport.is_closing():
             return
+        # --- CORS header injection ---
+        _origin = ""
+        _rh = _current_raw_headers.get()
+        if _rh:
+            for _hk, _hv in _rh:
+                _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
+                if _key.lower() == 'origin':
+                    _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
+                    break
+        _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
+        # -----------------------------
         from astraapi.exceptions import HTTPException, RequestValidationError
         from astraapi._concurrency import is_async_callable, run_in_threadpool
         # Walk MRO to find a registered app-level exception handler
@@ -2019,6 +2071,8 @@ class CppHttpProtocol(asyncio.Protocol):
                     resp_bytes = self._core.build_response_from_any(
                         resp, getattr(resp, 'status_code', 500), keep_alive)
                     if resp_bytes is not None:
+                        if _cors_hdrs:
+                            resp_bytes = _inject_headers_into_response(resp_bytes, _cors_hdrs)
                         transport.write(resp_bytes)
             except Exception:
                 pass
@@ -2036,12 +2090,16 @@ class CppHttpProtocol(asyncio.Protocol):
                         k.encode("latin-1") if isinstance(k, str) else k,
                         v.encode("latin-1") if isinstance(v, str) else v,
                     ))
+                if _cors_hdrs:
+                    hdrs.extend(_cors_hdrs)
                 transport.write(
                     _build_response_from_parts(exc.status_code, hdrs, body, keep_alive)
                 )
             else:
                 resp = self._core.build_response(detail, exc.status_code, keep_alive)
                 if resp:
+                    if _cors_hdrs:
+                        resp = _inject_headers_into_response(resp, _cors_hdrs)
                     transport.write(resp)
             return
         if isinstance(exc, RequestValidationError):
@@ -2085,8 +2143,11 @@ class CppHttpProtocol(asyncio.Protocol):
                 from astraapi._core_bridge import serialize_error_response
                 errors = [{k: v for k, v in e.items() if k != "url"} for e in exc.errors()]
                 body = serialize_error_response(errors)
+                _err_hdrs = list(_CT_JSON_HDR_LIST)
+                if _cors_hdrs:
+                    _err_hdrs.extend(_cors_hdrs)
                 transport.write(
-                    _build_response_from_parts(422, _CT_JSON_HDR_LIST, body, keep_alive)
+                    _build_response_from_parts(422, _err_hdrs, body, keep_alive)
                 )
                 return
             except Exception:
@@ -2098,8 +2159,11 @@ class CppHttpProtocol(asyncio.Protocol):
                 from astraapi._core_bridge import serialize_error_response as _ser
                 _errs = [{k: v for k, v in e.items() if k != "url"} for e in exc.errors(include_url=False)]
                 _body = _ser(_errs)
+                _ve_hdrs = [(b"content-type", b"application/json")]
+                if _cors_hdrs:
+                    _ve_hdrs.extend(_cors_hdrs)
                 transport.write(
-                    _build_response_from_parts(422, [(b"content-type", b"application/json")], _body, keep_alive)
+                    _build_response_from_parts(422, _ve_hdrs, _body, keep_alive)
                 )
                 return
         except Exception:
@@ -2110,7 +2174,11 @@ class CppHttpProtocol(asyncio.Protocol):
         if isinstance(exc, _RVE2) or _raise_server_exceptions:
             global _last_server_exception
             _last_server_exception = exc
-        transport.write(_500_RESP)
+        if _cors_hdrs:
+            _500_with_cors = _inject_headers_into_response(_500_RESP, _cors_hdrs)
+            transport.write(_500_with_cors)
+        else:
+            transport.write(_500_RESP)
 
     # ── Async endpoint dispatch ──────────────────────────────────────────
 
@@ -2126,11 +2194,31 @@ class CppHttpProtocol(asyncio.Protocol):
             raw = await _drive_coro(coro, first_yield)
             transport = self._transport
             if transport and not transport.is_closing():
+                # --- CORS header injection ---
+                _origin = ""
+                _rh = _current_raw_headers.get()
+                if _rh:
+                    for _hk, _hv in _rh:
+                        _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
+                        if _key.lower() == 'origin':
+                            _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
+                            break
+                _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
+                # -----------------------------
                 # OPT-D: plain dict/list fast path — skips full type dispatch
                 _raw_type = type(raw)
                 if _raw_type is dict or _raw_type is list:
-                    # OPT-write_async_result: zero-alloc direct fd write (no PyBytes)
-                    self._core.write_async_result(raw, transport, status_code, keep_alive, self._sock_fd)
+                    if _cors_hdrs and _encode_to_json_bytes is not None:
+                        _body = _encode_to_json_bytes(raw)
+                        _merged = [("content-type", "application/json")] + [
+                            (k.decode("latin-1") if isinstance(k, bytes) else k,
+                             v.decode("latin-1") if isinstance(v, bytes) else v)
+                            for k, v in _cors_hdrs
+                        ]
+                        transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
+                    else:
+                        # OPT-write_async_result: zero-alloc direct fd write (no PyBytes)
+                        self._core.write_async_result(raw, transport, status_code, keep_alive, self._sock_fd)
                     # dicts/lists never have BackgroundTasks — skip getattr
                 else:
                     # OPT-3.4: Unified C++ type dispatch (str/int/bool/None/Pydantic/Response)
@@ -2139,7 +2227,7 @@ class CppHttpProtocol(asyncio.Protocol):
                     if _http_middleware_dispatchers:
                         raw = await _run_http_middleware(
                             raw, _http_middleware_dispatchers,
-                            [], status_code, keep_alive,
+                            _cors_hdrs, status_code, keep_alive,
                             transport, self._core, self._sock_fd,
                             None, 'GET', '/'
                         )
@@ -2153,6 +2241,8 @@ class CppHttpProtocol(asyncio.Protocol):
                             await _shim_bg()
                         resp = self._core.build_response_from_any(raw, status_code, keep_alive)
                         if resp is not None:
+                            if _cors_hdrs:
+                                resp = _inject_headers_into_response(resp, _cors_hdrs)
                             transport.write(resp)
                         else:
                             await _write_chunked_streaming(transport, raw)
@@ -2173,6 +2263,17 @@ class CppHttpProtocol(asyncio.Protocol):
         try:
             transport = self._transport
             if transport and not transport.is_closing():
+                # --- CORS header injection ---
+                _origin = ""
+                _rh = _current_raw_headers.get()
+                if _rh:
+                    for _hk, _hv in _rh:
+                        _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
+                        if _key.lower() == 'origin':
+                            _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
+                            break
+                _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
+                # -----------------------------
                 raw_path = getattr(raw, 'path', None)
                 if raw_path is not None and not hasattr(raw, 'body_iterator'):
                     # FileResponse — read file bytes synchronously
@@ -2196,13 +2297,22 @@ class CppHttpProtocol(asyncio.Protocol):
                         if isinstance(hvalue, str):
                             hvalue = hvalue.encode("latin-1")
                         hdr_parts.append(b"\r\n" + hname + b": " + hvalue)
+                    # Inject CORS headers
+                    for _ck, _cv in _cors_hdrs:
+                        if isinstance(_ck, str): _ck = _ck.encode('latin-1')
+                        if isinstance(_cv, str): _cv = _cv.encode('latin-1')
+                        hdr_parts.append(b"\r\n" + _ck + b": " + _cv)
                     if not has_cl:
                         hdr_parts.append(b"\r\ncontent-length: " + str(len(file_bytes)).encode())
                     conn = b"\r\nconnection: keep-alive\r\n\r\n" if keep_alive else b"\r\nconnection: close\r\n\r\n"
                     hdr_parts.append(conn)
                     transport.write(b"".join(hdr_parts) + file_bytes)
                 else:
-                    # StreamingResponse — chunked transfer encoding
+                    # StreamingResponse — inject CORS headers into response headers
+                    if _cors_hdrs and hasattr(raw, 'headers'):
+                        for _ck, _cv in _cors_hdrs:
+                            raw.headers[_ck.decode('latin-1') if isinstance(_ck, bytes) else _ck] = \
+                                _cv.decode('latin-1') if isinstance(_cv, bytes) else _cv
                     await _write_chunked_streaming(transport, raw)
             background = getattr(raw, 'background', None)
             if background is not None:
@@ -2328,14 +2438,28 @@ class CppHttpProtocol(asyncio.Protocol):
                         status_code = _di_sc2
                 transport = self._transport
                 if transport and not transport.is_closing():
+                    # --- CORS header injection ---
+                    _origin = ""
+                    _rh = _kwargs.get('__raw_headers__') or _current_raw_headers.get()
+                    if _rh:
+                        for _hk, _hv in (_rh if isinstance(_rh, list) else []):
+                            _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
+                            if _key.lower() == 'origin':
+                                _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
+                                break
+                    _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
+                    # -----------------------------
                     _mw_already_ran = getattr(_raw, '__middleware_ran__', False)
                     if _http_middleware_dispatchers and not _mw_already_ran:
                         _mw_hdrs = _kwargs.get('__raw_headers__') or _current_raw_headers.get()
                         _mw_method = _kwargs.get('__method__', '') or _current_method.get() or 'GET'
                         _mw_path = _kwargs.get('__path__', '') or _current_path.get() or '/'
+                        _mw_extra = list(_di_extra_headers)
+                        if _cors_hdrs:
+                            _mw_extra.extend(_cors_hdrs)
                         _raw = await _run_http_middleware(
                             _raw, _http_middleware_dispatchers,
-                            _di_extra_headers, status_code, keep_alive,
+                            _mw_extra, status_code, keep_alive,
                             transport, self._core, self._sock_fd,
                             _mw_hdrs, _mw_method, _mw_path
                         )
@@ -2349,14 +2473,32 @@ class CppHttpProtocol(asyncio.Protocol):
                                      v.decode("latin-1") if isinstance(v, bytes) else v)
                                     for k, v in _di_extra_headers
                                 ]
+                                if _cors_hdrs:
+                                    _merged.extend([
+                                        (k.decode("latin-1") if isinstance(k, bytes) else k,
+                                         v.decode("latin-1") if isinstance(v, bytes) else v)
+                                        for k, v in _cors_hdrs
+                                    ])
                                 transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
                             else:
-                                self._core.write_async_result(_raw, transport, status_code, keep_alive, self._sock_fd)
+                                if _cors_hdrs and _encode_to_json_bytes is not None:
+                                    _body = _encode_to_json_bytes(_raw)
+                                    _merged = [("content-type", "application/json")] + [
+                                        (k.decode("latin-1") if isinstance(k, bytes) else k,
+                                         v.decode("latin-1") if isinstance(v, bytes) else v)
+                                        for k, v in _cors_hdrs
+                                    ]
+                                    transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
+                                else:
+                                    self._core.write_async_result(_raw, transport, status_code, keep_alive, self._sock_fd)
                         else:
                             resp = self._core.build_response_from_any(_raw, status_code, keep_alive)
                             if resp is not None:
-                                if _di_extra_headers:
-                                    resp = _inject_headers_into_response(resp, _di_extra_headers)
+                                _all_extra = list(_di_extra_headers)
+                                if _cors_hdrs:
+                                    _all_extra.extend(_cors_hdrs)
+                                if _all_extra:
+                                    resp = _inject_headers_into_response(resp, _all_extra)
                                 transport.write(resp)
                             else:
                                 await _write_chunked_streaming(transport, _raw)
@@ -2401,6 +2543,17 @@ class CppHttpProtocol(asyncio.Protocol):
                                         raw_headers: Any = None, method: str = 'GET', path: str = '/') -> None:
         """Apply HTTP middleware to a sync fast-path result."""
         try:
+            # --- CORS header injection ---
+            _origin = ""
+            _rh = raw_headers or _current_raw_headers.get() or []
+            if _rh:
+                for _hk, _hv in (_rh if isinstance(_rh, list) else []):
+                    _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
+                    if _key.lower() == 'origin':
+                        _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
+                        break
+            _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
+            # -----------------------------
             # Fix #9: use module-level hoisted imports instead of per-call import
             if isinstance(raw, str) and not (hasattr(raw, 'body') or hasattr(raw, 'media_type')):
                 _p = path or '/'
@@ -2411,7 +2564,7 @@ class CppHttpProtocol(asyncio.Protocol):
             if _http_middleware_dispatchers:
                 await _run_http_middleware(
                     raw, _http_middleware_dispatchers,
-                    raw_headers or [], status_code, keep_alive,
+                    _cors_hdrs, status_code, keep_alive,
                     self._transport, self._core, self._sock_fd,
                     None, method or 'GET', path or '/'
                 )
@@ -2421,10 +2574,16 @@ class CppHttpProtocol(asyncio.Protocol):
                     _raw_type = type(raw)
                     if _raw_type is dict or _raw_type is list:
                         _resp = self._core.build_response(raw, status_code, keep_alive)
-                        if _resp: transport.write(_resp)
+                        if _resp:
+                            if _cors_hdrs:
+                                _resp = _inject_headers_into_response(_resp, _cors_hdrs)
+                            transport.write(_resp)
                     else:
                         resp = self._core.build_response_from_any(raw, status_code, keep_alive)
-                        if resp: transport.write(resp)
+                        if resp:
+                            if _cors_hdrs:
+                                resp = _inject_headers_into_response(resp, _cors_hdrs)
+                            transport.write(resp)
         except Exception as exc:
             await self._dispatch_exception(exc, keep_alive)
         finally:
@@ -2435,6 +2594,17 @@ class CppHttpProtocol(asyncio.Protocol):
     async def _handle_pydantic(self, ir: Any) -> None:
         """Handle routes needing Pydantic validation (POST with body models)."""
         try:
+            # --- CORS header injection ---
+            _origin = ""
+            _rh = _current_raw_headers.get()
+            if _rh:
+                for _hk, _hv in _rh:
+                    _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
+                    if _key.lower() == 'origin':
+                        _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
+                        break
+            _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
+            # -----------------------------
             if ir.has_body_params and ir.json_body is not None:
                 body_values, body_errors = await _request_body_to_args(
                     body_fields=ir.body_params,
@@ -2446,6 +2616,8 @@ class CppHttpProtocol(asyncio.Protocol):
                         resp = self._core.build_response(
                             {"detail": body_errors}, 422, True)
                         if resp:
+                            if _cors_hdrs:
+                                resp = _inject_headers_into_response(resp, _cors_hdrs)
                             self._transport.write(resp)
                     return
                 ir.kwargs.update(body_values)
@@ -2458,11 +2630,15 @@ class CppHttpProtocol(asyncio.Protocol):
                 if _raw_type is dict or _raw_type is list:
                     _resp = self._core.build_response(raw, status_code, True)
                     if _resp:
+                        if _cors_hdrs:
+                            _resp = _inject_headers_into_response(_resp, _cors_hdrs)
                         transport.write(_resp)
                     # dicts/lists never carry BackgroundTasks
                 else:
                     resp = self._core.build_response_from_any(raw, status_code, True)
                     if resp is not None:
+                        if _cors_hdrs:
+                            resp = _inject_headers_into_response(resp, _cors_hdrs)
                         transport.write(resp)
                     else:
                         await _write_chunked_streaming(transport, raw)
@@ -3117,6 +3293,10 @@ async def run_server(
         pass
 
     core_app = app._core_app
+
+    # Keep original app reference for CORS config lookup in async paths
+    global _orig_app
+    _orig_app = app
 
     # Sync routes if not yet done
     if hasattr(app, "_sync_routes_to_core"):

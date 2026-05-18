@@ -328,6 +328,75 @@ class CORSMiddleware:
             return True
         return False
 
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        """ASGI entry point for CORS middleware."""
+        if scope['type'] != 'http':
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get('method', 'GET')
+        headers = dict(scope.get('headers', []))
+        origin = None
+        for hname, hvalue in headers.items():
+            if (hname.decode('latin-1') if isinstance(hname, bytes) else hname).lower() == 'origin':
+                origin = (hvalue.decode('latin-1') if isinstance(hvalue, bytes) else hvalue)
+                break
+
+        async def _send_wrapper(message: Any) -> None:
+            if message['type'] == 'http.response.start':
+                response_headers = list(message.get('headers', []))
+                if origin and self._is_origin_allowed(origin):
+                    if self.allow_all_origins:
+                        response_headers.append((b"access-control-allow-origin", b"*"))
+                    else:
+                        response_headers.append((b"access-control-allow-origin", origin.encode("latin-1")))
+                        response_headers.append((b"vary", b"Origin"))
+                    if self.allow_credentials:
+                        response_headers.append((b"access-control-allow-credentials", b"true"))
+                    if self.expose_headers:
+                        response_headers.append(
+                            (b"access-control-expose-headers", ", ".join(self.expose_headers).encode("latin-1"))
+                        )
+                message['headers'] = response_headers
+            await send(message)
+
+        if method == 'OPTIONS' and origin and self._is_origin_allowed(origin):
+            # Preflight request
+            requested_method = headers.get(b'access-control-request-method', b'').decode('latin-1')
+            requested_headers = headers.get(b'access-control-request-headers', b'').decode('latin-1')
+            preflight_headers = list(self.preflight_headers)
+            if not self.allow_all_origins:
+                preflight_headers.append((b"access-control-allow-origin", origin.encode("latin-1")))
+                preflight_headers.append((b"vary", b"Origin"))
+            if self.allow_all_headers and requested_headers:
+                preflight_headers.append(
+                    (b"access-control-allow-headers", requested_headers.encode("latin-1"))
+                )
+            elif requested_headers and self.allow_headers:
+                # Validate requested headers against allowed headers
+                allowed = set(h.lower() for h in self.allow_headers)
+                requested = set(h.strip().lower() for h in requested_headers.split(','))
+                if not requested.issubset(allowed) and not self.allow_all_headers:
+                    await send({'type': 'http.response.start', 'status': 400, 'headers': []})
+                    await send({'type': 'http.response.body', 'body': b'Disallowed CORS headers'})
+                    return
+                preflight_headers.append(
+                    (b"access-control-allow-headers", requested_headers.encode("latin-1"))
+                )
+            elif self.allow_headers:
+                preflight_headers.append(
+                    (b"access-control-allow-headers", ", ".join(self.allow_headers).encode("latin-1"))
+                )
+            # Add allowed methods
+            if requested_method:
+                preflight_headers.append(
+                    (b"access-control-allow-methods", requested_method.encode("latin-1"))
+                )
+            await send({'type': 'http.response.start', 'status': 200, 'headers': preflight_headers})
+            await send({'type': 'http.response.body', 'body': b'OK'})
+        else:
+            await self.app(scope, receive, _send_wrapper)
+
     def _preflight_response(
         self, origin: str, headers: Dict[str, str]
     ) -> Response:

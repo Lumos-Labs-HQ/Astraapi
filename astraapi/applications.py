@@ -1675,6 +1675,18 @@ class AstraAPI(AppBase):
                     kwargs.update(_bvals)
                 except (ValueError, TypeError):
                     pass
+            # Fallback: validate body params that are still raw dicts
+            # (C++ may pass raw dicts instead of validated Pydantic models for some routes)
+            if _dep_for_body and _dep_for_body.body_params:
+                from pydantic import BaseModel as _BM2
+                from astraapi._compat import lenient_issubclass as _lis2
+                for _bp in _dep_for_body.body_params:
+                    _bp_name = _bp.name
+                    if _bp_name in kwargs and isinstance(kwargs[_bp_name], dict) and _lis2(_bp.type_, _BM2):
+                        try:
+                            kwargs[_bp_name] = _bp._type_adapter.validate_python(kwargs[_bp_name])
+                        except Exception:
+                            pass
             _exit_stack = kwargs.pop('__exit_stack__', None)
             kwargs.pop('__deps_ran__', None)
             _gen_deps_ran = kwargs.pop('__gen_deps_ran__', False)
@@ -6590,9 +6602,9 @@ class AstraAPI(AppBase):
 
         self._sync_routes_to_core()
 
+        _max_bytes = max_body_size or int(max_body_size_kb * 1024) or int(max_body_size_mb * 1024 * 1024)
         try:
             import uvloop
-            _max_bytes = max_body_size or int(max_body_size_kb * 1024) or int(max_body_size_mb * 1024 * 1024)
             uvloop.run(run_server(self, host, port, keep_alive_timeout=keep_alive_timeout, max_body_size=_max_bytes))
         except ImportError:
             try:

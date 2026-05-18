@@ -1326,18 +1326,25 @@ def _flatten_deps(
         required_body_params: list[str] = []   # required body params (no default, ordered)
         required_header_params: set[str] = set()  # required header params
         required_cookie_params: set[str] = set()  # required cookie params
+        param_defaults: dict[str, Any] = {}  # default values for optional params
         for f in sub_dep.query_params:
             param_names.add(f.name)
             if f.required:
                 required_query_params.add(f.name)
+            else:
+                param_defaults[f.name] = f.get_default()
         for f in sub_dep.header_params:
             param_names.add(f.name)
             if f.required:
                 required_header_params.add(f.alias or f.name)
+            else:
+                param_defaults[f.name] = f.get_default()
         for f in sub_dep.cookie_params:
             param_names.add(f.name)
             if f.required:
                 required_cookie_params.add(f.alias or f.name)
+            else:
+                param_defaults[f.name] = f.get_default()
         for f in sub_dep.path_params:
             param_names.add(f.name)
         has_form_body = False
@@ -1345,6 +1352,8 @@ def _flatten_deps(
             param_names.add(f.name)
             if f.required:
                 if f.name not in required_body_params: required_body_params.append(f.name)
+            else:
+                param_defaults[f.name] = f.get_default()
             if isinstance(f.field_info, params.Form):
                 has_form_body = True
 
@@ -1382,6 +1391,7 @@ def _flatten_deps(
             'has_form_body': has_form_body,
             'required_header_params': required_header_params,
             'required_cookie_params': required_cookie_params,
+            'param_defaults': param_defaults,
             'security_scopes_param': sub_dep.security_scopes_param_name,
             'oauth_scopes': list(sub_dep.parent_oauth_scopes or []) + list(sub_dep.own_oauth_scopes or []),
             'is_security': is_security,
@@ -1644,6 +1654,16 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                 for pname in node['param_names']:
                     if pname not in dep_kwargs and pname in _parsed_form:
                         dep_kwargs[pname] = _parsed_form[pname]
+            # Inject default values for missing optional params
+            # (C++ treats Py_None as "no default" and omits the key, so we
+            #  must supply the default here to prevent the Python function's
+            #  FieldInfo default from leaking into the call)
+            _param_defaults = node.get('param_defaults')
+            if _param_defaults is None:
+                _param_defaults = _get_param_defaults_from_sig(node)
+            for pname, default_val in _param_defaults.items():
+                if pname not in dep_kwargs:
+                    dep_kwargs[pname] = default_val
 
             # Validate required query params -- produce proper Pydantic-style errors
             _prev_err_count = len(errors)
@@ -1779,6 +1799,27 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
     return (resolved, errors, sub_response)
 
 
+def _get_param_defaults_from_sig(node: dict) -> dict[str, Any]:
+    """Extract default values for optional params from a dependency callable's signature.
+
+    Fallback for dep_nodes created before param_defaults was added to _flatten_deps.
+    Unwraps Header/Query/Cookie/Path/Body descriptors to their actual default values.
+    """
+    import inspect
+    sig = inspect.signature(node['call'])
+    defaults: dict[str, Any] = {}
+    for pname in node['param_names']:
+        param = sig.parameters.get(pname)
+        if param is not None and param.default is not inspect.Parameter.empty:
+            default_val = param.default
+            # Unwrap Param descriptors (Header(None), Query(...), etc.)
+            _type_name = type(default_val).__name__
+            if _type_name in ('Header', 'Query', 'Cookie', 'Path', 'Body'):
+                default_val = getattr(default_val, 'default', None)
+            defaults[pname] = default_val
+    return defaults
+
+
 async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _app=None):
     """Resolve dependencies in topological order (async version).
 
@@ -1892,6 +1933,16 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
                 for pname in node['param_names']:
                     if pname not in dep_kwargs and pname in _parsed_form:
                         dep_kwargs[pname] = _parsed_form[pname]
+            # Inject default values for missing optional params
+            # (C++ treats Py_None as "no default" and omits the key, so we
+            #  must supply the default here to prevent the Python function's
+            #  FieldInfo default from leaking into the call)
+            _param_defaults = node.get('param_defaults')
+            if _param_defaults is None:
+                _param_defaults = _get_param_defaults_from_sig(node)
+            for pname, default_val in _param_defaults.items():
+                if pname not in dep_kwargs:
+                    dep_kwargs[pname] = default_val
 
             # Validate required query params -- produce proper Pydantic-style errors
             _prev_err_count = len(errors)
@@ -2105,6 +2156,13 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
             for pname in node['param_names']:
                 if pname in kwargs_dict:
                     dep_kwargs[pname] = kwargs_dict[pname]
+            # Inject default values for missing optional params
+            _param_defaults = node.get('param_defaults')
+            if _param_defaults is None:
+                _param_defaults = _get_param_defaults_from_sig(node)
+            for pname, default_val in _param_defaults.items():
+                if pname not in dep_kwargs:
+                    dep_kwargs[pname] = default_val
 
             _req_qp = node.get('required_query_params')
             if _req_qp:
