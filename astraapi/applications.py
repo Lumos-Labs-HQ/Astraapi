@@ -2253,6 +2253,14 @@ class AstraAPI(AppBase):
         if _has_asgi_middleware:
             _srv_mod._needs_request_context = True
 
+        # CORS middleware needs raw headers on async/stream paths (Python injects headers)
+        _has_cors_middleware = any(
+            getattr(getattr(_mw, 'cls', None), '__name__', '') == 'CORSMiddleware'
+            for _mw in getattr(self, 'user_middleware', [])
+        )
+        if _has_cors_middleware:
+            _srv_mod._needs_request_context = True
+
         # Group routes by path to handle same-path multi-method routes
         from collections import defaultdict as _dd
         _path_routes: dict = _dd(list)

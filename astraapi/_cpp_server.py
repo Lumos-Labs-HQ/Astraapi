@@ -3337,8 +3337,12 @@ async def run_server(
             ('BaseHTTPMiddleware', 'HTTPSRedirectMiddleware', 'TrustedHostMiddleware', 'CORSMiddleware')
             for _mw in getattr(app, 'user_middleware', [])
         )
+        _cors_mw = any(
+            getattr(getattr(_mw, 'cls', None), '__name__', '') == 'CORSMiddleware'
+            for _mw in getattr(app, 'user_middleware', [])
+        )
         _needs_request_context = bool(
-            _http_middleware_dispatchers or _asgi_mw or
+            _http_middleware_dispatchers or _asgi_mw or _cors_mw or
             any(_route_needs_ctx(r) for r in _routes
                 if hasattr(r, 'endpoint') and type(r) is not _APIWSRoute)
         )

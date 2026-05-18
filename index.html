@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AstraAPI Streaming Demo</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
+          Cantarell, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        padding: 20px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      .container {
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        max-width: 800px;
+        width: 100%;
+        padding: 40px;
+      }
+
+      h1 {
+        color: #333;
+        margin-bottom: 30px;
+        text-align: center;
+        font-size: 28px;
+      }
+
+      .section {
+        margin-bottom: 40px;
+      }
+
+      .section h2 {
+        color: #667eea;
+        font-size: 18px;
+        margin-bottom: 15px;
+        border-bottom: 2px solid #667eea;
+        padding-bottom: 10px;
+      }
+
+      .stream-display {
+        background: #f5f5f5;
+        border: 2px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 20px;
+        height: 200px;
+        overflow-y: auto;
+        font-family: "Courier New", monospace;
+        font-size: 14px;
+        line-height: 1.6;
+        color: #333;
+        word-wrap: break-word;
+        margin-bottom: 15px;
+      }
+
+      .stream-display::-webkit-scrollbar {
+        width: 8px;
+      }
+
+      .stream-display::-webkit-scrollbar-track {
+        background: #f1f1f1;
+        border-radius: 4px;
+      }
+
+      .stream-display::-webkit-scrollbar-thumb {
+        background: #667eea;
+        border-radius: 4px;
+      }
+
+      .stream-display::-webkit-scrollbar-thumb:hover {
+        background: #764ba2;
+      }
+
+      .button-group {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+      }
+
+      button {
+        flex: 1;
+        padding: 12px 20px;
+        border: none;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.3s ease;
+      }
+
+      .btn-primary {
+        background: #667eea;
+        color: white;
+      }
+
+      .btn-primary:hover {
+        background: #764ba2;
+        transform: translateY(-2px);
+        box-shadow: 0 8px 16px rgba(102, 126, 234, 0.4);
+      }
+
+      .btn-secondary {
+        background: #f0f0f0;
+        color: #333;
+      }
+
+      .btn-secondary:hover {
+        background: #e0e0e0;
+        transform: translateY(-2px);
+      }
+
+      .btn-primary:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      .input-group {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+      }
+
+      input[type="text"] {
+        flex: 1;
+        padding: 12px;
+        border: 2px solid #e0e0e0;
+        border-radius: 6px;
+        font-size: 14px;
+        transition: border-color 0.3s ease;
+      }
+
+      input[type="text"]:focus {
+        outline: none;
+        border-color: #667eea;
+      }
+
+      .status {
+        font-size: 12px;
+        padding: 8px 12px;
+        border-radius: 4px;
+        margin-top: 10px;
+        display: inline-block;
+      }
+
+      .status.connected {
+        background: #d4edda;
+        color: #155724;
+      }
+
+      .status.disconnected {
+        background: #f8d7da;
+        color: #721c24;
+      }
+
+      .status.loading {
+        background: #cfe2ff;
+        color: #084298;
+      }
+
+      .info {
+        background: #f0f7ff;
+        border-left: 4px solid #667eea;
+        padding: 12px;
+        border-radius: 4px;
+        font-size: 13px;
+        color: #333;
+        margin-top: 15px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🚀 AstraAPI Streaming Demo</h1>
+
+      <!-- Streaming Section -->
+      <div class="section">
+        <h2>📖 Story Stream</h2>
+        <div class="button-group">
+          <button class="btn-primary" onclick="fetchStory()">Load Story</button>
+          <button class="btn-secondary" onclick="clearStory()">Clear</button>
+        </div>
+        <div id="streamDisplay" class="stream-display">Ready to stream...</div>
+        <div id="streamStatus" class="status disconnected">Idle</div>
+        <div class="info">
+          This endpoint streams story messages one by one with 1-second delays.
+        </div>
+      </div>
+
+      <!-- SSE Section -->
+      <div class="section">
+        <h2>📡 Server-Sent Events</h2>
+        <div class="button-group">
+          <button class="btn-primary" onclick="fetchSSE()">Connect SSE</button>
+          <button class="btn-secondary" onclick="clearSSE()">Clear</button>
+        </div>
+        <div id="sseDisplay" class="stream-display">Click "Connect SSE" to start...</div>
+        <div id="sseStatus" class="status disconnected">Idle</div>
+        <div class="info">
+          This endpoint uses EventSourceResponse to push JSON events every second.
+        </div>
+      </div>
+
+      <!-- WebSocket Section -->
+      <div class="section">
+        <h2>💬 WebSocket Echo</h2>
+        <div class="button-group">
+          <button class="btn-primary" id="wsButton" onclick="toggleWebSocket()">
+            Connect WebSocket
+          </button>
+        </div>
+        <div class="input-group">
+          <input
+            type="text"
+            id="messageInput"
+            placeholder="Type a message..."
+            onkeypress="handleKeyPress(event)"
+          />
+          <button
+            class="btn-primary"
+            onclick="sendMessage()"
+            style="flex: 0 1 100px"
+          >
+            Send
+          </button>
+        </div>
+        <div id="wsDisplay" class="stream-display">
+          WebSocket messages will appear here...
+        </div>
+        <div id="wsStatus" class="status disconnected">Disconnected</div>
+        <div class="info">
+          Connect to the WebSocket server and send messages. They will be echoed
+          back.
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const SERVER_URL = "http://127.0.0.1:8002";
+      const WS_URL = "ws://127.0.0.1:8002/ws";
+
+      let ws = null;
+      let isWsConnected = false;
+
+      // === STREAMING SECTION ===
+      async function typeWriter(element, text, speed = 30) {
+        element.textContent = "";
+        for (let i = 0; i < text.length; i++) {
+          element.textContent += text[i];
+          element.scrollTop = element.scrollHeight;
+          await new Promise((resolve) => setTimeout(resolve, speed));
+        }
+      }
+
+      async function fetchStory() {
+        const streamDisplay = document.getElementById("streamDisplay");
+        const streamStatus = document.getElementById("streamStatus");
+
+        streamDisplay.textContent = "";
+        streamStatus.className = "status loading";
+        streamStatus.textContent = "Loading...";
+
+        try {
+          const response = await fetch(`${SERVER_URL}/story`);
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let content = "";
+
+          streamStatus.className = "status connected";
+          streamStatus.textContent = "Streaming...";
+
+          while (true) {
+            const { done, value } = await reader.read();
+
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            content += chunk;
+            await typeWriter(streamDisplay, content, 30);
+          }
+
+          streamStatus.className = "status connected";
+          streamStatus.textContent = "Stream completed ✓";
+        } catch (error) {
+          streamStatus.className = "status disconnected";
+          streamStatus.textContent = `Error: ${error.message}`;
+          streamDisplay.textContent = `Error: ${error.message}`;
+          console.error("Fetch error:", error);
+        }
+      }
+
+      function clearStory() {
+        document.getElementById("streamDisplay").textContent = "";
+        document.getElementById("streamStatus").className =
+          "status disconnected";
+        document.getElementById("streamStatus").textContent = "Cleared";
+      }
+
+      // === SSE SECTION ===
+      let sseSource = null;
+
+      function fetchSSE() {
+        const sseDisplay = document.getElementById("sseDisplay");
+        const sseStatus = document.getElementById("sseStatus");
+
+        if (sseSource) {
+          sseSource.close();
+          sseSource = null;
+        }
+
+        sseDisplay.textContent = "";
+        sseStatus.className = "status loading";
+        sseStatus.textContent = "Connecting...";
+
+        sseSource = new EventSource(`${SERVER_URL}/events`);
+
+        sseSource.onopen = () => {
+          sseStatus.className = "status connected";
+          sseStatus.textContent = "Connected ✓";
+        };
+
+        sseSource.onmessage = (e) => {
+          const line = `[default] ${e.data}\n`;
+          sseDisplay.textContent += line;
+          sseDisplay.scrollTop = sseDisplay.scrollHeight;
+        };
+
+        sseSource.addEventListener("progress", (e) => {
+          const line = `[progress] ${e.data}\n`;
+          sseDisplay.textContent += line;
+          sseDisplay.scrollTop = sseDisplay.scrollHeight;
+        });
+
+        sseSource.addEventListener("complete", (e) => {
+          const line = `[complete] ${e.data}\n`;
+          sseDisplay.textContent += line;
+          sseDisplay.scrollTop = sseDisplay.scrollHeight;
+          sseStatus.className = "status connected";
+          sseStatus.textContent = "Stream completed ✓";
+          sseSource.close();
+          sseSource = null;
+        });
+
+        sseSource.onerror = (err) => {
+          sseStatus.className = "status disconnected";
+          sseStatus.textContent = "Error / Disconnected";
+          console.error("SSE error:", err);
+          if (sseSource) {
+            sseSource.close();
+            sseSource = null;
+          }
+        };
+      }
+
+      function clearSSE() {
+        document.getElementById("sseDisplay").textContent = "";
+        document.getElementById("sseStatus").className = "status disconnected";
+        document.getElementById("sseStatus").textContent = "Cleared";
+        if (sseSource) {
+          sseSource.close();
+          sseSource = null;
+        }
+      }
+
+      // === WEBSOCKET SECTION ===
+      function toggleWebSocket() {
+        if (isWsConnected) {
+          closeWebSocket();
+        } else {
+          connectWebSocket();
+        }
+      }
+
+      function connectWebSocket() {
+        const wsStatus = document.getElementById("wsStatus");
+        const wsButton = document.getElementById("wsButton");
+
+        try {
+          ws = new WebSocket(WS_URL);
+
+          ws.onopen = () => {
+            isWsConnected = true;
+            wsStatus.className = "status connected";
+            wsStatus.textContent = "Connected ✓";
+            wsButton.textContent = "Disconnect WebSocket";
+            document.getElementById("messageInput").disabled = false;
+            addWsMessage("System", "Connected to WebSocket server");
+          };
+
+          ws.onmessage = (event) => {
+            addWsMessage("Server", event.data);
+          };
+
+          ws.onerror = (error) => {
+            wsStatus.className = "status disconnected";
+            wsStatus.textContent = "Error";
+            addWsMessage("System", `WebSocket error: ${error}`);
+            console.error("WebSocket error:", error);
+          };
+
+          ws.onclose = () => {
+            closeWebSocket();
+          };
+        } catch (error) {
+          wsStatus.className = "status disconnected";
+          wsStatus.textContent = "Connection Failed";
+          addWsMessage("System", `Failed to connect: ${error.message}`);
+          console.error("Connection error:", error);
+        }
+      }
+
+      function closeWebSocket() {
+        if (ws) {
+          ws.close();
+          ws = null;
+        }
+
+        isWsConnected = false;
+        document.getElementById("wsStatus").className = "status disconnected";
+        document.getElementById("wsStatus").textContent = "Disconnected";
+        document.getElementById("wsButton").textContent = "Connect WebSocket";
+        document.getElementById("messageInput").disabled = true;
+        addWsMessage("System", "Disconnected from WebSocket server");
+      }
+
+      function sendMessage() {
+        const input = document.getElementById("messageInput");
+        const message = input.value.trim();
+
+        if (!message) return;
+
+        if (!isWsConnected) {
+          addWsMessage("System", "Not connected to WebSocket");
+          return;
+        }
+
+        try {
+          ws.send(message);
+          addWsMessage("You", message);
+          input.value = "";
+          input.focus();
+        } catch (error) {
+          addWsMessage("System", `Error sending message: ${error.message}`);
+          console.error("Send error:", error);
+        }
+      }
+
+      function handleKeyPress(event) {
+        if (event.key === "Enter") {
+          sendMessage();
+        }
+      }
+
+      function addWsMessage(sender, message) {
+        const wsDisplay = document.getElementById("wsDisplay");
+        const timestamp = new Date().toLocaleTimeString();
+        const line = `[${timestamp}] ${sender}: ${message}\n`;
+
+        if (
+          wsDisplay.textContent === "WebSocket messages will appear here..."
+        ) {
+          wsDisplay.textContent = line;
+        } else {
+          wsDisplay.textContent += line;
+        }
+
+        wsDisplay.scrollTop = wsDisplay.scrollHeight;
+      }
+
+      // Initialize
+      document.getElementById("messageInput").disabled = true;
+    </script>
+  </body>
+</html>

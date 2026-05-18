@@ -6,6 +6,8 @@ from astraapi._response import JSONResponse as JSONResponse  # noqa
 from astraapi._response import PlainTextResponse as PlainTextResponse  # noqa
 from astraapi._response import RedirectResponse as RedirectResponse  # noqa
 from astraapi._response import Response as Response  # noqa
+from astraapi._response import EventSourceResponse as EventSourceResponse  # noqa
+from astraapi._response import ServerSentEvent as ServerSentEvent  # noqa
 from astraapi._response import StreamingResponse as StreamingResponse  # noqa
 
 try:

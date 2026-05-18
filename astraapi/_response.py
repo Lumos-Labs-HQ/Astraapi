@@ -458,6 +458,120 @@ class StreamingResponse(Response):
 
 
 # ---------------------------------------------------------------------------
+# EventSourceResponse (SSE)
+# ---------------------------------------------------------------------------
+
+import dataclasses
+
+
+@dataclasses.dataclass
+class ServerSentEvent:
+    """Structured Server-Sent Event.
+
+    Parameters
+    ----------
+    data : Any
+        Event payload. Dicts are JSON-serialized.
+    event : str or None
+        Event name (e.g. ``"update"``).
+    id : str or None
+        Event ID for the browser's ``lastEventId``.
+    retry : int or None
+        Reconnection time in milliseconds.
+    """
+    data: Any = ""
+    event: Optional[str] = None
+    id: Optional[str] = None
+    retry: Optional[int] = None
+
+
+class EventSourceResponse(StreamingResponse):
+    """Server-Sent Events (SSE) streaming response.
+
+    Wraps an async or sync iterator that yields:
+
+    - ``str`` → sent as ``data: <text>\n\n``
+    - ``dict`` → keys ``data``, ``event``, ``id``, ``retry`` are formatted
+    - :class:`ServerSentEvent` → fully structured event
+
+    Example
+    -------
+    ::
+
+        @app.get("/events")
+        async def events():
+            async def gen():
+                yield {"data": "hello"}
+                yield ServerSentEvent(data={"x": 1}, event="update")
+            return EventSourceResponse(gen())
+    """
+
+    media_type = "text/event-stream"
+
+    def __init__(
+        self,
+        content: Any,
+        status_code: int = 200,
+        headers: Optional[dict[str, str]] = None,
+        background: Any = None,
+    ) -> None:
+        super().__init__(
+            content=_sse_iterable(content),
+            status_code=status_code,
+            headers=headers,
+            background=background,
+        )
+
+
+def _sse_format_event(data: Any = "", event: Optional[str] = None,
+                       id: Optional[str] = None, retry: Optional[int] = None) -> str:
+    """Format a single SSE event according to the spec."""
+    parts: list[str] = []
+    if event is not None:
+        parts.append(f"event: {event}")
+    if id is not None:
+        parts.append(f"id: {id}")
+    if retry is not None:
+        parts.append(f"retry: {retry}")
+    if data is not None:
+        if isinstance(data, dict):
+            data = _json_dumps(data)
+        if isinstance(data, bytes):
+            data = data.decode("utf-8")
+        text = str(data)
+        for line in text.split("\n"):
+            parts.append(f"data: {line}")
+    parts.append("")
+    parts.append("")
+    return "\n".join(parts)
+
+
+async def _sse_iterable(source: Any):
+    """Async generator that formats source items as SSE events."""
+    if hasattr(source, "__aiter__"):
+        async for item in source:
+            yield _sse_format_item(item)
+    else:
+        for item in source:
+            yield _sse_format_item(item)
+
+
+def _sse_format_item(item: Any) -> str:
+    if isinstance(item, ServerSentEvent):
+        return _sse_format_event(
+            data=item.data, event=item.event, id=item.id, retry=item.retry
+        )
+    if isinstance(item, dict):
+        return _sse_format_event(
+            data=item.get("data", ""),
+            event=item.get("event"),
+            id=item.get("id"),
+            retry=item.get("retry"),
+        )
+    return _sse_format_event(data=item)
+
+
+# ---------------------------------------------------------------------------
 # FileResponse
 # ---------------------------------------------------------------------------
 
