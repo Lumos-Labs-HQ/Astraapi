@@ -2,7 +2,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <utility>
 #include <vector>
 
 // ── Zero-copy HTTP/1.1 request parser (llhttp-backed) ──────────────────────

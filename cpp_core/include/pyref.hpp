@@ -1,7 +1,6 @@
 #pragma once
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
-#include <utility>
 
 // RAII wrapper for PyObject* — prevents reference leaks.
 // Auto Py_XDECREF on destruction, move-only semantics.

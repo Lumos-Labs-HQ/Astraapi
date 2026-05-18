@@ -104,6 +104,37 @@ _endpoint_id_to_route: dict = {}
 from astraapi.exceptions import HTTPException as _DepHTTPExc
 _DEP_HTTP_EXC_TYPES: tuple = (_DepHTTPExc,)
 
+# Hoisted hot-path imports (avoid per-request module dict lookups in DI resolvers)
+try:
+    from astraapi._cpp_server import (
+        _current_raw_headers as _crh_mod,
+        _current_method as _cm_mod,
+        _current_path as _cp_mod,
+        _current_query_string as _cqs_mod,
+    )
+except ImportError:
+    _crh_mod = _cm_mod = _cp_mod = _cqs_mod = None  # type: ignore
+
+try:
+    from astraapi.background import BackgroundTasks as _BT_mod
+except ImportError:
+    _BT_mod = None  # type: ignore
+
+try:
+    from astraapi.security.oauth2 import SecurityScopes as _SecurityScopes_mod
+except ImportError:
+    _SecurityScopes_mod = None  # type: ignore
+
+try:
+    from pydantic import TypeAdapter as _TA_mod
+except ImportError:
+    _TA_mod = None  # type: ignore
+
+try:
+    from contextlib import contextmanager as _contextmanager_mod
+except ImportError:
+    _contextmanager_mod = None  # type: ignore
+
 from astraapi.security.http import (
     HTTPAuthorizationCredentials as _HTTPAuthCreds,
     HTTPBasicCredentials as _HTTPBasicCreds,
@@ -1555,21 +1586,16 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
     raw_body_bytes = kwargs_dict.pop('__body__', None)
     raw_content_type = kwargs_dict.pop('__content_type__', '')
     # Fallback to ContextVar when C++ dep engine already popped __raw_headers__
-    if raw_headers is None:
-        try:
-            from astraapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp
-            raw_headers = _crh.get()
-            if raw_method == 'GET': raw_method = _cm.get()
-            if raw_path == '/': raw_path = _cp.get()
-        except Exception:
-            pass
+    if raw_headers is None and _crh_mod is not None:
+        raw_headers = _crh_mod.get()
+        if raw_method == 'GET': raw_method = _cm_mod.get() if _cm_mod is not None else 'GET'
+        if raw_path == '/': raw_path = _cp_mod.get() if _cp_mod is not None else '/'
     # Parse form body once if any dep node needs it
     _parsed_form: dict | None = None
     if raw_body_bytes and any(n.get('has_form_body') for n in dep_nodes):
         ct = raw_content_type if isinstance(raw_content_type, str) else ''
         if 'application/x-www-form-urlencoded' in ct:
-            from astraapi._astraapi_core import parse_urlencoded_body as _pub
-            _parsed_form = dict(_pub(raw_body_bytes))
+            _parsed_form = dict(parse_urlencoded_body(raw_body_bytes))
         elif 'multipart/form-data' in ct:
             _bnd = _extract_boundary(ct)
             if _bnd:
@@ -1738,17 +1764,15 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
 
             # Inject BackgroundTasks if dep declares background_tasks param
             _bt_param = node.get('background_tasks_param_name')
-            if _bt_param:
-                from astraapi.background import BackgroundTasks as _BT
+            if _bt_param and _BT_mod is not None:
                 if '__bg_tasks__' not in kwargs_dict:
-                    kwargs_dict['__bg_tasks__'] = _BT()
+                    kwargs_dict['__bg_tasks__'] = _BT_mod()
                 dep_kwargs[_bt_param] = kwargs_dict['__bg_tasks__']
 
             # Inject SecurityScopes if dep declares security_scopes param
             _ss_param = node.get('security_scopes_param')
-            if _ss_param:
-                from astraapi.security.oauth2 import SecurityScopes as _SecurityScopes
-                dep_kwargs[_ss_param] = _SecurityScopes(scopes=node.get('oauth_scopes') or [])
+            if _ss_param and _SecurityScopes_mod is not None:
+                dep_kwargs[_ss_param] = _SecurityScopes_mod(scopes=node.get('oauth_scopes') or [])
 
             # Validate form body params with constraints (e.g. pattern) before calling dep
             if node.get('has_form_body') and _parsed_form is not None:
@@ -1839,21 +1863,16 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
     raw_body_bytes = kwargs_dict.pop('__body__', None)
     raw_content_type = kwargs_dict.pop('__content_type__', '')
     # Fallback to ContextVar when C++ dep engine already popped __raw_headers__
-    if raw_headers is None:
-        try:
-            from astraapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp
-            raw_headers = _crh.get()
-            if raw_method == 'GET': raw_method = _cm.get()
-            if raw_path == '/': raw_path = _cp.get()
-        except Exception:
-            pass
+    if raw_headers is None and _crh_mod is not None:
+        raw_headers = _crh_mod.get()
+        if raw_method == 'GET': raw_method = _cm_mod.get() if _cm_mod is not None else 'GET'
+        if raw_path == '/': raw_path = _cp_mod.get() if _cp_mod is not None else '/'
     # Parse form body once if any dep node needs it
     _parsed_form: dict | None = None
     if raw_body_bytes and any(n.get('has_form_body') for n in dep_nodes):
         ct = raw_content_type if isinstance(raw_content_type, str) else ''
         if 'application/x-www-form-urlencoded' in ct:
-            from astraapi._astraapi_core import parse_urlencoded_body as _pub
-            _parsed_form = dict(_pub(raw_body_bytes))
+            _parsed_form = dict(parse_urlencoded_body(raw_body_bytes))
         elif 'multipart/form-data' in ct:
             _bnd = _extract_boundary(ct)
             if _bnd:
@@ -2017,17 +2036,15 @@ async def _resolve_deps_async(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_T
 
             # Inject BackgroundTasks if dep declares background_tasks param
             _bt_param = node.get('background_tasks_param_name')
-            if _bt_param:
-                from astraapi.background import BackgroundTasks as _BT
+            if _bt_param and _BT_mod is not None:
                 if '__bg_tasks__' not in kwargs_dict:
-                    kwargs_dict['__bg_tasks__'] = _BT()
+                    kwargs_dict['__bg_tasks__'] = _BT_mod()
                 dep_kwargs[_bt_param] = kwargs_dict['__bg_tasks__']
 
             # Inject SecurityScopes if dep declares security_scopes param
             _ss_param = node.get('security_scopes_param')
-            if _ss_param:
-                from astraapi.security.oauth2 import SecurityScopes as _SecurityScopes
-                dep_kwargs[_ss_param] = _SecurityScopes(scopes=node.get('oauth_scopes') or [])
+            if _ss_param and _SecurityScopes_mod is not None:
+                dep_kwargs[_ss_param] = _SecurityScopes_mod(scopes=node.get('oauth_scopes') or [])
 
             # Call the dependency
             if node['is_coro']:
@@ -2067,14 +2084,10 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
     auth_scheme = kwargs_dict.pop('__auth_scheme__', None)
     auth_credentials = kwargs_dict.pop('__auth_credentials__', None)
     # Fallback to ContextVar when C++ dep engine already popped __raw_headers__
-    if raw_headers is None:
-        try:
-            from astraapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp
-            raw_headers = _crh.get()
-            if raw_method == 'GET': raw_method = _cm.get()
-            if raw_path == '/': raw_path = _cp.get()
-        except Exception:
-            pass
+    if raw_headers is None and _crh_mod is not None:
+        raw_headers = _crh_mod.get()
+        if raw_method == 'GET': raw_method = _cm_mod.get() if _cm_mod is not None else 'GET'
+        if raw_path == '/': raw_path = _cp_mod.get() if _cp_mod is not None else '/'
     request_obj = None
 
     async def _cleanup_on_error():
@@ -2207,17 +2220,15 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
 
             # Inject BackgroundTasks if dep declares background_tasks param
             _bt_param = node.get('background_tasks_param_name')
-            if _bt_param:
-                from astraapi.background import BackgroundTasks as _BT
+            if _bt_param and _BT_mod is not None:
                 if '__bg_tasks__' not in kwargs_dict:
-                    kwargs_dict['__bg_tasks__'] = _BT()
+                    kwargs_dict['__bg_tasks__'] = _BT_mod()
                 dep_kwargs[_bt_param] = kwargs_dict['__bg_tasks__']
 
             # Inject SecurityScopes if dep declares security_scopes param
             _ss_param = node.get('security_scopes_param')
-            if _ss_param:
-                from astraapi.security.oauth2 import SecurityScopes as _SecurityScopes
-                dep_kwargs[_ss_param] = _SecurityScopes(scopes=node.get('oauth_scopes') or [])
+            if _ss_param and _SecurityScopes_mod is not None:
+                dep_kwargs[_ss_param] = _SecurityScopes_mod(scopes=node.get('oauth_scopes') or [])
 
             # Choose stack based on dep scope: "request" deps live until response body sent
             _dep_scope = node.get('dep_scope', 'function')
@@ -2230,9 +2241,8 @@ async def _resolve_deps_gen(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYP
                 result = await _use_stack.enter_async_context(cm)
             elif node.get('is_gen'):
                 # Sync generator dep: wrap as context manager and enter
-                from contextlib import contextmanager as _contextmanager
                 call = node['call']
-                cm = _contextmanager(call)(**dep_kwargs)
+                cm = (_contextmanager_mod(call) if _contextmanager_mod is not None else contextmanager(call))(**dep_kwargs)
                 result = _use_stack.enter_context(cm)
             elif node['is_coro']:
                 result = await node['call'](**dep_kwargs)

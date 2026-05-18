@@ -50,6 +50,21 @@ except ImportError:
     _HTMLResponse = None  # type: ignore
     _ResponseClass = None  # type: ignore
 
+# Fix #10: hoist Request/Response/JSONResponse for _run_http_middleware
+try:
+    from astraapi.requests import Request as _Request
+    from astraapi.responses import Response as _Response, JSONResponse as _JSONResponse
+except ImportError:
+    _Request = None  # type: ignore
+    _Response = None  # type: ignore
+    _JSONResponse = None  # type: ignore
+
+# Fix #11: _ConstNext eliminates per-layer closure allocation in middleware chain
+class _ConstNext:
+    __slots__ = ('resp',)
+    def __init__(self, resp): self.resp = resp
+    async def __call__(self, req): return self.resp
+
 # Fix #6: pre-build the content-type header tuple used in _inject_headers_into_response
 _CT_JSON_HDR = (b"content-type", b"application/json")
 _CT_JSON_HDR_LIST = [_CT_JSON_HDR]
@@ -371,6 +386,16 @@ def _set_http_middleware_dispatchers(dispatchers: list) -> None:
 _ws_app_map: dict = {}  # id(endpoint) -> (app_callable, route)
 _full_app: Any = None  # full ASGI app (with middleware) for WS dispatch
 _orig_app: Any = None  # original app (before middleware wrapping) for config lookup
+
+
+def _extract_origin(raw_headers: list | None) -> str:
+    """Scan raw header list once and extract the Origin header value."""
+    if raw_headers:
+        for _hk, _hv in raw_headers:
+            _key = (_hk.decode('latin-1') if isinstance(_hk, bytes) else _hk).lower()
+            if _key == 'origin':
+                return (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
+    return ""
 
 
 def _get_cors_headers_for_origin(origin: str, app: Any) -> list:
@@ -1233,9 +1258,6 @@ async def _run_http_middleware(
     middleware dispatch function, then writes the final response.
     Only called when _http_middleware_dispatchers is non-empty.
     """
-    from astraapi.requests import Request
-    from astraapi.responses import Response, JSONResponse
-
     # Build minimal ASGI scope for Request
     header_list = []
     if raw_headers:
@@ -1261,11 +1283,11 @@ async def _run_http_middleware(
     # Build pre-populated response from endpoint result
     _raw_type = type(raw)
     if _raw_type is dict or _raw_type is list:
-        resp_obj = JSONResponse(content=raw, status_code=status_code)
+        resp_obj = _JSONResponse(content=raw, status_code=status_code) if _JSONResponse is not None else raw
     elif hasattr(raw, 'body') or hasattr(raw, 'media_type'):
         resp_obj = raw  # already a Response
     else:
-        resp_obj = JSONResponse(content=raw, status_code=status_code)
+        resp_obj = _JSONResponse(content=raw, status_code=status_code) if _JSONResponse is not None else raw
     # Preserve shim-attached lifecycle objects (bg tasks, exit_stack)
     _cpp_bg = getattr(raw, '__cpp_bg_tasks__', None)
     _cpp_stack = getattr(raw, '__cpp_exit_stack__', None)
@@ -1279,18 +1301,13 @@ async def _run_http_middleware(
             _v = v.decode('latin-1') if isinstance(v, bytes) else v
             resp_obj.headers[_k] = _v
 
-    # Build call_next that returns the pre-built response
-    async def call_next(request: Any) -> Any:
-        return resp_obj
-
     # Run middleware chain in reverse order (last registered = outermost)
-    request = Request(scope)
+    request = _Request(scope) if _Request is not None else None
     current_response = resp_obj
     for dispatch_fn in reversed(dispatchers):
         _prev = current_response
-        async def _call_next_for(req: Any, _r=_prev) -> Any:
-            return _r
-        current_response = await dispatch_fn(request, _call_next_for)
+        _next_wrapper = _ConstNext(_prev)
+        current_response = await dispatch_fn(request, _next_wrapper)
         if current_response is None:
             current_response = _prev
 
@@ -2028,17 +2045,8 @@ class CppHttpProtocol(asyncio.Protocol):
         transport = self._transport
         if not transport or transport.is_closing():
             return
-        # --- CORS header injection ---
-        _origin = ""
-        _rh = _current_raw_headers.get()
-        if _rh:
-            for _hk, _hv in _rh:
-                _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
-                if _key.lower() == 'origin':
-                    _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
-                    break
+        _origin = _extract_origin(_current_raw_headers.get())
         _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
-        # -----------------------------
         from astraapi.exceptions import HTTPException, RequestValidationError
         from astraapi._concurrency import is_async_callable, run_in_threadpool
         # Walk MRO to find a registered app-level exception handler
@@ -2194,17 +2202,8 @@ class CppHttpProtocol(asyncio.Protocol):
             raw = await _drive_coro(coro, first_yield)
             transport = self._transport
             if transport and not transport.is_closing():
-                # --- CORS header injection ---
-                _origin = ""
-                _rh = _current_raw_headers.get()
-                if _rh:
-                    for _hk, _hv in _rh:
-                        _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
-                        if _key.lower() == 'origin':
-                            _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
-                            break
+                _origin = _extract_origin(_current_raw_headers.get())
                 _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
-                # -----------------------------
                 # OPT-D: plain dict/list fast path — skips full type dispatch
                 _raw_type = type(raw)
                 if _raw_type is dict or _raw_type is list:
@@ -2263,17 +2262,8 @@ class CppHttpProtocol(asyncio.Protocol):
         try:
             transport = self._transport
             if transport and not transport.is_closing():
-                # --- CORS header injection ---
-                _origin = ""
-                _rh = _current_raw_headers.get()
-                if _rh:
-                    for _hk, _hv in _rh:
-                        _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
-                        if _key.lower() == 'origin':
-                            _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
-                            break
+                _origin = _extract_origin(_current_raw_headers.get())
                 _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
-                # -----------------------------
                 raw_path = getattr(raw, 'path', None)
                 if raw_path is not None and not hasattr(raw, 'body_iterator'):
                     # FileResponse — read file bytes synchronously
@@ -2438,17 +2428,9 @@ class CppHttpProtocol(asyncio.Protocol):
                         status_code = _di_sc2
                 transport = self._transport
                 if transport and not transport.is_closing():
-                    # --- CORS header injection ---
-                    _origin = ""
                     _rh = _kwargs.get('__raw_headers__') or _current_raw_headers.get()
-                    if _rh:
-                        for _hk, _hv in (_rh if isinstance(_rh, list) else []):
-                            _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
-                            if _key.lower() == 'origin':
-                                _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
-                                break
+                    _origin = _extract_origin(_rh if isinstance(_rh, list) else None)
                     _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
-                    # -----------------------------
                     _mw_already_ran = getattr(_raw, '__middleware_ran__', False)
                     if _http_middleware_dispatchers and not _mw_already_ran:
                         _mw_hdrs = _kwargs.get('__raw_headers__') or _current_raw_headers.get()
@@ -2543,17 +2525,9 @@ class CppHttpProtocol(asyncio.Protocol):
                                         raw_headers: Any = None, method: str = 'GET', path: str = '/') -> None:
         """Apply HTTP middleware to a sync fast-path result."""
         try:
-            # --- CORS header injection ---
-            _origin = ""
             _rh = raw_headers or _current_raw_headers.get() or []
-            if _rh:
-                for _hk, _hv in (_rh if isinstance(_rh, list) else []):
-                    _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
-                    if _key.lower() == 'origin':
-                        _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
-                        break
+            _origin = _extract_origin(_rh if isinstance(_rh, list) else None)
             _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
-            # -----------------------------
             # Fix #9: use module-level hoisted imports instead of per-call import
             if isinstance(raw, str) and not (hasattr(raw, 'body') or hasattr(raw, 'media_type')):
                 _p = path or '/'
@@ -2594,17 +2568,8 @@ class CppHttpProtocol(asyncio.Protocol):
     async def _handle_pydantic(self, ir: Any) -> None:
         """Handle routes needing Pydantic validation (POST with body models)."""
         try:
-            # --- CORS header injection ---
-            _origin = ""
-            _rh = _current_raw_headers.get()
-            if _rh:
-                for _hk, _hv in _rh:
-                    _key = _hk.decode('latin-1') if isinstance(_hk, bytes) else _hk
-                    if _key.lower() == 'origin':
-                        _origin = (_hv.decode('latin-1') if isinstance(_hv, bytes) else _hv)
-                        break
+            _origin = _extract_origin(_current_raw_headers.get())
             _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
-            # -----------------------------
             if ir.has_body_params and ir.json_body is not None:
                 body_values, body_errors = await _request_body_to_args(
                     body_fields=ir.body_params,
@@ -3337,12 +3302,8 @@ async def run_server(
             ('BaseHTTPMiddleware', 'HTTPSRedirectMiddleware', 'TrustedHostMiddleware', 'CORSMiddleware')
             for _mw in getattr(app, 'user_middleware', [])
         )
-        _cors_mw = any(
-            getattr(getattr(_mw, 'cls', None), '__name__', '') == 'CORSMiddleware'
-            for _mw in getattr(app, 'user_middleware', [])
-        )
         _needs_request_context = bool(
-            _http_middleware_dispatchers or _asgi_mw or _cors_mw or
+            _http_middleware_dispatchers or _asgi_mw or
             any(_route_needs_ctx(r) for r in _routes
                 if hasattr(r, 'endpoint') and type(r) is not _APIWSRoute)
         )

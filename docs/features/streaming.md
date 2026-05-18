@@ -48,6 +48,77 @@ async def stream_data():
 
 ## Server-Sent Events (SSE)
 
+AstraAPI provides native `EventSourceResponse` and `ServerSentEvent` classes for structured SSE streaming.
+
+### Using EventSourceResponse
+
+```python
+import asyncio
+from astraapi.responses import EventSourceResponse, ServerSentEvent
+
+@app.get("/events")
+def events():
+    async def event_generator():
+        for i in range(100):
+            await asyncio.sleep(1)
+            yield ServerSentEvent(data={"count": i}, event="update")
+    
+    return EventSourceResponse(event_generator())
+```
+
+`EventSourceResponse` automatically sets `media_type="text/event-stream"` and encodes `ServerSentEvent` objects into the correct SSE format. You can also yield plain `dict`, `str`, or `bytes`:
+
+```python
+@app.get("/events")
+def events():
+    async def event_generator():
+        yield {"message": "hello"}      # auto-serialized as JSON
+        yield "plain text message"       # sent as-is
+        yield b"raw bytes"               # sent as-is
+    
+    return EventSourceResponse(event_generator())
+```
+
+### ServerSentEvent Fields
+
+```python
+from astraapi.responses import ServerSentEvent
+
+event = ServerSentEvent(
+    data={"user": "alice", "action": "login"},
+    event="user-action",
+    id="42",
+    retry=5000,
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `data` | `any` | Event payload. `dict` is auto-serialized to JSON. |
+| `event` | `str` | Event name (e.g., `"update"`, `"message"`). |
+| `id` | `str` | Event ID for client-side `Last-Event-ID`. |
+| `retry` | `int` | Reconnection delay in milliseconds. |
+
+### Client-side
+
+```javascript
+const eventSource = new EventSource('/events');
+
+// Default message handler
+eventSource.onmessage = (event) => {
+    console.log(JSON.parse(event.data));
+};
+
+// Named event handler
+eventSource.addEventListener('update', (event) => {
+    console.log('Update:', JSON.parse(event.data));
+});
+```
+
+### Legacy: Manual SSE with StreamingResponse
+
+If you prefer full control, you can still use `StreamingResponse` directly:
+
 ```python
 import asyncio
 from astraapi import StreamingResponse
@@ -63,14 +134,6 @@ def events():
         event_generator(),
         media_type="text/event-stream",
     )
-```
-
-Client-side:
-```javascript
-const eventSource = new EventSource('/events');
-eventSource.onmessage = (event) => {
-    console.log(JSON.parse(event.data));
-};
 ```
 
 ## Custom Headers

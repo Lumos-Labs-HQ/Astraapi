@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import gzip as _gzip
 import io
 import re
 import sys
@@ -41,6 +42,34 @@ from astraapi._response import (
     PlainTextResponse,
 )
 
+
+
+# ---------------------------------------------------------------------------
+# CORS send wrapper (avoids per-request closure allocation)
+# ---------------------------------------------------------------------------
+class _CorsSendWrapper:
+    __slots__ = ('origin', 'send', 'middleware')
+    def __init__(self, origin, send, middleware):
+        self.origin = origin; self.send = send; self.middleware = middleware
+    async def __call__(self, message):
+        if message['type'] == 'http.response.start':
+            response_headers = list(message.get('headers', []))
+            _origin = self.origin
+            _mw = self.middleware
+            if _origin and _mw._is_origin_allowed(_origin):
+                if _mw.allow_all_origins:
+                    response_headers.append((b"access-control-allow-origin", b"*"))
+                else:
+                    response_headers.append((b"access-control-allow-origin", _origin.encode("latin-1")))
+                    response_headers.append((b"vary", b"Origin"))
+                if _mw.allow_credentials:
+                    response_headers.append((b"access-control-allow-credentials", b"true"))
+                if _mw.expose_headers:
+                    response_headers.append(
+                        (b"access-control-expose-headers", ", ".join(_mw.expose_headers).encode("latin-1"))
+                    )
+            message['headers'] = response_headers
+        await self.send(message)
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +306,7 @@ class CORSMiddleware:
         # Headers
         self.allow_all_headers = "*" in allow_headers
         self.allow_headers = [h.lower() for h in allow_headers]
+        self._allow_headers_set = frozenset(self.allow_headers)
 
         self.allow_credentials = allow_credentials
         self.expose_headers = list(expose_headers)
@@ -335,33 +365,17 @@ class CORSMiddleware:
             return
 
         method = scope.get('method', 'GET')
-        headers = dict(scope.get('headers', []))
         origin = None
-        for hname, hvalue in headers.items():
-            if (hname.decode('latin-1') if isinstance(hname, bytes) else hname).lower() == 'origin':
+        for hname, hvalue in scope.get('headers', []):
+            if (hname if isinstance(hname, bytes) else hname.encode('latin-1')).lower() == b'origin':
                 origin = (hvalue.decode('latin-1') if isinstance(hvalue, bytes) else hvalue)
                 break
 
-        async def _send_wrapper(message: Any) -> None:
-            if message['type'] == 'http.response.start':
-                response_headers = list(message.get('headers', []))
-                if origin and self._is_origin_allowed(origin):
-                    if self.allow_all_origins:
-                        response_headers.append((b"access-control-allow-origin", b"*"))
-                    else:
-                        response_headers.append((b"access-control-allow-origin", origin.encode("latin-1")))
-                        response_headers.append((b"vary", b"Origin"))
-                    if self.allow_credentials:
-                        response_headers.append((b"access-control-allow-credentials", b"true"))
-                    if self.expose_headers:
-                        response_headers.append(
-                            (b"access-control-expose-headers", ", ".join(self.expose_headers).encode("latin-1"))
-                        )
-                message['headers'] = response_headers
-            await send(message)
+        send_wrapper = _CorsSendWrapper(origin, send, self)
 
         if method == 'OPTIONS' and origin and self._is_origin_allowed(origin):
             # Preflight request
+            headers = dict(scope.get('headers', []))
             requested_method = headers.get(b'access-control-request-method', b'').decode('latin-1')
             requested_headers = headers.get(b'access-control-request-headers', b'').decode('latin-1')
             preflight_headers = list(self.preflight_headers)
@@ -374,9 +388,8 @@ class CORSMiddleware:
                 )
             elif requested_headers and self.allow_headers:
                 # Validate requested headers against allowed headers
-                allowed = set(h.lower() for h in self.allow_headers)
                 requested = set(h.strip().lower() for h in requested_headers.split(','))
-                if not requested.issubset(allowed) and not self.allow_all_headers:
+                if not requested.issubset(self._allow_headers_set) and not self.allow_all_headers:
                     await send({'type': 'http.response.start', 'status': 400, 'headers': []})
                     await send({'type': 'http.response.body', 'body': b'Disallowed CORS headers'})
                     return
@@ -395,7 +408,7 @@ class CORSMiddleware:
             await send({'type': 'http.response.start', 'status': 200, 'headers': preflight_headers})
             await send({'type': 'http.response.body', 'body': b'OK'})
         else:
-            await self.app(scope, receive, _send_wrapper)
+            await self.app(scope, receive, send_wrapper)
 
     def _preflight_response(
         self, origin: str, headers: Dict[str, str]
@@ -491,7 +504,6 @@ class GZipMiddleware:
         await self.app(scope, receive, _send_wrapper)
         body = _body[0]
         if len(body) >= self.minimum_size:
-            import gzip as _gzip
             compressed = _gzip.compress(body, compresslevel=self.compresslevel)
             hdrs = [(k, v) for k, v in _resp_headers[0]
                     if k.lower() not in (b'content-length', b'content-encoding')]

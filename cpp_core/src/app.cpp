@@ -3,6 +3,7 @@
 #include <Python.h>
 
 
+#include "compat.hpp"
 #include "app.hpp"
 #include "asgi_constants.hpp"
 #include "json_writer.hpp"

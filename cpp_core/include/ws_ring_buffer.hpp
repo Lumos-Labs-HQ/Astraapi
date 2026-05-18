@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <cstring>
 #include <utility>
-#include <atomic>
 #include "ws_frame_parser.hpp"
 
 // WsRingBuffer — Circular buffer for WebSocket frame accumulation
