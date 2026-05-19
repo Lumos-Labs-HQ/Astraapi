@@ -24,7 +24,7 @@ static PyObject* g_enum_type = nullptr;
 static PyObject* g_purepath_type = nullptr;
 static bool g_types_initialized = false;
 
-static void ensure_types_initialized() {
+void ensure_types_initialized() {
     if (g_types_initialized) return;
 
     // datetime types
@@ -147,10 +147,11 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         return PyUnicode_FromStringAndSize(data, len);
     }
 
-    ensure_types_initialized();
-
     // Pydantic BaseModel — try model_dump()
-    if (PyObject_HasAttrString(obj, "model_dump")) {
+    // Fast path: check type name before expensive HasAttrString
+    const char* tp_name = Py_TYPE(obj)->tp_name;
+    if ((tp_name && (strstr(tp_name, "Model") || strstr(tp_name, "Schema"))) ||
+        PyObject_HasAttrString(obj, "model_dump")) {
         PyRef dumped(PyObject_CallMethod(obj, "model_dump", nullptr));
         if (dumped) return encode_recursive(dumped.get(), depth + 1);
         PyErr_Clear();

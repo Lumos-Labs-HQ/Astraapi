@@ -20,10 +20,14 @@ from astraapi._types import Scope
 # Optional C++ accelerated JSON serialization
 try:
     from astraapi._core_bridge import encode_to_json_bytes as _core_json_bytes
-
     _CORE_JSON = True
 except Exception:
     _CORE_JSON = False
+
+try:
+    from astraapi.encoders import jsonable_encoder as _jsonable_encoder
+except Exception:
+    _jsonable_encoder = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -359,10 +363,9 @@ class JSONResponse(Response):
             # For non-primitive types without model_dump_json: use jsonable_encoder
             _is_primitive = isinstance(content, (dict, list, str, int, float, bool, type(None)))
             _is_pydantic = hasattr(content, "model_dump_json")
-            if not _is_primitive and not _is_pydantic:
+            if not _is_primitive and not _is_pydantic and _jsonable_encoder is not None:
                 try:
-                    from astraapi.encoders import jsonable_encoder as _je
-                    content = _je(content)
+                    content = _jsonable_encoder(content)
                 except Exception:
                     pass
             try:

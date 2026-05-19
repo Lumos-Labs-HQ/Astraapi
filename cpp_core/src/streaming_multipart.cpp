@@ -14,6 +14,11 @@ PyObject* StreamingMultipartParser::s_bytes_io_cls_   = nullptr;
 PyObject* StreamingMultipartParser::s_upload_file_cls_ = nullptr;
 PyObject* StreamingMultipartParser::s_headers_cls_    = nullptr;
 PyObject* StreamingMultipartParser::s_seek_str_       = nullptr;
+PyObject* StreamingMultipartParser::s_fn_key_         = nullptr;
+PyObject* StreamingMultipartParser::s_fl_key_         = nullptr;
+PyObject* StreamingMultipartParser::s_ct_key_         = nullptr;
+PyObject* StreamingMultipartParser::s_hdr_key_        = nullptr;
+PyObject* StreamingMultipartParser::s_sz_key_         = nullptr;
 bool      StreamingMultipartParser::s_initialized_    = false;
 
 bool StreamingMultipartParser::init_python_refs() {
@@ -40,6 +45,11 @@ bool StreamingMultipartParser::init_python_refs() {
         }
     }
     if (!s_seek_str_) s_seek_str_ = PyUnicode_InternFromString("seek");
+    if (!s_fn_key_) s_fn_key_ = PyUnicode_InternFromString("filename");
+    if (!s_fl_key_) s_fl_key_ = PyUnicode_InternFromString("file");
+    if (!s_ct_key_) s_ct_key_ = PyUnicode_InternFromString("content_type");
+    if (!s_hdr_key_) s_hdr_key_ = PyUnicode_InternFromString("headers");
+    if (!s_sz_key_) s_sz_key_ = PyUnicode_InternFromString("size");
 
     s_initialized_ = true;
     return true;
@@ -327,19 +337,7 @@ PyObject* StreamingMultipartParser::build_kwargs(PyObject* existing_kwargs) cons
     PyObject* kwargs = existing_kwargs ? existing_kwargs : PyDict_New();
     if (!kwargs) return nullptr;
 
-    // Static interned key strings
-    static PyObject* s_fn_key  = nullptr;
-    static PyObject* s_fl_key  = nullptr;
-    static PyObject* s_ct_key  = nullptr;
-    static PyObject* s_hdr_key = nullptr;
-    static PyObject* s_sz_key  = nullptr;
-    if (!s_fn_key) {
-        s_fn_key  = PyUnicode_InternFromString("filename");
-        s_fl_key  = PyUnicode_InternFromString("file");
-        s_ct_key  = PyUnicode_InternFromString("content_type");
-        s_hdr_key = PyUnicode_InternFromString("headers");
-        s_sz_key  = PyUnicode_InternFromString("size");
-    }
+    // Static interned key strings (eagerly initialized in init_python_refs)
 
     // Empty Headers object (reused for all files)
     PyRef empty_tuple(PyTuple_New(0));
@@ -439,11 +437,11 @@ PyObject* StreamingMultipartParser::build_kwargs(PyObject* existing_kwargs) cons
             return nullptr;
         }
 
-        PyDict_SetItem(kw.get(), s_fn_key,  fn.get());
-        PyDict_SetItem(kw.get(), s_fl_key,  file_obj);
-        PyDict_SetItem(kw.get(), s_ct_key,  ct.get());
-        PyDict_SetItem(kw.get(), s_hdr_key, headers.get());
-        PyDict_SetItem(kw.get(), s_sz_key,  sz.get());
+        PyDict_SetItem(kw.get(), s_fn_key_,  fn.get());
+        PyDict_SetItem(kw.get(), s_fl_key_,  file_obj);
+        PyDict_SetItem(kw.get(), s_ct_key_,  ct.get());
+        PyDict_SetItem(kw.get(), s_hdr_key_, headers.get());
+        PyDict_SetItem(kw.get(), s_sz_key_,  sz.get());
         Py_DECREF(file_obj);
 
         PyRef uf(PyObject_Call(s_upload_file_cls_, empty_tuple.get(), kw.get()));

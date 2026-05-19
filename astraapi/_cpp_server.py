@@ -33,7 +33,7 @@ from astraapi._websocket import WebSocketDisconnect, WebSocketState
 try:
     from astraapi.routing import _endpoint_id_to_route as _endpoint_id_to_route_map
     from astraapi.background import BackgroundTasks as _BackgroundTasks
-    from astraapi.exceptions import HTTPException as _HTTPException, RequestValidationError as _RequestValidationError
+    from astraapi.exceptions import HTTPException as _HTTPException, RequestValidationError as _RequestValidationError, ResponseValidationError
     from astraapi._concurrency import is_async_callable as _is_async_callable, run_in_threadpool as _run_in_threadpool
 except ImportError:
     _endpoint_id_to_route_map = None  # type: ignore
@@ -49,6 +49,13 @@ try:
 except ImportError:
     _HTMLResponse = None  # type: ignore
     _ResponseClass = None  # type: ignore
+
+# Fix #12: hoist JSON utils for WebSocket + error paths
+try:
+    from astraapi._json_utils import json_dumps as _json_dumps, json_loads as _json_loads
+except ImportError:
+    _json_dumps = None  # type: ignore
+    _json_loads = None  # type: ignore
 
 # Fix #10: hoist Request/Response/JSONResponse for _run_http_middleware
 try:
@@ -865,8 +872,7 @@ class CppWebSocket:
                 return _NOOP
             self._queue_send(opcode, json_bytes)
         else:
-            from astraapi._json_utils import json_dumps
-            payload = json_dumps(data)
+            payload = _json_dumps(data)
             if self._corked:
                 self._cork_buf.append((opcode, payload))
                 return _NOOP
@@ -922,8 +928,7 @@ class CppWebSocket:
                 result = _ws_parse_json(payload)
                 self._last_received_json = result
                 return result
-            from astraapi._json_utils import json_loads
-            result = json_loads(payload)
+            result = _json_loads(payload)
             self._last_received_json = result
             return result
         # bytes
@@ -931,8 +936,7 @@ class CppWebSocket:
             result = _ws_parse_json(payload)
             self._last_received_json = result
             return result
-        from astraapi._json_utils import json_loads
-        result = json_loads(payload)
+        result = _json_loads(payload)
         self._last_received_json = result
         return result
 
@@ -1338,7 +1342,7 @@ async def _run_http_middleware(
     return final
 
 
-async def _write_chunked_streaming(transport: Any, raw: Any) -> None:
+async def _write_chunked_streaming(transport: Any, raw: Any, cors_headers: list | None = None) -> None:
     """Write a StreamingResponse via chunked transfer encoding.
 
     Single implementation shared by all async handlers — eliminates
@@ -1360,6 +1364,14 @@ async def _write_chunked_streaming(transport: Any, raw: Any) -> None:
         if isinstance(hvalue, str):
             hvalue = hvalue.encode("latin-1")
         hdr_parts.append(hname + b": " + hvalue + b"\r\n")
+    # Inject CORS headers for cross-origin streaming responses
+    if cors_headers:
+        for _ck, _cv in cors_headers:
+            if isinstance(_ck, str):
+                _ck = _ck.encode("latin-1")
+            if isinstance(_cv, str):
+                _cv = _cv.encode("latin-1")
+            hdr_parts.append(_ck + b": " + _cv + b"\r\n")
     hdr_parts.append(b"\r\n")
     transport.write(b"".join(hdr_parts))
     body_iter = raw.body_iterator
@@ -1779,14 +1791,16 @@ class CppHttpProtocol(asyncio.Protocol):
                     return  # connection is now WebSocket
 
                 elif tag == "async":
-                    _, coro, first_yield, status_code, keep_alive = result
+                    _rlen = len(result)
+                    _, coro, first_yield, status_code, keep_alive = result[:5]
+                    _origin = result[5] if _rlen > 5 else ""
                     if first_yield is not None:
                         try:
                             first_yield._asyncio_future_blocking = False
                         except AttributeError:
                             pass
                     task = create_task(
-                        self._handle_async(coro, first_yield, status_code, keep_alive))
+                        self._handle_async(coro, first_yield, status_code, keep_alive, _origin))
                     # Fix #12: use cached pt/pt_discard refs — avoids 2 LOAD_ATTR per task
                     if not task.done():
                         pt.add(task)
@@ -1806,22 +1820,26 @@ class CppHttpProtocol(asyncio.Protocol):
                         task.add_done_callback(pt_discard)
 
                 elif tag == "stream":
-                    _, raw_resp, status_code, keep_alive = result
+                    _rlen = len(result)
+                    _, raw_resp, status_code, keep_alive = result[:4]
+                    _origin = result[4] if _rlen > 4 else ""
                     task = create_task(
-                        self._handle_stream(raw_resp, status_code, keep_alive))
+                        self._handle_stream(raw_resp, status_code, keep_alive, _origin))
                     if not task.done():
                         pt.add(task)
                         task.add_done_callback(pt_discard)
 
                 elif tag == "async_di":
-                    _, di_coro, first_yield, endpoint, kwargs, sc, ka = result
+                    _rlen = len(result)
+                    _, di_coro, first_yield, endpoint, kwargs, sc, ka = result[:7]
+                    _origin = result[7] if _rlen > 7 else ""
                     if first_yield is not None:
                         try:
                             first_yield._asyncio_future_blocking = False
                         except AttributeError:
                             pass
                     task = create_task(
-                        self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka))
+                        self._handle_async_di(di_coro, first_yield, endpoint, kwargs, sc, ka, _origin))
                     if not task.done():
                         pt.add(task)
                         task.add_done_callback(pt_discard)
@@ -2047,8 +2065,7 @@ class CppHttpProtocol(asyncio.Protocol):
             return
         _origin = _extract_origin(_current_raw_headers.get())
         _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
-        from astraapi.exceptions import HTTPException, RequestValidationError
-        from astraapi._concurrency import is_async_callable, run_in_threadpool
+        # Module-level hoisted: _HTTPException, _RequestValidationError, _is_async_callable, _run_in_threadpool
         # Walk MRO to find a registered app-level exception handler
         # Use _app_exc_handlers but also fall back to _full_app.exception_handlers
         _handlers = _app_exc_handlers
@@ -2061,20 +2078,19 @@ class CppHttpProtocol(asyncio.Protocol):
             if cls in _handlers:
                 handler = _handlers[cls]
                 break
-        if handler is None and isinstance(exc, HTTPException):
+        if handler is None and isinstance(exc, _HTTPException):
             handler = _app_status_handlers.get(exc.status_code)
         if handler is not None:
             # When raise_server_exceptions=True, store the original exception so
             # TestClient can re-raise it (matches FastAPI/Starlette test behavior)
             # Always store ResponseValidationError (programming error)
-            from astraapi.exceptions import ResponseValidationError as _RVE3
-            if isinstance(exc, _RVE3) or (_raise_server_exceptions and not isinstance(exc, (HTTPException, RequestValidationError))):
+            if isinstance(exc, ResponseValidationError) or (_raise_server_exceptions and not isinstance(exc, (_HTTPException, _RequestValidationError))):
                 _set_last_server_exception(exc)
             try:
-                if is_async_callable(handler):
+                if _is_async_callable(handler):
                     resp = await handler(None, exc)
                 else:
-                    resp = await run_in_threadpool(handler, None, exc)
+                    resp = await _run_in_threadpool(handler, None, exc)
                 if resp is not None and transport and not transport.is_closing():
                     resp_bytes = self._core.build_response_from_any(
                         resp, getattr(resp, 'status_code', 500), keep_alive)
@@ -2086,12 +2102,11 @@ class CppHttpProtocol(asyncio.Protocol):
                 pass
             return
         # Built-in fallbacks
-        if isinstance(exc, HTTPException):
+        if isinstance(exc, _HTTPException):
             detail = exc.detail if isinstance(exc.detail, (dict, list)) else {"detail": exc.detail}
             exc_headers = getattr(exc, 'headers', None)
             if exc_headers:
-                from astraapi._json_utils import json_dumps
-                body = json_dumps(detail)
+                body = _json_dumps(detail)
                 hdrs: list = [(b"content-type", b"application/json")]
                 for k, v in exc_headers.items():
                     hdrs.append((
@@ -2110,7 +2125,7 @@ class CppHttpProtocol(asyncio.Protocol):
                         resp = _inject_headers_into_response(resp, _cors_hdrs)
                     transport.write(resp)
             return
-        if isinstance(exc, RequestValidationError):
+        if isinstance(exc, _RequestValidationError):
             # Add endpoint context if missing
             if not exc.endpoint_function:
                 try:
@@ -2178,8 +2193,7 @@ class CppHttpProtocol(asyncio.Protocol):
             pass
         logger.exception("Unhandled exception in endpoint")
         # Always store ResponseValidationError (programming error, always re-raise)
-        from astraapi.exceptions import ResponseValidationError as _RVE2
-        if isinstance(exc, _RVE2) or _raise_server_exceptions:
+        if isinstance(exc, ResponseValidationError) or _raise_server_exceptions:
             global _last_server_exception
             _last_server_exception = exc
         if _cors_hdrs:
@@ -2190,7 +2204,7 @@ class CppHttpProtocol(asyncio.Protocol):
 
     # ── Async endpoint dispatch ──────────────────────────────────────────
 
-    async def _handle_async(self, coro: Any, first_yield: Any, status_code: int, keep_alive: bool) -> None:
+    async def _handle_async(self, coro: Any, first_yield: Any, status_code: int, keep_alive: bool, _origin: str = "") -> None:
         """Await async endpoint coroutine, serialize + write response.
 
         C++ partially drove the coroutine via PyIter_Send and passed
@@ -2202,7 +2216,6 @@ class CppHttpProtocol(asyncio.Protocol):
             raw = await _drive_coro(coro, first_yield)
             transport = self._transport
             if transport and not transport.is_closing():
-                _origin = _extract_origin(_current_raw_headers.get())
                 _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
                 # OPT-D: plain dict/list fast path — skips full type dispatch
                 _raw_type = type(raw)
@@ -2244,7 +2257,7 @@ class CppHttpProtocol(asyncio.Protocol):
                                 resp = _inject_headers_into_response(resp, _cors_hdrs)
                             transport.write(resp)
                         else:
-                            await _write_chunked_streaming(transport, raw)
+                            await _write_chunked_streaming(transport, raw, _cors_hdrs)
                     _shim_stack = getattr(raw, '__cpp_exit_stack__', None)
                     if _shim_stack is not None:
                         await _shim_stack.aclose()
@@ -2253,7 +2266,7 @@ class CppHttpProtocol(asyncio.Protocol):
         finally:
             self._core.record_request_end()
 
-    async def _handle_stream(self, raw: Any, status_code: int, keep_alive: bool) -> None:
+    async def _handle_stream(self, raw: Any, status_code: int, keep_alive: bool, _origin: str = "") -> None:
         """Handle StreamingResponse/FileResponse returned directly from a fast-path endpoint.
 
         Called when the C++ fast path gets PYGEN_RETURN with an object that needs
@@ -2262,7 +2275,6 @@ class CppHttpProtocol(asyncio.Protocol):
         try:
             transport = self._transport
             if transport and not transport.is_closing():
-                _origin = _extract_origin(_current_raw_headers.get())
                 _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
                 raw_path = getattr(raw, 'path', None)
                 if raw_path is not None and not hasattr(raw, 'body_iterator'):
@@ -2298,12 +2310,7 @@ class CppHttpProtocol(asyncio.Protocol):
                     hdr_parts.append(conn)
                     transport.write(b"".join(hdr_parts) + file_bytes)
                 else:
-                    # StreamingResponse — inject CORS headers into response headers
-                    if _cors_hdrs and hasattr(raw, 'headers'):
-                        for _ck, _cv in _cors_hdrs:
-                            raw.headers[_ck.decode('latin-1') if isinstance(_ck, bytes) else _ck] = \
-                                _cv.decode('latin-1') if isinstance(_cv, bytes) else _cv
-                    await _write_chunked_streaming(transport, raw)
+                    await _write_chunked_streaming(transport, raw, _cors_hdrs)
             background = getattr(raw, 'background', None)
             if background is not None:
                 await background()
@@ -2314,7 +2321,7 @@ class CppHttpProtocol(asyncio.Protocol):
 
     async def _handle_async_di(
         self, di_coro: Any, first_yield: Any, endpoint: Any, kwargs: dict,
-        status_code: int, keep_alive: bool
+        status_code: int, keep_alive: bool, _origin: str = ""
     ) -> None:
         """Complete async DI resolution, then call endpoint + write response.
 
@@ -2336,6 +2343,7 @@ class CppHttpProtocol(asyncio.Protocol):
             # SolvedDependency namedtuple: (values, errors, background_tasks, response, dep_cache)
             di_bg_tasks = None
             _di_extra_headers: list = []
+            _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
             if isinstance(solved, tuple) and len(solved) >= 2:
                 values, errors = solved[0], solved[1]
                 # Extract background_tasks (index 2) accumulated during DI resolution.
@@ -2429,16 +2437,16 @@ class CppHttpProtocol(asyncio.Protocol):
                 transport = self._transport
                 if transport and not transport.is_closing():
                     _rh = _kwargs.get('__raw_headers__') or _current_raw_headers.get()
-                    _origin = _extract_origin(_rh if isinstance(_rh, list) else None)
-                    _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
+                    _ep_origin = _extract_origin(_rh if isinstance(_rh, list) else None) or _origin
+                    _cors_hdrs_ep = _get_cors_headers_for_origin(_ep_origin, _orig_app) if _orig_app and _ep_origin else []
                     _mw_already_ran = getattr(_raw, '__middleware_ran__', False)
                     if _http_middleware_dispatchers and not _mw_already_ran:
                         _mw_hdrs = _kwargs.get('__raw_headers__') or _current_raw_headers.get()
                         _mw_method = _kwargs.get('__method__', '') or _current_method.get() or 'GET'
                         _mw_path = _kwargs.get('__path__', '') or _current_path.get() or '/'
                         _mw_extra = list(_di_extra_headers)
-                        if _cors_hdrs:
-                            _mw_extra.extend(_cors_hdrs)
+                        if _cors_hdrs_ep:
+                            _mw_extra.extend(_cors_hdrs_ep)
                         _raw = await _run_http_middleware(
                             _raw, _http_middleware_dispatchers,
                             _mw_extra, status_code, keep_alive,
@@ -2455,20 +2463,20 @@ class CppHttpProtocol(asyncio.Protocol):
                                      v.decode("latin-1") if isinstance(v, bytes) else v)
                                     for k, v in _di_extra_headers
                                 ]
-                                if _cors_hdrs:
+                                if _cors_hdrs_ep:
                                     _merged.extend([
                                         (k.decode("latin-1") if isinstance(k, bytes) else k,
                                          v.decode("latin-1") if isinstance(v, bytes) else v)
-                                        for k, v in _cors_hdrs
+                                        for k, v in _cors_hdrs_ep
                                     ])
                                 transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
                             else:
-                                if _cors_hdrs and _encode_to_json_bytes is not None:
+                                if _cors_hdrs_ep and _encode_to_json_bytes is not None:
                                     _body = _encode_to_json_bytes(_raw)
                                     _merged = [("content-type", "application/json")] + [
                                         (k.decode("latin-1") if isinstance(k, bytes) else k,
                                          v.decode("latin-1") if isinstance(v, bytes) else v)
-                                        for k, v in _cors_hdrs
+                                        for k, v in _cors_hdrs_ep
                                     ]
                                     transport.write(_build_response_from_parts(status_code, _merged, _body, keep_alive))
                                 else:
@@ -2477,13 +2485,13 @@ class CppHttpProtocol(asyncio.Protocol):
                             resp = self._core.build_response_from_any(_raw, status_code, keep_alive)
                             if resp is not None:
                                 _all_extra = list(_di_extra_headers)
-                                if _cors_hdrs:
-                                    _all_extra.extend(_cors_hdrs)
+                                if _cors_hdrs_ep:
+                                    _all_extra.extend(_cors_hdrs_ep)
                                 if _all_extra:
                                     resp = _inject_headers_into_response(resp, _all_extra)
                                 transport.write(resp)
                             else:
-                                await _write_chunked_streaming(transport, _raw)
+                                await _write_chunked_streaming(transport, _raw, _cors_hdrs_ep)
                     _shim_bg = getattr(_raw, '__cpp_bg_tasks__', None)
                     if _shim_bg is not None and getattr(_shim_bg, 'tasks', None):
                         await _shim_bg()
@@ -2606,7 +2614,7 @@ class CppHttpProtocol(asyncio.Protocol):
                             resp = _inject_headers_into_response(resp, _cors_hdrs)
                         transport.write(resp)
                     else:
-                        await _write_chunked_streaming(transport, raw)
+                        await _write_chunked_streaming(transport, raw, _cors_hdrs)
                     # BackgroundTasks support
                     background = getattr(raw, 'background', None)
                     if background is not None:
@@ -2723,24 +2731,22 @@ class CppHttpProtocol(asyncio.Protocol):
                 for _cls in type(exc).__mro__:
                     if _cls in _handlers:
                         _h = _handlers[_cls]
-                        from astraapi._concurrency import is_async_callable, run_in_threadpool
-                        if is_async_callable(_h):
+                        if _is_async_callable(_h):
                             await _h(ws, exc)
                         else:
-                            await run_in_threadpool(_h, ws, exc)
+                            await _run_in_threadpool(_h, ws, exc)
                         _handled = True
                         break
             except Exception:
                 pass
             if not _handled:
                 # Store non-HTTP/non-WebSocket exceptions so TestClient can re-raise them
-                from astraapi.exceptions import HTTPException, RequestValidationError
                 try:
                     from astraapi.exceptions import WebSocketException as _WSExc
                     _is_ws_exc = isinstance(exc, _WSExc)
                 except ImportError:
                     _is_ws_exc = False
-                if not isinstance(exc, (HTTPException, RequestValidationError)) and not _is_ws_exc:
+                if not isinstance(exc, (_HTTPException, _RequestValidationError)) and not _is_ws_exc:
                     _set_last_server_exception(exc)
                 logger.error("Unhandled exception in WebSocket endpoint", exc_info=True)
         finally:

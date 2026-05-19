@@ -65,6 +65,11 @@ private:
     static PyObject* s_upload_file_cls_;
     static PyObject* s_headers_cls_;
     static PyObject* s_seek_str_;
+    static PyObject* s_fn_key_;
+    static PyObject* s_fl_key_;
+    static PyObject* s_ct_key_;
+    static PyObject* s_hdr_key_;
+    static PyObject* s_sz_key_;
     static bool      s_initialized_;
     static bool init_python_refs();
 };

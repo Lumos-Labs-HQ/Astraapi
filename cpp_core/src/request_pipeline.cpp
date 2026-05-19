@@ -1,10 +1,12 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "asgi_constants.hpp"
+#include "compat.hpp"
 #include "json_parser.hpp"
 #include "pyref.hpp"
 #include <cstring>
 #include <string>
+#include <vector>
 
 // Forward declarations from utils.cpp
 extern PyObject* py_parse_query_string(PyObject* self, PyObject* args);
@@ -49,7 +51,7 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
 
     bool is_json = false;
 
-    if (raw_headers && PyList_Check(raw_headers)) {
+    if (LIKELY(raw_headers && PyList_Check(raw_headers))) {
         Py_ssize_t nheaders = PyList_GET_SIZE(raw_headers);
         for (Py_ssize_t i = 0; i < nheaders; i++) {
             PyObject* item = PyList_GET_ITEM(raw_headers, i);
@@ -71,19 +73,22 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
             if (PyBytes_AsStringAndSize(name_obj, &name_data, &name_len) < 0) { PyErr_Clear(); continue; }
             if (PyBytes_AsStringAndSize(value_obj, &val_data, &val_len) < 0) { PyErr_Clear(); continue; }
 
-            // Normalize header name
-            std::string norm(name_data, name_len);
-            for (auto& c : norm) {
+            // Normalize header name in-place (stack buffer for typical sizes)
+            char stack_buf[256];
+            char* norm_buf = (name_len < 256) ? stack_buf : new char[name_len];
+            for (Py_ssize_t j = 0; j < name_len; j++) {
+                char c = name_data[j];
                 if (c >= 'A' && c <= 'Z') c += 32;
                 if (convert_underscores && c == '-') c = '_';
+                norm_buf[j] = c;
             }
-
-            PyRef hkey(PyUnicode_FromStringAndSize(norm.c_str(), norm.size()));
+            PyRef hkey(PyUnicode_FromStringAndSize(norm_buf, name_len));
+            if (name_len >= 256) delete[] norm_buf;
             PyRef hval(PyUnicode_FromStringAndSize(val_data, val_len));
             if (!hkey || !hval) return nullptr;
             PyDict_SetItem(headers_dict.get(), hkey.get(), hval.get());
 
-            // Cookie parsing
+            // Cookie parsing — zero-alloc: build PyUnicode directly from raw positions
             if (name_len == 6 && memcmp(name_data, "cookie", 6) == 0) {
                 const char* cp = val_data;
                 const char* cend = val_data + val_len;
@@ -92,22 +97,32 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
                     const char* ck_s = cp;
                     while (cp < cend && *cp != '=') cp++;
                     if (cp >= cend) break;
-                    std::string ck(ck_s, cp - ck_s);
+                    const char* ck_e = cp;
                     cp++;
                     const char* cv_s = cp;
                     while (cp < cend && *cp != ';') cp++;
-                    std::string cv(cv_s, cp - cv_s);
-                    PyRef ckey(PyUnicode_FromStringAndSize(ck.c_str(), ck.size()));
-                    PyRef cval(PyUnicode_FromStringAndSize(cv.c_str(), cv.size()));
+                    const char* cv_e = cp;
+                    PyRef ckey(PyUnicode_FromStringAndSize(ck_s, ck_e - ck_s));
+                    PyRef cval(PyUnicode_FromStringAndSize(cv_s, cv_e - cv_s));
                     if (ckey && cval) PyDict_SetItem(cookies_dict.get(), ckey.get(), cval.get());
                 }
             }
 
-            // Check content-type for JSON
+            // Check content-type for JSON — raw comparison without std::string allocation
             if (name_len == 12 && memcmp(name_data, "content-type", 12) == 0) {
-                std::string ct_lower(val_data, val_len);
-                for (auto& c : ct_lower) if (c >= 'A' && c <= 'Z') c += 32;
-                if (ct_lower.find("json") != std::string::npos) is_json = true;
+                for (Py_ssize_t j = 0; j < val_len - 3; j++) {
+                    char c0 = val_data[j];
+                    char c1 = val_data[j+1];
+                    char c2 = val_data[j+2];
+                    char c3 = val_data[j+3];
+                    if (c0 >= 'A' && c0 <= 'Z') c0 += 32;
+                    if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
+                    if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+                    if (c3 >= 'A' && c3 <= 'Z') c3 += 32;
+                    if (c0 == 'j' && c1 == 's' && c2 == 'o' && c3 == 'n') {
+                        is_json = true; break;
+                    }
+                }
             }
         }
     }

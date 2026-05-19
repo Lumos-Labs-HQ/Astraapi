@@ -79,6 +79,7 @@ extern PyObject* py_parse_cookie_header(PyObject* self, PyObject* arg);
 
 // json_encoder.cpp
 extern PyObject* py_fast_jsonable_encode(PyObject* self, PyObject* arg);
+extern void ensure_types_initialized();
 
 // dependency_resolver.cpp
 extern PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg);
@@ -286,6 +287,9 @@ PyMODINIT_FUNC PyInit__astraapi_core(void) {
 
     // Pre-initialize JSON writer special type caches
     json_writer_init();
+
+    // Pre-initialize JSON encoder special type caches
+    ensure_types_initialized();
 
     // Pre-build cached HTTP status lines and JSON response prefixes
     init_status_line_cache();

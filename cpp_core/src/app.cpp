@@ -451,6 +451,8 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     }
 
     // Pre-intern body parsing keyword strings
+    if (!s_body_key) s_body_key = PyUnicode_InternFromString("__body__");
+    if (!s_ct_key) s_ct_key = PyUnicode_InternFromString("__content_type__");
     if (!s_kw_body_fields) s_kw_body_fields = PyUnicode_InternFromString("body_fields");
     if (!s_kw_received_body) s_kw_received_body = PyUnicode_InternFromString("received_body");
     if (!s_kw_embed) s_kw_embed = PyUnicode_InternFromString("embed_body_fields");
@@ -3797,7 +3799,6 @@ static PyObject* dispatch_one_request(
         if (req.body.len > 0) {
             PyRef body_bytes(PyBytes_FromStringAndSize(req.body.data, (Py_ssize_t)req.body.len));
             if (body_bytes) {
-                if (!s_body_key) s_body_key = PyUnicode_InternFromString("__body__");
                 PyDict_SetItem(kwargs.get(), s_body_key, body_bytes.get());
             }
         }
@@ -3807,7 +3808,6 @@ static PyObject* dispatch_one_request(
                 strncasecmp(req.headers[hi].name.data, "content-type", 12) == 0) {
                 PyRef ct(PyUnicode_FromStringAndSize(req.headers[hi].value.data, (Py_ssize_t)req.headers[hi].value.len));
                 if (ct) {
-                    if (!s_ct_key) s_ct_key = PyUnicode_InternFromString("__content_type__");
                     PyDict_SetItem(kwargs.get(), s_ct_key, ct.get());
                 }
                 break;
@@ -4698,9 +4698,13 @@ static PyObject* dispatch_one_request(
 
                     PyObject* ka = req.keep_alive ? Py_True : Py_False;
                     Py_INCREF(ka);
-                    PyRef di_info(PyTuple_Pack(7, s_async_di_tag, dep_call_result.release(),
+                    PyRef origin_py(origin_sv.len > 0
+                        ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
+                        : PyUnicode_FromString(""));
+                    PyRef di_info(PyTuple_Pack(8, s_async_di_tag, dep_call_result.release(),
                                  dep_raw, endpoint_local, kwargs.release(),
-                                 get_cached_status(status_code_local), ka));
+                                 get_cached_status(status_code_local), ka,
+                                 origin_py ? origin_py.get() : Py_None));
                     Py_XDECREF(dep_raw);
                     return make_consumed_obj(self, req.total_consumed, di_info.release());
                 } else {
@@ -5472,8 +5476,12 @@ body_done:
         // Python will call record_request_end() when done, so do NOT decrement here.
         if (s_attr_body_iterator && PyObject_HasAttr(raw_result, s_attr_body_iterator)) {
             PyObject* ka = req.keep_alive ? Py_True : Py_False;
-            PyRef stream_info(PyTuple_Pack(4, s_stream_tag, raw_result,
-                                           get_cached_status(status_code_local), ka));
+            PyRef origin_py(origin_sv.len > 0
+                ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
+                : PyUnicode_FromString(""));
+            PyRef stream_info(PyTuple_Pack(5, s_stream_tag, raw_result,
+                                           get_cached_status(status_code_local), ka,
+                                           origin_py ? origin_py.get() : Py_None));
             if (stream_info) {
                 Py_DECREF(raw_result);  // PyTuple_Pack holds its own ref; release ours
                 return make_consumed_obj(self, req.total_consumed, stream_info.release());
@@ -5488,8 +5496,12 @@ body_done:
             PyRef path_attr(PyObject_GetAttr(raw_result, s_attr_path));
             if (path_attr && PyUnicode_Check(path_attr.get())) {
                 PyObject* ka = req.keep_alive ? Py_True : Py_False;
-                PyRef stream_info(PyTuple_Pack(4, s_stream_tag, raw_result,
-                                               get_cached_status(status_code_local), ka));
+                PyRef origin_py(origin_sv.len > 0
+                    ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
+                    : PyUnicode_FromString(""));
+                PyRef stream_info(PyTuple_Pack(5, s_stream_tag, raw_result,
+                                               get_cached_status(status_code_local), ka,
+                                               origin_py ? origin_py.get() : Py_None));
                 if (stream_info) {
                     Py_DECREF(raw_result);
                     return make_consumed_obj(self, req.total_consumed, stream_info.release());
@@ -5786,8 +5798,12 @@ body_done:
 
         PyObject* ka = req.keep_alive ? Py_True : Py_False;
         Py_INCREF(ka);
-        PyRef async_info(PyTuple_Pack(5, s_async_tag, coro.release(),
-                         raw_result, get_cached_status(status_code_local), ka));
+        PyRef origin_py(origin_sv.len > 0
+            ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
+            : PyUnicode_FromString(""));
+        PyRef async_info(PyTuple_Pack(6, s_async_tag, coro.release(),
+                         raw_result, get_cached_status(status_code_local), ka,
+                         origin_py ? origin_py.get() : Py_None));
         Py_XDECREF(raw_result);
         return make_consumed_obj(self, req.total_consumed, async_info.release());
     }

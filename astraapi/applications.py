@@ -1212,6 +1212,9 @@ class AstraAPI(AppBase):
     @staticmethod
     def _make_response_model_shim(route: Any) -> Callable[..., Any]:
         """Wrap a fast-path endpoint to apply response model serialization."""
+        from astraapi._response import Response as _Response
+        from astraapi.exceptions import ResponseValidationError
+        from astraapi._cpp_server import _set_last_server_exception
         original_endpoint = route.endpoint
         response_field = route.response_field
         response_model_include = route.response_model_include
@@ -1227,16 +1230,13 @@ class AstraAPI(AppBase):
                 raw = await original_endpoint(**kwargs)
             else:
                 raw = original_endpoint(**kwargs)
-            from astraapi._response import Response as _Response
             if isinstance(raw, _Response):
                 return raw
             value, errors = response_field.validate(raw, {}, loc=("response",))
             if errors:
-                from astraapi.exceptions import ResponseValidationError
                 exc = ResponseValidationError(errors=errors, body=raw)
                 # Store for re-raise in TestClient._check_exc
                 try:
-                    from astraapi._cpp_server import _set_last_server_exception
                     _set_last_server_exception(exc)
                 except Exception:
                     pass
@@ -1252,7 +1252,6 @@ class AstraAPI(AppBase):
                     exclude_none=response_model_exclude_none,
                 )
             except (TypeError, AttributeError) as _ser_exc:
-                from astraapi.exceptions import ResponseValidationError
                 _rve = ResponseValidationError(
                     errors=[{
                         "type": "response_serialization_error",
@@ -1263,7 +1262,6 @@ class AstraAPI(AppBase):
                     body=raw,
                 )
                 try:
-                    from astraapi._cpp_server import _set_last_server_exception
                     _set_last_server_exception(_rve)
                 except Exception:
                     pass
@@ -1275,6 +1273,9 @@ class AstraAPI(AppBase):
     @staticmethod
     def _make_param_validation_shim(route: Any) -> Callable[..., Any]:
         """Wrap a fast-path endpoint to validate/coerce path and query params."""
+        from astraapi.exceptions import RequestValidationError
+        from astraapi.routing import _make_lightweight_request as _mlr
+        import inspect as _insp
         original_endpoint = route.endpoint
         _is_async = inspect.iscoroutinefunction(original_endpoint)
         # Use _make_param_validator which handles model-based params correctly
@@ -1294,7 +1295,6 @@ class AstraAPI(AppBase):
             _values, _errors = _result[0], _result[1]
             _consumed = _result[2] if len(_result) > 2 else set()
             if _errors:
-                from astraapi.exceptions import RequestValidationError
                 # Extract body from kwargs for exc.body
                 _body = None
                 try:
@@ -1311,9 +1311,7 @@ class AstraAPI(AppBase):
                 if _exc_handlers:
                     for _exc_cls, _exc_handler in _exc_handlers.items():
                         if isinstance(_rve, _exc_cls):
-                            from astraapi.routing import _make_lightweight_request as _mlr
                             _req = _mlr(None, 'GET', '/', route)
-                            import inspect as _insp
                             _hr = _exc_handler(_req, _rve)
                             if _insp.isawaitable(_hr):
                                 _hr = await _hr
@@ -1332,9 +1330,7 @@ class AstraAPI(AppBase):
                 if _exc_handlers:
                     for _exc_cls, _exc_handler in _exc_handlers.items():
                         if isinstance(_exc, _exc_cls):
-                            from astraapi.routing import _make_lightweight_request as _mlr
                             _req = _mlr(None, 'GET', '/', route)
-                            import inspect as _insp
                             _hr = _exc_handler(_req, _exc)
                             if _insp.isawaitable(_hr):
                                 _hr = await _hr
@@ -1347,21 +1343,24 @@ class AstraAPI(AppBase):
     @staticmethod
     def _make_asgi_route_shim(route: Any) -> Callable[..., Any]:
         """Shim for custom APIRoute subclasses: calls route.app (ASGI) and returns Response."""
+        from astraapi._cpp_server import (
+            _current_raw_headers as _crh, _current_method as _cm,
+            _current_path as _cp, _current_query_string as _cqs,
+            _current_body as _cb,
+        )
+        from astraapi.routing import _make_lightweight_request
+        from astraapi.exceptions import HTTPException as _HTTPExc
+        from astraapi._response import JSONResponse as _JR, Response as _Resp
+        from contextlib import AsyncExitStack as _AES
         _asgi_app = route.app
 
         async def _asgi_shim(**kwargs: Any) -> Any:
-            from astraapi._cpp_server import (
-                _current_raw_headers as _crh, _current_method as _cm,
-                _current_path as _cp, _current_query_string as _cqs,
-            )
-            from astraapi.routing import _make_lightweight_request
             _raw_headers = kwargs.pop('__raw_headers__', None) or _crh.get() or []
             _method = kwargs.pop('__method__', None) or _cm.get() or 'GET'
             _path = kwargs.pop('__path__', None) or _cp.get() or '/'
             # Prefer __body__ injected by C++ dep_solver path (avoids ContextVar race)
             _body = kwargs.pop('__body__', None)
             if _body is None:
-                from astraapi._cpp_server import _current_body as _cb
                 _body = _cb.get() if hasattr(_cb, 'get') else b''
 
             kwargs.pop('__auth_scheme__', None); kwargs.pop('__auth_credentials__', None)
@@ -1373,7 +1372,6 @@ class AstraAPI(AppBase):
             _req.scope['_body'] = _body or b''
             _req.scope['query_string'] = _qs if isinstance(_qs, bytes) else (_qs.encode() if _qs else b'')
             # Add required AsyncExitStack entries to scope
-            from contextlib import AsyncExitStack as _AES
             _req.scope['astraapi_middleware_astack'] = _AES()
             _req.scope['astraapi_inner_astack'] = _AES()
             _req.scope['astraapi_function_astack'] = _AES()
@@ -1398,8 +1396,6 @@ class AstraAPI(AppBase):
             try:
                 await _asgi_app(_req.scope, _receive, _send)
             except Exception as _exc:
-                from astraapi.exceptions import HTTPException as _HTTPExc
-                from astraapi._response import JSONResponse as _JR
                 if isinstance(_exc, _HTTPExc):
                     _det = _exc.detail
                     _hdrs = getattr(_exc, 'headers', None) or {}
@@ -1408,7 +1404,6 @@ class AstraAPI(AppBase):
                         _er.headers[_k] = _v
                     return _er
                 raise
-            from astraapi._response import Response as _Resp
             _r = _Resp(content=_resp_body[0], status_code=_resp_status[0])
             for _hn, _hv in _resp_headers[0]:
                 _hn_s = _hn.decode('latin-1') if isinstance(_hn, bytes) else _hn
@@ -1441,6 +1436,20 @@ class AstraAPI(AppBase):
             FileResponse as _FileResponse,
             RedirectResponse as _RedirectResponse,
         )
+        from astraapi.responses import JSONResponse as _JSONResponse
+        from astraapi.background import BackgroundTasks as _BackgroundTasksCls
+        from astraapi.routing import _make_lightweight_request as _make_lwr
+        from astraapi._cpp_server import (
+            _current_raw_headers as _crh_cv,
+            _current_method as _cm_cv,
+            _current_path as _cp_cv,
+            _current_body as _cb_cv,
+        )
+        from astraapi.dependencies.utils import request_body_to_args as _rbta_fn
+        from astraapi.exceptions import AstraAPIError as _FAE, HTTPException as _HE, RequestValidationError as _RVE
+        import astraapi._cpp_server as _srv_exc
+        import inspect as _inspect_mod
+        import json as _json_mod
 
         original_endpoint = route.endpoint
         _response_field = getattr(route, "response_field", None)
@@ -1535,8 +1544,7 @@ class AstraAPI(AppBase):
                 _pv_values, _pv_errors = _pv_result[0], _pv_result[1]
                 _pv_consumed = _pv_result[2] if len(_pv_result) > 2 else set()
                 if _pv_errors:
-                    from astraapi.responses import JSONResponse
-                    return JSONResponse({"detail": _pv_errors}, status_code=422)
+                    return _JSONResponse({"detail": _pv_errors}, status_code=422)
                 for _k in _pv_consumed:
                     kwargs.pop(_k, None)
                 kwargs.update(_pv_values)
@@ -1547,18 +1555,15 @@ class AstraAPI(AppBase):
                     except (ValueError, TypeError): pass
             _bg = None
             if _bg_param:
-                from astraapi.background import BackgroundTasks as _BackgroundTasks
-                _bg = _BackgroundTasks()
+                _bg = _BackgroundTasksCls()
                 kwargs[_bg_param] = _bg
             # Inject Request/HTTPConnection if endpoint needs it
             if _req_param or _http_conn_param:
-                from astraapi.routing import _make_lightweight_request
-                from astraapi._cpp_server import _current_raw_headers as _crh, _current_method as _cm, _current_path as _cp
-                _rh = kwargs.pop('__raw_headers__', None) or _crh.get()
-                _meth = kwargs.pop('__method__', None) or _cm.get() or 'GET'
-                _pth = kwargs.pop('__path__', None) or _cp.get() or '/'
+                _rh = kwargs.pop('__raw_headers__', None) or _crh_cv.get()
+                _meth = kwargs.pop('__method__', None) or _cm_cv.get() or 'GET'
+                _pth = kwargs.pop('__path__', None) or _cp_cv.get() or '/'
                 _app_ref = getattr(route, 'dependency_overrides_provider', None)
-                _req_obj = _make_lightweight_request(_rh, _meth, _pth, app=_app_ref, _shim_route=route)
+                _req_obj = _make_lwr(_rh, _meth, _pth, app=_app_ref, _shim_route=route)
                 if _req_param:
                     kwargs[_req_param] = _req_obj
                 if _http_conn_param:
@@ -1568,8 +1573,7 @@ class AstraAPI(AppBase):
             # Inject Response if endpoint needs it
             _sub_resp = None
             if _resp_param_name:
-                from astraapi._response import Response as _Resp
-                _sub_resp = _Resp()
+                _sub_resp = _Response()
                 kwargs[_resp_param_name] = _sub_resp
             # Collect sub_response from C++ dep_solver result (headers set by deps)
             _cpp_sub_resp = kwargs.pop('__sub_response__', None)
@@ -1581,10 +1585,9 @@ class AstraAPI(AppBase):
                         _sub_resp.headers[_k] = _v
             # Collect Response objects injected by deps (when C++ already ran dep_solver)
             if _dep_resp_param_names:
-                from astraapi._response import Response as _Resp
                 for _drp in _dep_resp_param_names:
                     _dep_resp_obj = kwargs.get(_drp)
-                    if isinstance(_dep_resp_obj, _Resp):
+                    if isinstance(_dep_resp_obj, _Response):
                         if _sub_resp is None:
                             _sub_resp = _dep_resp_obj
                         else:
@@ -1616,17 +1619,15 @@ class AstraAPI(AppBase):
                 else:
                     _shim_bg_tasks.tasks.extend(_cpp_bg.tasks)
             elif _dep_solver is not None and not kwargs.get('__gen_deps_ran__'):
-                import inspect as _inspect
                 # Share endpoint's BackgroundTasks with deps
                 if _shim_bg_tasks is not None and '__bg_tasks__' not in kwargs:
                     kwargs['__bg_tasks__'] = _shim_bg_tasks
                 _dep_coro = _dep_solver(kwargs)
-                _dep_result = (await _dep_coro) if _inspect.isawaitable(_dep_coro) else _dep_coro
+                _dep_result = (await _dep_coro) if _inspect_mod.isawaitable(_dep_coro) else _dep_coro
                 if isinstance(_dep_result, tuple) and len(_dep_result) >= 2:
                     _dep_injected, _dep_errors = _dep_result[0], _dep_result[1]
                     if _dep_errors:
-                        from astraapi._response import JSONResponse as _JR
-                        return _JR({"detail": list(_dep_errors)}, status_code=422)
+                        return _JSONResponse({"detail": list(_dep_errors)}, status_code=422)
                     if _dep_injected:
                         kwargs.update(_dep_injected)
                     kwargs.pop('__bg_tasks__', None)  # internal key, not an endpoint param
@@ -1657,21 +1658,17 @@ class AstraAPI(AppBase):
             # Parse body for non-fast-path routes with body params (e.g. alias/validation_alias, GET+body)
             if _body_params_shim:
                 try:
-                    import json as _json
                     _body_to_parse = _raw_body
                     if not _body_to_parse:
                         # Fall back to ContextVar (e.g. GET requests where C++ skips body)
                         try:
-                            from astraapi._cpp_server import _current_body as _cb
-                            _body_to_parse = _cb.get() or b''
+                            _body_to_parse = _cb_cv.get() or b''
                         except Exception:
                             _body_to_parse = b''
-                    _parsed_body = _json.loads(_body_to_parse) if _body_to_parse else None
-                    from astraapi.dependencies.utils import request_body_to_args as _rbta
-                    _bvals, _berrs = await _rbta(_body_params_shim, _parsed_body, _embed_body_shim)
+                    _parsed_body = _json_mod.loads(_body_to_parse) if _body_to_parse else None
+                    _bvals, _berrs = await _rbta_fn(_body_params_shim, _parsed_body, _embed_body_shim)
                     if _berrs:
-                        from astraapi.responses import JSONResponse
-                        return JSONResponse({"detail": _berrs}, status_code=422)
+                        return _JSONResponse({"detail": _berrs}, status_code=422)
                     kwargs.update(_bvals)
                 except (ValueError, TypeError):
                     pass
@@ -1732,7 +1729,6 @@ class AstraAPI(AppBase):
                 except Exception as _exc:
                     _suppressed = await _exit_stack_on_error(_exc)
                     if _suppressed:
-                        from astraapi.exceptions import AstraAPIError as _FAE
                         raise _FAE(
                             "Response not awaited. There's a high chance that the "
                             "application code is raising an exception and a dependency with yield "
@@ -1744,20 +1740,15 @@ class AstraAPI(AppBase):
                             if isinstance(_exc, _exc_cls):
                                 # Store exception for raise_server_exceptions=True
                                 # (non-HTTP exceptions should propagate in test mode)
-                                from astraapi.exceptions import HTTPException as _HE
-                                from astraapi.exceptions import RequestValidationError as _RVE
                                 if not isinstance(_exc, (_HE, _RVE)):
                                     try:
-                                        import astraapi._cpp_server as _srv_exc
                                         if _srv_exc._raise_server_exceptions:
                                             _srv_exc._set_last_server_exception(_exc)
                                     except Exception:
                                         pass
-                                from astraapi.routing import _make_lightweight_request as _mlr
-                                _req = _mlr(None, 'GET', '/', route)
-                                import inspect as _insp
+                                _req = _make_lwr(None, 'GET', '/', route)
                                 _hr = _exc_handler(_req, _exc)
-                                if _insp.isawaitable(_hr):
+                                if _inspect_mod.isawaitable(_hr):
                                     _hr = await _hr
                                 return _hr
                     raise
@@ -1766,17 +1757,13 @@ class AstraAPI(AppBase):
 
             # Apply HTTP middleware (e.g. GZipMiddleware) if registered
             try:
-                import astraapi._cpp_server as _mw_srv
-                _mw_dispatchers = _mw_srv._http_middleware_dispatchers
+                _mw_dispatchers = _srv_exc._http_middleware_dispatchers
                 if _mw_dispatchers:
-                    from astraapi._cpp_server import _current_raw_headers as _mw_crh, _current_method as _mw_cm, _current_path as _mw_cp
-                    from astraapi.routing import _make_lightweight_request as _mw_mlr
-                    _mw_req = _mw_mlr(_mw_crh.get(), _mw_cm.get() or 'GET', _mw_cp.get() or '/')
+                    _mw_req = _make_lwr(_crh_cv.get(), _cm_cv.get() or 'GET', _cp_cv.get() or '/')
                     # Wrap non-Response results in JSONResponse for middleware
                     _raw_type = type(result)
                     if not isinstance(result, _Response):
-                        from astraapi.responses import JSONResponse as _JR
-                        _mw_resp = _JR(content=result, status_code=status_code or 200)
+                        _mw_resp = _JSONResponse(content=result, status_code=status_code or 200)
                     else:
                         _mw_resp = result
                     for _mw_fn in reversed(_mw_dispatchers):
@@ -1805,8 +1792,7 @@ class AstraAPI(AppBase):
                         media_type=result.media_type,
                     )
                 except OSError as exc:
-                    from astraapi import HTTPException
-                    raise HTTPException(status_code=404, detail="File not found") from exc
+                    raise _HE(status_code=404, detail="File not found") from exc
 
             elif isinstance(result, _StreamingResponse):
                 # Collect iterator into bytes and return as plain Response.
@@ -1853,13 +1839,13 @@ class AstraAPI(AppBase):
                 if _response_field is not None:
                     _val, _errs = _response_field.validate(result, {}, loc=("response",))
                     if _errs:
-                        from astraapi.exceptions import ResponseValidationError as _RVE
+                        from astraapi.exceptions import ResponseValidationError as _ResVE
                         from astraapi.routing import _extract_endpoint_context
                         _rve_ctx = _extract_endpoint_context(original_endpoint)
                         _dep = getattr(route, 'dependant', None)
                         if _dep and getattr(_dep, 'path', None):
                             _rve_ctx['path'] = f"GET {_dep.path}"
-                        _rve = _RVE(errors=_errs, body=result, endpoint_ctx=_rve_ctx)
+                        _rve = _ResVE(errors=_errs, body=result, endpoint_ctx=_rve_ctx)
                         try:
                             from astraapi._cpp_server import _set_last_server_exception as _slse
                             _slse(_rve)
@@ -1877,13 +1863,13 @@ class AstraAPI(AppBase):
                             exclude_none=_rm_exclude_none,
                         )
                     except (TypeError, AttributeError) as _ser_exc:
-                        from astraapi.exceptions import ResponseValidationError as _RVE
+                        from astraapi.exceptions import ResponseValidationError as _ResVE
                         from astraapi.routing import _extract_endpoint_context
                         _rve_ctx = _extract_endpoint_context(original_endpoint)
                         _dep = getattr(route, 'dependant', None)
                         if _dep and getattr(_dep, 'path', None):
                             _rve_ctx['path'] = f"GET {_dep.path}"
-                        _rve = _RVE(
+                        _rve = _ResVE(
                             errors=[{
                                 "type": "response_serialization_error",
                                 "loc": ("response",),
@@ -1918,8 +1904,7 @@ class AstraAPI(AppBase):
                             media_type=None,
                         )
                     except OSError as exc:
-                        from astraapi import HTTPException
-                        raise HTTPException(status_code=404, detail="File not found") from exc
+                        raise _HE(status_code=404, detail="File not found") from exc
                 else:
                     _final = actual_rc(content=result, status_code=status_code)
 
@@ -2097,7 +2082,6 @@ class AstraAPI(AppBase):
                     if kwargs.get(_fname) is None:
                         _missing.append(_falias)
             if _missing:
-                from astraapi.responses import JSONResponse
                 _errs = [{'type': 'missing', 'loc': ('body', p), 'msg': 'Field required', 'input': None} for p in _missing]
                 return JSONResponse({"detail": _errs}, status_code=422)
             # Inject defaults for optional params not in kwargs
@@ -2243,6 +2227,10 @@ class AstraAPI(AppBase):
 
         from astraapi.routing import APIRoute, APIWebSocketRoute, _make_dep_solver
         from astraapi import params as _astraapi_params
+        from astraapi.responses import JSONResponse as _JSONResponse
+        from astraapi.dependencies.utils import request_body_to_args as _rbta_fn
+        from astraapi.dependencies.utils import get_validation_alias as _gva_fn
+        import json as _json_mod
 
         # Check if any non-BaseHTTPMiddleware middleware is registered (e.g. GZipMiddleware)
         # If so, force all routes through _response_shim to apply middleware
@@ -2320,8 +2308,7 @@ class AstraAPI(AppBase):
                                        getattr(_flat_dep, "cookie_params", [])):
                             for _pf in _plist:
                                 _known.add(_pf.name)
-                                from astraapi.dependencies.utils import get_validation_alias as _gva
-                                _known.add(_gva(_pf))
+                                _known.add(_gva_fn(_pf))
                         _method_params[_mm] = _known
                     _INTERNAL = frozenset({"__method__", "__raw_headers__", "__path__",
                                            "__auth_scheme__", "__auth_credentials__",
@@ -2330,8 +2317,7 @@ class AstraAPI(AppBase):
                         _m = kwargs.get("__method__", "GET").upper()
                         _shim = _smap.get(_m)
                         if _shim is None:
-                            from astraapi.responses import JSONResponse
-                            return JSONResponse({"detail": "Method Not Allowed"}, status_code=405)
+                            return _JSONResponse({"detail": "Method Not Allowed"}, status_code=405)
                         # Filter out query params from other methods in the group
                         _known_for_method = _method_params.get(_m, set())
                         kwargs = {k: v for k, v in kwargs.items()
@@ -2344,15 +2330,12 @@ class AstraAPI(AppBase):
                             _bp = getattr(getattr(_gr, "dependant", None), "body_params", [])
                             if _bp:
                                 try:
-                                    import json as _json
-                                    _parsed = _json.loads(_body_bytes)
+                                    _parsed = _json_mod.loads(_body_bytes)
                                     if isinstance(_parsed, dict):
-                                        from astraapi.dependencies.utils import request_body_to_args as _rbta
                                         _embed = getattr(_gr, "_embed_body_fields", False)
-                                        _vals, _errs = await _rbta(_bp, _parsed, _embed)
+                                        _vals, _errs = await _rbta_fn(_bp, _parsed, _embed)
                                         if _errs:
-                                            from astraapi.responses import JSONResponse
-                                            return JSONResponse({"detail": _errs}, status_code=422)
+                                            return _JSONResponse({"detail": _errs}, status_code=422)
                                         kwargs.update(_vals)
                                 except (ValueError, KeyError):
                                     pass

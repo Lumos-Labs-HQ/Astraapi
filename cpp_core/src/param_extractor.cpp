@@ -1,8 +1,10 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include "pyref.hpp"
+#include "compat.hpp"
 #include <cstring>
 #include <vector>
+#include <charconv>
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Inline param extraction — no global registry, no mutex.
@@ -18,6 +20,8 @@ struct ParamSpec {
     bool required;
     bool is_sequence;
     PyObject* default_value;  // borrowed ref into the Python spec dict
+    PyObject* py_lookup_key;  // pre-interned key for dict lookup
+    PyObject* py_field_name;  // pre-interned field name
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -37,16 +41,18 @@ static PyObject* coerce_value(PyObject* val, int type_tag) {
 
     switch (type_tag) {
         case 1: {  // int
-            char* endptr;
-            long long v = strtoll(s, &endptr, 10);
-            if (endptr == s + slen) return PyLong_FromLongLong(v);
+            long long v;
+            auto ec = std::from_chars(s, s + slen, v);
+            if (LIKELY(ec.ec == std::errc{} && ec.ptr == s + slen))
+                return PyLong_FromLongLong(v);
             Py_INCREF(val);
             return val;
         }
         case 2: {  // float
-            char* endptr;
-            double v = strtod(s, &endptr);
-            if (endptr == s + slen) return PyFloat_FromDouble(v);
+            double v;
+            auto ec = std::from_chars(s, s + slen, v);
+            if (LIKELY(ec.ec == std::errc{} && ec.ptr == s + slen))
+                return PyFloat_FromDouble(v);
             Py_INCREF(val);
             return val;
         }
@@ -84,22 +90,10 @@ static void extract_from_source(PyObject* result, PyObject* source,
     for (const auto& ps : specs) {
         if (ps.location != location) continue;
 
-        const char* lookup_key = ps.alias ? ps.alias : ps.field_name;
-        if (location == 1 && ps.header_lookup_key && ps.header_lookup_key[0]) {
-            lookup_key = ps.header_lookup_key;
-        }
+        PyObject* val = PyDict_GetItem(source, ps.py_lookup_key);  // borrowed
+        PyObject* py_fname = ps.py_field_name;
 
-        // InternFromString: returns the same interned object on every call → pointer-equal
-        // dict key lookup uses pointer compare (no hash computation for interned strings)
-        PyObject* py_lookup = PyUnicode_InternFromString(lookup_key);
-        if (!py_lookup) continue;
-        PyObject* val = PyDict_GetItem(source, py_lookup);  // borrowed
-        Py_DECREF(py_lookup);
-
-        PyObject* py_fname = PyUnicode_InternFromString(ps.field_name);
-        if (!py_fname) continue;
-
-        if (val) {
+        if (LIKELY(val)) {
             if (PyList_Check(val)) {
                 if (ps.is_sequence) {
                     PyDict_SetItem(result, py_fname, val);
@@ -120,7 +114,6 @@ static void extract_from_source(PyObject* result, PyObject* source,
         } else if (ps.default_value) {
             PyDict_SetItem(result, py_fname, ps.default_value);
         }
-        Py_DECREF(py_fname);
     }
 }
 
@@ -176,8 +169,22 @@ PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObjec
         ps.type_tag          = tt  ? (int)PyLong_AsLong(tt)  : 0;
         ps.is_sequence       = seq ? (PyObject_IsTrue(seq) == 1) : false;
         ps.default_value     = (def && def != Py_None) ? def : nullptr;
+        ps.py_lookup_key     = nullptr;
+        ps.py_field_name     = nullptr;
 
         if (!ps.field_name) continue;
+
+        const char* lookup_key = ps.alias ? ps.alias : ps.field_name;
+        if (ps.location == 1 && ps.header_lookup_key && ps.header_lookup_key[0]) {
+            lookup_key = ps.header_lookup_key;
+        }
+        ps.py_lookup_key = PyUnicode_InternFromString(lookup_key);
+        ps.py_field_name = PyUnicode_InternFromString(ps.field_name);
+        if (!ps.py_lookup_key || !ps.py_field_name) {
+            Py_XDECREF(ps.py_lookup_key);
+            Py_XDECREF(ps.py_field_name);
+            continue;
+        }
         specs.push_back(ps);
     }
 

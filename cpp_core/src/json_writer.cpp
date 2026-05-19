@@ -3,6 +3,7 @@
 #include "json_writer.hpp"
 #include "asgi_constants.hpp"
 #include "buffer_pool.hpp"
+#include "compat.hpp"
 #include "pyref.hpp"
 #include <cstring>
 #include <cstdio>
@@ -40,6 +41,7 @@ static PyObject* s_value = nullptr;            // cached "value" string
 static PyObject* s_model_dump = nullptr;       // cached "model_dump" string (Pydantic v2)
 static PyObject* s_is_dataclass = nullptr;    // dataclasses.is_dataclass
 static PyObject* s_asdict = nullptr;           // dataclasses.asdict
+static PyObject* s_total_seconds = nullptr;    // "total_seconds"
 
 // TS-1: Thread-safe lazy init for free-threaded Python (PEP 703) readiness
 static std::once_flag s_types_init_flag;
@@ -49,6 +51,7 @@ static void _do_ensure_special_types() {
     s_isoformat = PyUnicode_InternFromString("isoformat");
     s_value = PyUnicode_InternFromString("value");
     s_model_dump = PyUnicode_InternFromString("model_dump");
+    s_total_seconds = PyUnicode_InternFromString("total_seconds");
 
     // datetime module
     PyRef dt_mod(PyImport_ImportModule("datetime"));
@@ -78,6 +81,14 @@ static void _do_ensure_special_types() {
     PyRef enum_mod(PyImport_ImportModule("enum"));
     if (enum_mod) {
         s_enum_type = PyObject_GetAttrString(enum_mod.get(), "Enum");
+    }
+    PyErr_Clear();
+
+    // dataclasses module
+    PyRef dc_mod(PyImport_ImportModule("dataclasses"));
+    if (dc_mod) {
+        s_is_dataclass = PyObject_GetAttrString(dc_mod.get(), "is_dataclass");
+        s_asdict = PyObject_GetAttrString(dc_mod.get(), "asdict");
     }
     PyErr_Clear();
 }
@@ -236,14 +247,14 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         return -1;
     }
 
-    // None → null
-    if (obj == Py_None) {
+    // None → null (most common case — mark as likely)
+    if (LIKELY(obj == Py_None)) {
         buf_append(buf, "null", 4);
         return 0;
     }
 
     // Bool (check before int — bool is subclass of int)
-    if (PyBool_Check(obj)) {
+    if (LIKELY(PyBool_Check(obj))) {
         if (obj == Py_True) {
             buf_append(buf, "true", 4);
         } else {
@@ -253,7 +264,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
     }
 
     // Int
-    if (PyLong_Check(obj)) {
+    if (LIKELY(PyLong_Check(obj))) {
         int overflow = 0;
         long long val = PyLong_AsLongLongAndOverflow(obj, &overflow);
         if (overflow == 0 && !PyErr_Occurred()) {
@@ -274,8 +285,8 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         return 0;
     }
 
-    // Float (ryu — shortest exact representation, ~10x faster than snprintf)
-    if (PyFloat_Check(obj)) {
+    // Float
+    if (LIKELY(PyFloat_Check(obj))) {
         double val = PyFloat_AS_DOUBLE(obj);
         // Handle special values
         if (std::isnan(val)) {
@@ -297,7 +308,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
     }
 
     // String
-    if (PyUnicode_Check(obj)) {
+    if (LIKELY(PyUnicode_Check(obj))) {
         Py_ssize_t slen;
         const char* s = PyUnicode_AsUTF8AndSize(obj, &slen);
         if (!s) return -1;
@@ -306,7 +317,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
     }
 
     // Bytes → base64 or raw string
-    if (PyBytes_Check(obj)) {
+    if (LIKELY(PyBytes_Check(obj))) {
         Py_ssize_t blen;
         char* bdata;
         PyBytes_AsStringAndSize(obj, &bdata, &blen);
@@ -315,7 +326,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
     }
 
     // Dict
-    if (PyDict_Check(obj)) {
+    if (LIKELY(PyDict_Check(obj))) {
         Py_ssize_t dict_size = PyDict_GET_SIZE(obj);
         if (dict_size > 4) buf.reserve(buf.size() + dict_size * 48);
         buf_push(buf, '{');
@@ -423,7 +434,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
 
     // datetime.timedelta → total_seconds() as JSON number
     if (s_timedelta_type && PyObject_IsInstance(obj, s_timedelta_type)) {
-        PyRef ts(PyObject_CallMethodNoArgs(obj, PyUnicode_InternFromString("total_seconds")));
+        PyRef ts(PyObject_CallMethodNoArgs(obj, s_total_seconds));
         if (!ts) return -1;
         double val = PyFloat_AsDouble(ts.get());
         if (val == -1.0 && PyErr_Occurred()) return -1;
@@ -481,16 +492,6 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
     }
 
     // Try dataclass: call dataclasses.asdict() to get a dict
-    if (!s_is_dataclass || !s_asdict) {
-        if (!s_is_dataclass) {
-            PyRef dc(PyImport_ImportModule("dataclasses"));
-            if (dc) s_is_dataclass = PyObject_GetAttrString(dc.get(), "is_dataclass");
-        }
-        if (!s_asdict) {
-            PyRef dc(PyImport_ImportModule("dataclasses"));
-            if (dc) s_asdict = PyObject_GetAttrString(dc.get(), "asdict");
-        }
-    }
     if (s_is_dataclass && s_asdict) {
         PyRef is_dc(PyObject_CallOneArg(s_is_dataclass, obj));
         if (is_dc && PyObject_IsTrue(is_dc.get())) {
