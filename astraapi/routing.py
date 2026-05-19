@@ -970,6 +970,74 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
     if not param_info and not model_param_info:
         return None
 
+    # ── Fast path: trivial scalar params (no constraints) ──────────────────
+    # For routes where every scalar param has a trivial schema (plain str with
+    # no min_length, ge, regex, etc.), we can skip the expensive Pydantic
+    # TypeAdapter.validate_python() call entirely.  C++ already extracts header/
+    # query/cookie/path values as Python str objects, so validation is a no-op
+    # for str.  int/float/bool still need coercion which Pydantic provides.
+    _CONSTRAINT_KEYS = frozenset((
+        "min_length", "max_length", "pattern", "ge", "le", "gt", "lt",
+        "multiple_of", "strict", "coerce_float_to_int", "max_digits",
+        "decimal_places", "union_mode",
+    ))
+
+    def _is_trivial_schema(schema: dict) -> bool:
+        if not isinstance(schema, dict):
+            return False
+        st = schema.get("type")
+        if st == "str":
+            return not _CONSTRAINT_KEYS.intersection(schema)
+        if st == "nullable":
+            return _is_trivial_schema(schema.get("schema", {}))
+        if st == "list":
+            return _is_trivial_schema(schema.get("items_schema", {}))
+        return False
+
+    _all_trivial = all(
+        _is_trivial_schema(ta.core_schema) for _, _, _, _, _, ta in param_info
+    )
+
+    if _all_trivial and not model_param_info:
+        # Pre-build consumed set so _param_shim strips alias keys before calling
+        # the endpoint (avoids 'unexpected keyword argument').
+        _consumed: set = set()
+        for _, alias, name, _, _, _ in param_info:
+            _consumed.add(alias)
+            _consumed.add(name)
+
+        def _fast_validate(kwargs_dict: dict) -> tuple[dict, list, set]:
+            values: dict = {}
+            errors: list = []
+            for loc, alias, name, is_req, default, _ in param_info:
+                if loc in ("query", "cookie"):
+                    value = kwargs_dict.get(name)
+                    if value is None and alias != name:
+                        value = kwargs_dict.get(alias)
+                else:
+                    value = kwargs_dict.get(alias)
+                    if value is None and alias != name:
+                        value = kwargs_dict.get(name)
+
+                if value is None:
+                    if is_req:
+                        errors.append({
+                            "type": "missing",
+                            "loc": (loc, alias),
+                            "msg": "Field required",
+                            "input": None,
+                        })
+                    else:
+                        values[name] = default
+                else:
+                    # Trivial param → no coercion/validation needed; C++ already
+                    # extracted the right Python type.  We still map alias→name
+                    # so the Python _param_shim path receives the field name.
+                    values[name] = value
+            return values, errors, _consumed
+
+        return _fast_validate
+
     # Pre-import ValidationError for zero-import-overhead in the hot path
     from pydantic import ValidationError as _PydanticValidationError
 

@@ -1,9 +1,26 @@
 import asyncio
 
-from astraapi import AstraAPI, WebSocket, Header, HTTPException
+from astraapi import AstraAPI, WebSocket, Header, HTTPException, Depends
 from astraapi.middleware.cors import CORSMiddleware
 from astraapi.responses import StreamingResponse, EventSourceResponse, ServerSentEvent
-from astraapi import UploadFile
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional
+
+
+
+class UserCreate(BaseModel):
+    name: str = Field(min_length=3, max_length=20)
+    age: int = Field(gt=0, lt=100)
+    email: EmailStr
+    bio: Optional[str] = None
+
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    age: int
+    email: str
+
+
 
 app = AstraAPI()
 app.add_middleware(
@@ -13,9 +30,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def root():
-    return {"message": "Hello World"}
+
+async def verify_api_key(token: str = Header()):
+    if token != "1234":
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+
+    return token
+
 
 @app.get("/async")
 async def async_root():
@@ -40,14 +64,19 @@ async def protected_endpoint(token: str = Header()):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return {"message": "You are authorized!"}
 
+@app.get("/check")
+async def check_token(token: str = Header()):
+    return {"token": token}
 
-@app.post("/upload")
-async def upload(file: UploadFile):
-    filename = file.filename or "uploaded_file"
-    contents = await file.read()
-    with open(filename, "wb") as f:
-        f.write(contents)
-    return {"message": f"File '{filename}' uploaded successfully"}
+
+@app.get("/di")
+async def di(key = Depends(verify_api_key)):
+    return {"message": "Dependency Injection works!", "token": key}
+
+
+@app.post("/users", response_model=UserResponse)
+async def create_user(user: UserCreate):
+    return UserResponse(id=1, name=user.name, age=user.age, email=user.email)
 
 
 async def generate_story():
