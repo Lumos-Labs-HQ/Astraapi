@@ -2457,65 +2457,77 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
         _solve_gen_async._has_gen_deps = True
         return _solve_gen_async
 
-    # ── Fast path: single trivial dependency ───────────────────────────────
-    # When there is exactly one dependency with no sub-deps and no special
-    # params (Request, Response, BackgroundTasks, Security, etc.), we can
-    # bypass the full _resolve_deps_async machinery and call the dep
-    # directly.  This saves ~30-40 µs of Python overhead per request.
+    # ── Fast path: trivial dependency trees (up to 3 nodes) ────────────────
+    # When all deps are trivial (no Request, Response, Security, etc.) and
+    # the tree is small, we bypass the heavy _resolve_deps_async machinery.
+    # This saves ~30-40 µs for single deps, ~20-30 µs for small trees.
+    _DISALLOWED_FAST_KEYS = frozenset((
+        'needs_request', 'needs_http_connection', 'is_security',
+        'has_form_body', 'response_param_name',
+        'background_tasks_param_name', 'security_scopes_param',
+    ))
+
+    def _node_is_trivial(node: dict) -> bool:
+        return not any(node.get(k) for k in _DISALLOWED_FAST_KEYS)
+
     _can_fast_dep = (
-        len(dep_nodes) == 1
-        and not any(
-            node.get(k)
-            for node in dep_nodes
-            for k in (
-                'needs_request', 'needs_http_connection', 'is_security',
-                'has_form_body', 'response_param_name',
-                'background_tasks_param_name', 'security_scopes_param',
-            )
-        )
-        and not any(node.get('child_names') for node in dep_nodes)
+        len(dep_nodes) <= 3
+        and all(_node_is_trivial(n) for n in dep_nodes)
+        and not has_gen
     )
 
     if _can_fast_dep:
-        _node = dep_nodes[0]
-        _name = _node['name']
-        _call = _node['call']
-        _param_names = list(_node['param_names'])
-        _defaults = _node.get('param_defaults', {})
-        _req_qp = _node.get('required_query_params', set())
-        _req_hp = _node.get('required_header_params', set())
-        _req_cp = _node.get('required_cookie_params', set())
-        _req_bp = _node.get('required_body_params', [])
-        _is_coro = _node['is_coro']
+        # Pre-compute per-node data for the tight loop
+        _fast_nodes: list[dict] = []
+        for _node in dep_nodes:
+            _fast_nodes.append({
+                'name': _node['name'],
+                'call': _node['call'],
+                'is_coro': _node['is_coro'],
+                'param_names': list(_node['param_names']),
+                'defaults': _node.get('param_defaults', {}),
+                'req_qp': _node.get('required_query_params', set()),
+                'req_hp': _node.get('required_header_params', set()),
+                'req_cp': _node.get('required_cookie_params', set()),
+                'req_bp': _node.get('required_body_params', []),
+                'child_names': list(_node.get('child_names', [])),
+                'aliases': list(_node.get('aliases', [])),
+            })
         _consumed = dep_consumed_params
-        _is_injectable = _name in injectable_names
 
-        def _check_required(kd: dict, errors: list) -> None:
-            for rp in _req_qp:
+        def _check_node_required(kd: dict, errors: list, node: dict) -> None:
+            for rp in node['req_qp']:
                 if rp not in kd or kd[rp] is None:
                     errors.append({"type": "missing", "loc": ("query", rp), "msg": "Field required", "input": None})
-            for rp in _req_hp:
+            for rp in node['req_hp']:
                 if rp not in kd and rp.replace('-', '_') not in kd:
                     errors.append({"type": "missing", "loc": ("header", rp), "msg": "Field required", "input": None})
-            for rp in _req_cp:
+            for rp in node['req_cp']:
                 if rp not in kd:
                     errors.append({"type": "missing", "loc": ("cookie", rp), "msg": "Field required", "input": None})
-            for rp in _req_bp:
+            for rp in node['req_bp']:
                 if rp not in kd:
                     errors.append({"type": "missing", "loc": ("body", rp), "msg": "Field required", "input": None})
 
-        def _build_dep_kwargs(kd: dict) -> dict:
+        def _build_node_kwargs(kd: dict, node: dict, resolved: dict) -> dict:
             dk = {}
-            for pname in _param_names:
+            for pname in node['param_names']:
                 if pname in kd:
                     dk[pname] = kd[pname]
-            for pname, default in _defaults.items():
+            for child_name in node['child_names']:
+                if child_name in resolved:
+                    dk[child_name] = resolved[child_name]
+            for pname, default in node['defaults'].items():
                 if pname not in dk:
                     dk[pname] = default
             return dk
 
-        if _is_coro:
-            async def _fast_solve_async(kd: dict) -> tuple:
+        # All-async or all-sync? Mixed trees fall back below.
+        _all_coro = all(n['is_coro'] for n in _fast_nodes)
+        _all_sync = not any(n['is_coro'] for n in _fast_nodes)
+
+        if _all_coro:
+            async def _fast_solve_multi_async(kd: dict) -> tuple:
                 _ov = (
                     getattr(dependency_overrides_provider, 'dependency_overrides', None)
                     if dependency_overrides_provider is not None else None
@@ -2538,28 +2550,34 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
                         kd.pop(pname, None)
                     return (_injected, _errors, kd.get('__bg_tasks__'), _sub)
 
-                _errors = []
-                _check_required(kd, _errors)
-                if _errors:
-                    return ({}, _errors, None, None)
-
-                _dk = _build_dep_kwargs(kd)
-                try:
-                    _result = await _call(**_dk)
-                except _DepHTTPExc:
-                    raise
-                except Exception as _e:
-                    raise _DepHTTPExc(status_code=500, detail=str(_e)) from _e
+                resolved: dict = {}
+                errors: list = []
+                for node in _fast_nodes:
+                    _prev_err_count = len(errors)
+                    _check_node_required(kd, errors, node)
+                    if len(errors) > _prev_err_count:
+                        continue
+                    _dk = _build_node_kwargs(kd, node, resolved)
+                    try:
+                        _result = await node['call'](**_dk)
+                    except _DepHTTPExc:
+                        raise
+                    except Exception as _e:
+                        raise _DepHTTPExc(status_code=500, detail=str(_e)) from _e
+                    resolved[node['name']] = _result
+                    for alias in node['aliases']:
+                        resolved[alias] = _result
 
                 for pname in _consumed:
                     kd.pop(pname, None)
-                _injected = {_name: _result} if _is_injectable else {}
-                return (_injected, [], None, None)
+                _injected = {k: v for k, v in resolved.items() if k in injectable_names} if injectable_names else {}
+                return (_injected, errors, None, None)
 
-            _fast_solve_async._has_gen_deps = False
-            return _fast_solve_async
-        else:
-            def _fast_solve_sync(kd: dict) -> tuple:
+            _fast_solve_multi_async._has_gen_deps = False
+            return _fast_solve_multi_async
+
+        elif _all_sync:
+            def _fast_solve_multi_sync(kd: dict) -> tuple:
                 _ov = (
                     getattr(dependency_overrides_provider, 'dependency_overrides', None)
                     if dependency_overrides_provider is not None else None
@@ -2582,26 +2600,31 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
                         kd.pop(pname, None)
                     return (_injected, _errors, kd.get('__bg_tasks__'), _sub)
 
-                _errors = []
-                _check_required(kd, _errors)
-                if _errors:
-                    return ({}, _errors, None, None)
-
-                _dk = _build_dep_kwargs(kd)
-                try:
-                    _result = _call(**_dk)
-                except _DepHTTPExc:
-                    raise
-                except Exception as _e:
-                    raise _DepHTTPExc(status_code=500, detail=str(_e)) from _e
+                resolved: dict = {}
+                errors: list = []
+                for node in _fast_nodes:
+                    _prev_err_count = len(errors)
+                    _check_node_required(kd, errors, node)
+                    if len(errors) > _prev_err_count:
+                        continue
+                    _dk = _build_node_kwargs(kd, node, resolved)
+                    try:
+                        _result = node['call'](**_dk)
+                    except _DepHTTPExc:
+                        raise
+                    except Exception as _e:
+                        raise _DepHTTPExc(status_code=500, detail=str(_e)) from _e
+                    resolved[node['name']] = _result
+                    for alias in node['aliases']:
+                        resolved[alias] = _result
 
                 for pname in _consumed:
                     kd.pop(pname, None)
-                _injected = {_name: _result} if _is_injectable else {}
-                return (_injected, [], None, None)
+                _injected = {k: v for k, v in resolved.items() if k in injectable_names} if injectable_names else {}
+                return (_injected, errors, None, None)
 
-            _fast_solve_sync._has_gen_deps = False
-            return _fast_solve_sync
+            _fast_solve_multi_sync._has_gen_deps = False
+            return _fast_solve_multi_sync
 
     any_async = any(node['is_coro'] for node in dep_nodes)
 
