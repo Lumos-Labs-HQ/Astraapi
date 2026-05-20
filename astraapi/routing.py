@@ -2410,6 +2410,7 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
             kwargs_dict.pop('__auth_scheme__', None)
             kwargs_dict.pop('__auth_credentials__', None)
             return ({}, [])
+        _solve_empty._has_gen_deps = False
         return _solve_empty
 
     injectable_names: set[str] = set()
@@ -2453,6 +2454,7 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
                 kwargs_dict.pop(pname, None)
             injected['__exit_stack__'] = exit_stack
             return (injected, errors, kwargs_dict.get('__bg_tasks__'), sub_response)
+        _solve_gen_async._has_gen_deps = True
         return _solve_gen_async
 
     any_async = any(node['is_coro'] for node in dep_nodes)
@@ -2486,6 +2488,7 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
             for pname in consumed:
                 kwargs_dict.pop(pname, None)
             return (injected, errors, kwargs_dict.get('__bg_tasks__'), sub_response)
+        _solve_async._has_gen_deps = False
         return _solve_async
     else:
         def _solve_sync(kwargs_dict):
@@ -2512,6 +2515,7 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
             for pname in consumed:
                 kwargs_dict.pop(pname, None)
             return (injected, errors, kwargs_dict.get('__bg_tasks__'), sub_response)
+        _solve_sync._has_gen_deps = False
         return _solve_sync
 
 class APIRoute(routing.Route):

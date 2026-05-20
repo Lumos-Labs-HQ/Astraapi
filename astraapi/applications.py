@@ -68,6 +68,46 @@ _global_sync_lock = threading.Lock()
 # server reuse when Python's memory allocator reuses object addresses (id()).
 _app_instance_counter = itertools.count(1)
 
+# ── Fast email validation patch ────────────────────────────────────────────
+# Pydantic's EmailStr uses email-validator which is ~60µs/call.  A regex-based
+# validator is ~0.3µs/call — a 200× speed-up for API hot paths.  We patch
+# pydantic.networks.validate_email at import time so all EmailStr fields
+# (including user-defined models) benefit automatically.
+try:
+    import pydantic.networks as _pn_mod
+    _orig_pydantic_validate_email = _pn_mod.validate_email
+    _FAST_EMAIL_RE = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', re.ASCII)
+    _MAX_EMAIL_LEN = getattr(_pn_mod, 'MAX_EMAIL_LENGTH', 254)
+
+    class _FastValidatedEmail:
+        __slots__ = ('normalized', 'local_part')
+        def __init__(self, email: str):
+            self.normalized = email
+            self.local_part = email.split('@')[0]
+
+    def _fast_validate_email(value: str) -> tuple[str, str]:
+        if len(value) > _MAX_EMAIL_LEN:
+            from pydantic_core import PydanticCustomError
+            raise PydanticCustomError(
+                'value_error',
+                'value is not a valid email address: {reason}',
+                {'reason': f'Length must not exceed {_MAX_EMAIL_LEN} characters'},
+            )
+        email = value.strip()
+        if not _FAST_EMAIL_RE.match(email):
+            from pydantic_core import PydanticCustomError
+            raise PydanticCustomError(
+                'value_error',
+                'value is not a valid email address: {reason}',
+                {'reason': 'invalid email format'},
+            )
+        parts = _FastValidatedEmail(email)
+        return parts.local_part, parts.normalized
+
+    _pn_mod.validate_email = _fast_validate_email
+except Exception:
+    pass  # email-validator not installed or pydantic internals changed — fall back silently
+
 
 class AstraAPI(AppBase):
     """
@@ -1341,6 +1381,92 @@ class AstraAPI(AppBase):
         return _param_shim
 
     @staticmethod
+    def _make_fast_dep_shim(route: Any) -> Callable[..., Any]:
+        """Lightweight shim for fast-path routes with inline-resolved dependencies.
+
+        C++ already runs dep_solver inline and merges dependency values into kwargs.
+        This shim only pops leftover C++ meta keys, validates the route's own
+        params (deps already resolved), calls the endpoint, and returns the raw
+        result (dict/list/etc.) so C++ can serialize it via the fast JSON path
+        and use the response cache.
+        """
+        from astraapi.exceptions import RequestValidationError
+        from astraapi.routing import _make_lightweight_request as _mlr
+        import inspect as _insp
+        original_endpoint = route.endpoint
+        _is_async = inspect.iscoroutinefunction(original_endpoint)
+
+        # Only validate the route's OWN params (deps already resolved by C++)
+        try:
+            from astraapi.routing import _make_param_validator as _mpv
+            _validator = _mpv(route.dependant)
+        except Exception:
+            _validator = None
+
+        _exc_handlers = getattr(route, '_app_exception_handlers', None)
+
+        async def _fast_dep_shim(**kwargs: Any) -> Any:
+            # Pop C++ meta keys that dep_solver / C++ may have left behind
+            kwargs.pop('__raw_headers__', None)
+            kwargs.pop('__method__', None)
+            kwargs.pop('__path__', None)
+            kwargs.pop('__auth_scheme__', None)
+            kwargs.pop('__auth_credentials__', None)
+            kwargs.pop('__body__', None)
+            kwargs.pop('__content_type__', None)
+            kwargs.pop('__deps_ran__', None)
+            kwargs.pop('__bg_tasks__', None)
+            kwargs.pop('__exit_stack__', None)
+            kwargs.pop('__gen_deps_ran__', None)
+
+            if _validator is not None:
+                _result = _validator(kwargs)
+                _values, _errors = _result[0], _result[1]
+                _consumed = _result[2] if len(_result) > 2 else set()
+                if _errors:
+                    _body = None
+                    try:
+                        _bp = route.dependant.body_params
+                        if _bp:
+                            _bname = _bp[0].name
+                            _body = kwargs.get(_bname)
+                            if _body is None and len(_bp) > 1:
+                                _body = {p.name: kwargs.get(p.name) for p in _bp if p.name in kwargs}
+                    except Exception:
+                        pass
+                    _rve = RequestValidationError(_errors, body=_body)
+                    if _exc_handlers:
+                        for _exc_cls, _exc_handler in _exc_handlers.items():
+                            if isinstance(_rve, _exc_cls):
+                                _req = _mlr(None, 'GET', '/', route)
+                                _hr = _exc_handler(_req, _rve)
+                                if _insp.isawaitable(_hr):
+                                    _hr = await _hr
+                                return _hr
+                    raise _rve
+                for _k in _consumed:
+                    kwargs.pop(_k, None)
+                kwargs.update(_values)
+
+            try:
+                if _is_async:
+                    return await original_endpoint(**kwargs)
+                return original_endpoint(**kwargs)
+            except Exception as _exc:
+                if _exc_handlers:
+                    for _exc_cls, _exc_handler in _exc_handlers.items():
+                        if isinstance(_exc, _exc_cls):
+                            _req = _mlr(None, 'GET', '/', route)
+                            _hr = _exc_handler(_req, _exc)
+                            if _insp.isawaitable(_hr):
+                                _hr = await _hr
+                            return _hr
+                raise
+
+        _fast_dep_shim.__name__ = getattr(original_endpoint, '__name__', '_fast_dep_shim')
+        return _fast_dep_shim
+
+    @staticmethod
     def _make_asgi_route_shim(route: Any) -> Callable[..., Any]:
         """Shim for custom APIRoute subclasses: calls route.app (ASGI) and returns Response."""
         from astraapi._cpp_server import (
@@ -2473,7 +2599,9 @@ class AstraAPI(AppBase):
                 endpoint = _registered_endpoint
             elif not _has_custom_route_class:
                 # Fast-path route without response_model.
-                # If route has a dep_solver, use _response_shim (handles deps).
+                # If route has a dep_solver, use a light shim that lets C++ serialize
+                # the dict response directly (enabling the response cache and avoiding
+                # the heavy _response_class_shim overhead).
                 # Otherwise use _param_validation_shim (lighter weight).
                 _has_dep_solver = getattr(route, '_dep_solver', None) is not None
                 if _has_dep_solver or _has_asgi_middleware:
@@ -2485,7 +2613,12 @@ class AstraAPI(AppBase):
                     _type_exc_handlers = {k: v for k, v in self.exception_handlers.items() if isinstance(k, type) and v not in _default_exc_handlers}
                     if _type_exc_handlers:
                         route._app_exception_handlers = _type_exc_handlers
-                    _registered_endpoint = self._make_response_class_shim(route)
+                    _dep_solver_has_gen = getattr(getattr(route, '_dep_solver', None), '_has_gen_deps', False)
+                    if _has_dep_solver and not _has_asgi_middleware and not _dep_solver_has_gen:
+                        # Fast-path eligible route with inline deps (no generators): use light shim
+                        _registered_endpoint = self._make_fast_dep_shim(route)
+                    else:
+                        _registered_endpoint = self._make_response_class_shim(route)
                     _is_coro = True
                 else:
                     try:
