@@ -4700,7 +4700,7 @@ static PyObject* dispatch_one_request(
                     Py_INCREF(ka);
                     PyRef origin_py(origin_sv.len > 0
                         ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
-                        : PyUnicode_FromString(""));
+                        : nullptr);
                     PyRef di_info(PyTuple_Pack(8, s_async_di_tag, dep_call_result.release(),
                                  dep_raw, endpoint_local, kwargs.release(),
                                  get_cached_status(status_code_local), ka,
@@ -5478,7 +5478,7 @@ body_done:
             PyObject* ka = req.keep_alive ? Py_True : Py_False;
             PyRef origin_py(origin_sv.len > 0
                 ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
-                : PyUnicode_FromString(""));
+                : nullptr);
             PyRef stream_info(PyTuple_Pack(5, s_stream_tag, raw_result,
                                            get_cached_status(status_code_local), ka,
                                            origin_py ? origin_py.get() : Py_None));
@@ -5498,7 +5498,7 @@ body_done:
                 PyObject* ka = req.keep_alive ? Py_True : Py_False;
                 PyRef origin_py(origin_sv.len > 0
                     ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
-                    : PyUnicode_FromString(""));
+                    : nullptr);
                 PyRef stream_info(PyTuple_Pack(5, s_stream_tag, raw_result,
                                                get_cached_status(status_code_local), ka,
                                                origin_py ? origin_py.get() : Py_None));
@@ -5800,7 +5800,7 @@ body_done:
         Py_INCREF(ka);
         PyRef origin_py(origin_sv.len > 0
             ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
-            : PyUnicode_FromString(""));
+            : nullptr);
         PyRef async_info(PyTuple_Pack(6, s_async_tag, coro.release(),
                          raw_result, get_cached_status(status_code_local), ka,
                          origin_py ? origin_py.get() : Py_None));

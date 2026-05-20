@@ -1265,6 +1265,21 @@ class AstraAPI(AppBase):
         response_model_exclude_none = route.response_model_exclude_none
         _is_async = inspect.iscoroutinefunction(original_endpoint) or inspect.iscoroutinefunction(inspect.unwrap(original_endpoint))
 
+        # Fast-path: endpoint already returns the exact response model type
+        # with no custom include/exclude/serialization options.
+        _response_model_class = getattr(route, 'response_model', None)
+        _can_fast_serialize = (
+            _response_model_class is not None
+            and not response_model_include
+            and not response_model_exclude
+            and not response_model_exclude_unset
+            and not response_model_exclude_defaults
+            and not response_model_exclude_none
+        )
+        _serializer = None
+        if _can_fast_serialize:
+            _serializer = getattr(_response_model_class, '__pydantic_serializer__', None)
+
         async def _response_model_shim(**kwargs: Any) -> Any:
             if _is_async:
                 raw = await original_endpoint(**kwargs)
@@ -1272,6 +1287,12 @@ class AstraAPI(AppBase):
                 raw = original_endpoint(**kwargs)
             if isinstance(raw, _Response):
                 return raw
+            # Fast path: already the correct model type, no complex serialization
+            if _serializer is not None and type(raw) is _response_model_class:
+                try:
+                    return _serializer.to_python(raw, by_alias=response_model_by_alias)
+                except Exception:
+                    pass  # fall through to full validation/serialization
             value, errors = response_field.validate(raw, {}, loc=("response",))
             if errors:
                 exc = ResponseValidationError(errors=errors, body=raw)

@@ -1791,9 +1791,11 @@ class CppHttpProtocol(asyncio.Protocol):
                     return  # connection is now WebSocket
 
                 elif tag == "async":
-                    _rlen = len(result)
-                    _, coro, first_yield, status_code, keep_alive = result[:5]
-                    _origin = result[5] if _rlen > 5 else ""
+                    coro = result[1]
+                    first_yield = result[2]
+                    status_code = result[3]
+                    keep_alive = result[4]
+                    _origin = result[5] if len(result) > 5 else ""
                     if first_yield is not None:
                         try:
                             first_yield._asyncio_future_blocking = False
@@ -1820,9 +1822,10 @@ class CppHttpProtocol(asyncio.Protocol):
                         task.add_done_callback(pt_discard)
 
                 elif tag == "stream":
-                    _rlen = len(result)
-                    _, raw_resp, status_code, keep_alive = result[:4]
-                    _origin = result[4] if _rlen > 4 else ""
+                    raw_resp = result[1]
+                    status_code = result[2]
+                    keep_alive = result[3]
+                    _origin = result[4] if len(result) > 4 else ""
                     task = create_task(
                         self._handle_stream(raw_resp, status_code, keep_alive, _origin))
                     if not task.done():
@@ -1830,9 +1833,13 @@ class CppHttpProtocol(asyncio.Protocol):
                         task.add_done_callback(pt_discard)
 
                 elif tag == "async_di":
-                    _rlen = len(result)
-                    _, di_coro, first_yield, endpoint, kwargs, sc, ka = result[:7]
-                    _origin = result[7] if _rlen > 7 else ""
+                    di_coro = result[1]
+                    first_yield = result[2]
+                    endpoint = result[3]
+                    kwargs = result[4]
+                    sc = result[5]
+                    ka = result[6]
+                    _origin = result[7] if len(result) > 7 else ""
                     if first_yield is not None:
                         try:
                             first_yield._asyncio_future_blocking = False

@@ -2457,6 +2457,152 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
         _solve_gen_async._has_gen_deps = True
         return _solve_gen_async
 
+    # ── Fast path: single trivial dependency ───────────────────────────────
+    # When there is exactly one dependency with no sub-deps and no special
+    # params (Request, Response, BackgroundTasks, Security, etc.), we can
+    # bypass the full _resolve_deps_async machinery and call the dep
+    # directly.  This saves ~30-40 µs of Python overhead per request.
+    _can_fast_dep = (
+        len(dep_nodes) == 1
+        and not any(
+            node.get(k)
+            for node in dep_nodes
+            for k in (
+                'needs_request', 'needs_http_connection', 'is_security',
+                'has_form_body', 'response_param_name',
+                'background_tasks_param_name', 'security_scopes_param',
+            )
+        )
+        and not any(node.get('child_names') for node in dep_nodes)
+    )
+
+    if _can_fast_dep:
+        _node = dep_nodes[0]
+        _name = _node['name']
+        _call = _node['call']
+        _param_names = list(_node['param_names'])
+        _defaults = _node.get('param_defaults', {})
+        _req_qp = _node.get('required_query_params', set())
+        _req_hp = _node.get('required_header_params', set())
+        _req_cp = _node.get('required_cookie_params', set())
+        _req_bp = _node.get('required_body_params', [])
+        _is_coro = _node['is_coro']
+        _consumed = dep_consumed_params
+        _is_injectable = _name in injectable_names
+
+        def _check_required(kd: dict, errors: list) -> None:
+            for rp in _req_qp:
+                if rp not in kd or kd[rp] is None:
+                    errors.append({"type": "missing", "loc": ("query", rp), "msg": "Field required", "input": None})
+            for rp in _req_hp:
+                if rp not in kd and rp.replace('-', '_') not in kd:
+                    errors.append({"type": "missing", "loc": ("header", rp), "msg": "Field required", "input": None})
+            for rp in _req_cp:
+                if rp not in kd:
+                    errors.append({"type": "missing", "loc": ("cookie", rp), "msg": "Field required", "input": None})
+            for rp in _req_bp:
+                if rp not in kd:
+                    errors.append({"type": "missing", "loc": ("body", rp), "msg": "Field required", "input": None})
+
+        def _build_dep_kwargs(kd: dict) -> dict:
+            dk = {}
+            for pname in _param_names:
+                if pname in kd:
+                    dk[pname] = kd[pname]
+            for pname, default in _defaults.items():
+                if pname not in dk:
+                    dk[pname] = default
+            return dk
+
+        if _is_coro:
+            async def _fast_solve_async(kd: dict) -> tuple:
+                _ov = (
+                    getattr(dependency_overrides_provider, 'dependency_overrides', None)
+                    if dependency_overrides_provider is not None else None
+                ) or {}
+                if _ov:
+                    _nodes, _inj, _consumed2 = _build_nodes(dependant, _ov, dep_consumed_params)
+                    try:
+                        from astraapi._cpp_server import _current_query_string as _cqs
+                        _qs_bytes = _cqs.get()
+                    except Exception:
+                        _qs_bytes = b''
+                    if _qs_bytes:
+                        from urllib.parse import parse_qs as _pqs
+                        for _qk, _qvs in _pqs(_qs_bytes.decode('latin-1'), keep_blank_values=True).items():
+                            if _qk not in kd:
+                                kd[_qk] = _qvs[0] if len(_qvs) == 1 else _qvs
+                    _resolved, _errors, _sub = await _resolve_deps_async(_nodes, kd, _app=dependency_overrides_provider)
+                    _injected = {k: v for k, v in _resolved.items() if k in _inj} if _inj else {}
+                    for pname in _consumed2:
+                        kd.pop(pname, None)
+                    return (_injected, _errors, kd.get('__bg_tasks__'), _sub)
+
+                _errors = []
+                _check_required(kd, _errors)
+                if _errors:
+                    return ({}, _errors, None, None)
+
+                _dk = _build_dep_kwargs(kd)
+                try:
+                    _result = await _call(**_dk)
+                except _DepHTTPExc:
+                    raise
+                except Exception as _e:
+                    raise _DepHTTPExc(status_code=500, detail=str(_e)) from _e
+
+                for pname in _consumed:
+                    kd.pop(pname, None)
+                _injected = {_name: _result} if _is_injectable else {}
+                return (_injected, [], None, None)
+
+            _fast_solve_async._has_gen_deps = False
+            return _fast_solve_async
+        else:
+            def _fast_solve_sync(kd: dict) -> tuple:
+                _ov = (
+                    getattr(dependency_overrides_provider, 'dependency_overrides', None)
+                    if dependency_overrides_provider is not None else None
+                ) or {}
+                if _ov:
+                    _nodes, _inj, _consumed2 = _build_nodes(dependant, _ov, dep_consumed_params)
+                    try:
+                        from astraapi._cpp_server import _current_query_string as _cqs
+                        _qs_bytes = _cqs.get()
+                    except Exception:
+                        _qs_bytes = b''
+                    if _qs_bytes:
+                        from urllib.parse import parse_qs as _pqs
+                        for _qk, _qvs in _pqs(_qs_bytes.decode('latin-1'), keep_blank_values=True).items():
+                            if _qk not in kd:
+                                kd[_qk] = _qvs[0] if len(_qvs) == 1 else _qvs
+                    _resolved, _errors, _sub = _resolve_deps_sync(_nodes, kd, _app=dependency_overrides_provider)
+                    _injected = {k: v for k, v in _resolved.items() if k in _inj} if _inj else {}
+                    for pname in _consumed2:
+                        kd.pop(pname, None)
+                    return (_injected, _errors, kd.get('__bg_tasks__'), _sub)
+
+                _errors = []
+                _check_required(kd, _errors)
+                if _errors:
+                    return ({}, _errors, None, None)
+
+                _dk = _build_dep_kwargs(kd)
+                try:
+                    _result = _call(**_dk)
+                except _DepHTTPExc:
+                    raise
+                except Exception as _e:
+                    raise _DepHTTPExc(status_code=500, detail=str(_e)) from _e
+
+                for pname in _consumed:
+                    kd.pop(pname, None)
+                _injected = {_name: _result} if _is_injectable else {}
+                return (_injected, [], None, None)
+
+            _fast_solve_sync._has_gen_deps = False
+            return _fast_solve_sync
+
     any_async = any(node['is_coro'] for node in dep_nodes)
 
     if any_async:
