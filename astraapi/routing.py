@@ -1282,7 +1282,11 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                                 # Only add non-None, non-undefined defaults (e.g. [] for list fields)
                                 if _fdefault is not _pyd.fields.PydanticUndefined and _fdefault is not None:
                                     import copy as _copy
-                                    inner_dict[_falias] = _copy.deepcopy(_fdefault)
+                                    _default_type = type(_fdefault)
+                                    if _default_type in (list, dict, set):
+                                        inner_dict[_falias] = _copy.deepcopy(_fdefault)
+                                    else:
+                                        inner_dict[_falias] = _fdefault
                 except Exception:
                     pass
             try:

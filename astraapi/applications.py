@@ -1285,14 +1285,14 @@ class AstraAPI(AppBase):
                 raw = await original_endpoint(**kwargs)
             else:
                 raw = original_endpoint(**kwargs)
-            if isinstance(raw, _Response):
-                return raw
-            # Fast path: already the correct model type, no complex serialization
+            # Fast path: exact model type → serialize directly to JSON bytes
             if _serializer is not None and type(raw) is _response_model_class:
                 try:
-                    return _serializer.to_python(raw, by_alias=response_model_by_alias)
+                    return _serializer.to_json(raw, by_alias=response_model_by_alias)
                 except Exception:
                     pass  # fall through to full validation/serialization
+            if isinstance(raw, _Response):
+                return raw
             value, errors = response_field.validate(raw, {}, loc=("response",))
             if errors:
                 exc = ResponseValidationError(errors=errors, body=raw)
@@ -1426,19 +1426,16 @@ class AstraAPI(AppBase):
 
         _exc_handlers = getattr(route, '_app_exception_handlers', None)
 
+        _META_KEYS = frozenset((
+            '__raw_headers__', '__method__', '__path__', '__auth_scheme__',
+            '__auth_credentials__', '__body__', '__content_type__', '__deps_ran__',
+            '__bg_tasks__', '__exit_stack__', '__gen_deps_ran__',
+        ))
+
         async def _fast_dep_shim(**kwargs: Any) -> Any:
             # Pop C++ meta keys that dep_solver / C++ may have left behind
-            kwargs.pop('__raw_headers__', None)
-            kwargs.pop('__method__', None)
-            kwargs.pop('__path__', None)
-            kwargs.pop('__auth_scheme__', None)
-            kwargs.pop('__auth_credentials__', None)
-            kwargs.pop('__body__', None)
-            kwargs.pop('__content_type__', None)
-            kwargs.pop('__deps_ran__', None)
-            kwargs.pop('__bg_tasks__', None)
-            kwargs.pop('__exit_stack__', None)
-            kwargs.pop('__gen_deps_ran__', None)
+            for _mk in _META_KEYS:
+                kwargs.pop(_mk, None)
 
             if _validator is not None:
                 _result = _validator(kwargs)

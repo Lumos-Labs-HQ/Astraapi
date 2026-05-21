@@ -5379,6 +5379,24 @@ body_done:
             }
         }
 
+        // ── Bytes result — pre-encoded JSON body, write directly ────────────
+        // When Python shim returns _serializer.to_json() bytes, skip C++ JSON encoding.
+        if (raw_result && PyBytes_Check(raw_result)) {
+            char* body_ptr = PyBytes_AS_STRING(raw_result);
+            Py_ssize_t body_len = PyBytes_GET_SIZE(raw_result);
+            PyRef resp_bytes(build_http_response_bytes(status_code_local, body_ptr, (size_t)body_len, req.keep_alive,
+                                                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
+                                                        nullptr, is_head_method));
+            if (resp_bytes) {
+                write_to_transport(transport, resp_bytes.get());
+            }
+            Py_DECREF(raw_result);
+            fire_post_response_hook(self, req.method.data, req.method.len,
+                                    req.path.data, req.path.len, status_code_local, request_start_time);
+            --self->counters.active_requests;
+            return make_consumed_true(self, req.total_consumed);
+        }
+
         // Endpoint completed immediately — serialize + build HTTP response + write
         // If HTTP middleware is registered, return result to Python for middleware processing
         if (self->has_http_middleware && raw_result != nullptr) {

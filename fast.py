@@ -2,7 +2,6 @@ import asyncio
 
 from fastapi import FastAPI, WebSocket, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-# from fastapi.responses import StreamingResponse, EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
 
@@ -69,18 +68,6 @@ async def get_service(db: str = Depends(get_db)):
 @app.get("/async")
 async def async_root():
     return {"message": "Hello World"}
-
-
-# async def generate_sse():
-#     for i in range(5):
-#         yield ServerSentEvent(data={"step": i, "message": f"Processing {i}"}, event="progress")
-#         await asyncio.sleep(1)
-#     yield ServerSentEvent(data={"done": True}, event="complete")
-
-
-# @app.get("/events")
-# async def events():
-#     return EventSourceResponse(generate_sse())
 
 
 @app.get("/protected")
@@ -180,12 +167,7 @@ async def generate_story():
         await asyncio.sleep(1)
 
 
-# @app.get("/story")
-# async def story():
-#     return StreamingResponse(
-#         generate_story(),
-#         media_type="text/plain"
-#     )
+
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
@@ -197,4 +179,3 @@ async def ws_endpoint(websocket: WebSocket):
     except Exception:
         pass
 
-# app.run(host="127.0.0.1", port=8002, workers=1)
