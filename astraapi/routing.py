@@ -973,9 +973,11 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
     # ── Fast path: trivial scalar params (no constraints) ──────────────────
     # For routes where every scalar param has a trivial schema (plain str with
     # no min_length, ge, regex, etc.), we can skip the expensive Pydantic
-    # TypeAdapter.validate_python() call entirely.  C++ already extracts header/
-    # query/cookie/path values as Python str objects, so validation is a no-op
-    # for str.  int/float/bool still need coercion which Pydantic provides.
+    # TypeAdapter.validate_python() call entirely.  For str: C++ already extracts
+    # header/query/cookie/path values as Python str objects, so validation is a
+    # no-op.  For int/float/bool: C++ returns raw strings (to preserve error-input
+    # fidelity for Pydantic), so we do lightweight coercion via Python builtins
+    # (~50ns each) instead of Pydantic TypeAdapter (~2-5µs each).
     _CONSTRAINT_KEYS = frozenset((
         "min_length", "max_length", "pattern", "ge", "le", "gt", "lt",
         "multiple_of", "strict", "coerce_float_to_int", "max_digits",
@@ -986,7 +988,7 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
         if not isinstance(schema, dict):
             return False
         st = schema.get("type")
-        if st == "str":
+        if st in ("str", "int", "float", "bool"):
             return not _CONSTRAINT_KEYS.intersection(schema)
         if st == "nullable":
             return _is_trivial_schema(schema.get("schema", {}))
@@ -994,22 +996,35 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
             return _is_trivial_schema(schema.get("items_schema", {}))
         return False
 
+    # Pre-build lightweight coercion table for trivial non-str scalars.
+    # C++ fast_spec returns strings for all types; we coerce str→int/float/bool
+    # using Python builtins (avoid Pydantic's heavy core_schema walk).
+    _trivial_coerce: dict = {}
+    for _, _, _, _, _, ta in param_info:
+        st = ta.core_schema.get("type")
+        if st in ("int", "float", "bool"):
+            _trivial_coerce[st] = True
+
     _all_trivial = all(
         _is_trivial_schema(ta.core_schema) for _, _, _, _, _, ta in param_info
     )
 
     if _all_trivial and not model_param_info:
-        # Pre-build consumed set so _param_shim strips alias keys before calling
-        # the endpoint (avoids 'unexpected keyword argument').
         _consumed: set = set()
         for _, alias, name, _, _, _ in param_info:
             _consumed.add(alias)
             _consumed.add(name)
 
+        # Pre-extract type info for each param: (loc, alias, name, is_req, default, st)
+        _param_type_info = []
+        for loc, alias, name, is_req, default, ta in param_info:
+            st = ta.core_schema.get("type", "str")
+            _param_type_info.append((loc, alias, name, is_req, default, st))
+
         def _fast_validate(kwargs_dict: dict) -> tuple[dict, list, set]:
             values: dict = {}
             errors: list = []
-            for loc, alias, name, is_req, default, _ in param_info:
+            for loc, alias, name, is_req, default, st in _param_type_info:
                 if loc in ("query", "cookie"):
                     value = kwargs_dict.get(name)
                     if value is None and alias != name:
@@ -1030,9 +1045,41 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
                     else:
                         values[name] = default
                 else:
-                    # Trivial param → no coercion/validation needed; C++ already
-                    # extracted the right Python type.  We still map alias→name
-                    # so the Python _param_shim path receives the field name.
+                    # Lightweight coercion for non-str trivial types (~50ns vs Pydantic 2-5µs)
+                    if st == "int" and not isinstance(value, int):
+                        try:
+                            value = int(value)
+                        except (ValueError, TypeError):
+                            errors.append({"type": "int_parsing", "loc": (loc, alias),
+                                           "msg": "Input should be a valid integer, unable to parse string as an integer",
+                                           "input": str(value)})
+                            continue
+                    elif st == "float" and not isinstance(value, (int, float)):
+                        try:
+                            value = float(value)
+                        except (ValueError, TypeError):
+                            errors.append({"type": "float_parsing", "loc": (loc, alias),
+                                           "msg": "Input should be a valid number, unable to parse string as a number",
+                                           "input": str(value)})
+                            continue
+                    elif st == "bool" and not isinstance(value, bool):
+                        if isinstance(value, str):
+                            vl = value.lower()
+                            if vl in ("true", "1", "yes", "on"):
+                                value = True
+                            elif vl in ("false", "0", "no", "off"):
+                                value = False
+                            else:
+                                errors.append({"type": "bool_parsing", "loc": (loc, alias),
+                                               "msg": "Input should be a valid boolean, unable to interpret input",
+                                               "input": value})
+                                continue
+                        else:
+                            errors.append({"type": "bool_parsing", "loc": (loc, alias),
+                                           "msg": "Input should be a valid boolean, unable to interpret input",
+                                           "input": str(value)})
+                            continue
+                    # str: C++ already produced Python str, no coercion needed
                     values[name] = value
             return values, errors, _consumed
 

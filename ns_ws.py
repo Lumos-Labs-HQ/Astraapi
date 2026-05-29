@@ -1,7 +1,7 @@
 import asyncio
 
-from fastapi import FastAPI, WebSocket, Header, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
+from astraapi import AstraAPI, WebSocket, Header, HTTPException, Depends
+from astraapi.middleware.cors import CORSMiddleware
 # from fastapi.responses import StreamingResponse, EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
@@ -39,7 +39,7 @@ class AllInOneResponse(BaseModel):
 
 
 
-app = FastAPI()
+app = AstraAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -197,4 +197,4 @@ async def ws_endpoint(websocket: WebSocket):
     except Exception:
         pass
 
-# app.run(host="127.0.0.1", port=8002, workers=1)
+app.run(host="127.0.0.1", port=8002, workers=1)

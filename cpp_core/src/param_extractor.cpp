@@ -174,12 +174,27 @@ PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObjec
 
         if (!ps.field_name) continue;
 
-        const char* lookup_key = ps.alias ? ps.alias : ps.field_name;
-        if (ps.location == 1 && ps.header_lookup_key && ps.header_lookup_key[0]) {
-            lookup_key = ps.header_lookup_key;
+        // Try pre-interned keys from Python (set by sys.intern() at route registration).
+        // This avoids PyUnicode_InternFromString() per request — the same strings
+        // are reused across every call, preventing unbounded interned-dict growth.
+        PyObject* pre_lk = PyDict_GetItemString(sd, "py_lookup_key");
+        PyObject* pre_fn = PyDict_GetItemString(sd, "py_field_name");
+        if (pre_lk && PyUnicode_Check(pre_lk)) {
+            ps.py_lookup_key = pre_lk;
+            Py_INCREF(ps.py_lookup_key);
+        } else {
+            const char* lookup_key = ps.alias ? ps.alias : ps.field_name;
+            if (ps.location == 1 && ps.header_lookup_key && ps.header_lookup_key[0]) {
+                lookup_key = ps.header_lookup_key;
+            }
+            ps.py_lookup_key = PyUnicode_InternFromString(lookup_key);
         }
-        ps.py_lookup_key = PyUnicode_InternFromString(lookup_key);
-        ps.py_field_name = PyUnicode_InternFromString(ps.field_name);
+        if (pre_fn && PyUnicode_Check(pre_fn)) {
+            ps.py_field_name = pre_fn;
+            Py_INCREF(ps.py_field_name);
+        } else {
+            ps.py_field_name = PyUnicode_InternFromString(ps.field_name);
+        }
         if (!ps.py_lookup_key || !ps.py_field_name) {
             Py_XDECREF(ps.py_lookup_key);
             Py_XDECREF(ps.py_field_name);
@@ -195,6 +210,12 @@ PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObjec
     extract_from_source(result.get(), headers,      specs, 1);  // header
     extract_from_source(result.get(), cookies,      specs, 2);  // cookie
     extract_from_source(result.get(), path_params,  specs, 3);  // path
+
+    // Clean up refs held by ParamSpec.py_lookup_key / .py_field_name
+    for (auto& ps : specs) {
+        Py_XDECREF(ps.py_lookup_key);
+        Py_XDECREF(ps.py_field_name);
+    }
 
     return result.release();
 }

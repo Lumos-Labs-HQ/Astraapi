@@ -277,8 +277,11 @@ static bool hash_json_object(PyObject* obj, uintptr_t& h) {
     return false;
 }
 
-// Hash a Python dict by content (not pointers). Returns 0 if dict contains unsupported types.
+// Hash a Python dict by content (not pointers). Returns 0 if dict contains unsupported types
+// or is too large (hashing cost exceeds cache benefit for dicts > 50 keys).
 static inline uintptr_t hash_dict_content(PyObject* dict) {
+    Py_ssize_t size = PyDict_GET_SIZE(dict);
+    if (size > 50) return 0;  // skip: hashing cost > cache savings for large dicts
     uintptr_t h = 14695981039346656037ull;
     if (!hash_json_object(dict, h)) return 0;
     return h;

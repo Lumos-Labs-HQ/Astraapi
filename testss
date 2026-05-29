@@ -1,0 +1,72 @@
+async
+Running 10s test @ http://127.0.0.1:8002/async
+  1 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   388.59us  207.39us  17.12ms   95.06%
+    Req/Sec   247.59k     7.65k  257.23k    83.00%
+  2463276 requests in 10.00s, 281.90MB read
+Requests/sec: 246292.45
+Transfer/sec:     28.19MB
+protected
+Running 10s test @ http://localhost:8002/protected
+  1 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   556.03us  305.67us  22.25ms   96.40%
+    Req/Sec   175.86k    12.13k  185.83k    92.00%
+  1749978 requests in 10.00s, 213.62MB read
+Requests/sec: 174984.71
+Transfer/sec:     21.36MB
+check token
+Running 10s test @ http://localhost:8002/check
+  1 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   543.42us  301.52us  22.61ms   97.66%
+    Req/Sec   179.84k     3.81k  187.97k    72.00%
+  1789915 requests in 10.00s, 187.77MB read
+Requests/sec: 178982.50
+Transfer/sec:     18.78MB
+di
+Running 10s test @ http://localhost:8002/di
+  1 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   782.76us  486.83us  32.01ms   98.48%
+    Req/Sec   126.45k     6.43k  132.18k    93.00%
+  1257719 requests in 10.00s, 181.12MB read
+Requests/sec: 125764.15
+Transfer/sec:     18.11MB
+nested di
+Running 10s test @ http://localhost:8002/nested-di
+  1 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   794.14us  510.36us  33.58ms   99.12%
+    Req/Sec   124.71k     3.58k  128.71k    86.00%
+  1240444 requests in 10.00s, 188.09MB read
+Requests/sec: 124039.77
+Transfer/sec:     18.81MB
+pydantic
+Running 10s test @ http://127.0.0.1:8002/users
+  1 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.00ms  679.57us  41.01ms   99.15%
+    Req/Sec    99.93k     2.35k  102.64k    79.00%
+  993928 requests in 10.00s, 143.13MB read
+Requests/sec:  99383.21
+Transfer/sec:     14.31MB
+pydantic nested
+Running 10s test @ http://127.0.0.1:8002/nested-users
+  1 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.07ms  648.56us  40.27ms   99.44%
+    Req/Sec    93.07k     1.05k   95.23k    77.00%
+  925815 requests in 10.00s, 133.32MB read
+Requests/sec:  92575.46
+Transfer/sec:     13.33MB
+all in one
+Running 10s test @ http://127.0.0.1:8002/all-in-one
+  1 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.84ms    3.42ms 134.83ms   99.58%
+    Req/Sec    27.03k   726.69    27.94k    83.00%
+  269149 requests in 10.01s, 62.37MB read
+Requests/sec:  26898.05
+Transfer/sec:      6.23MB
