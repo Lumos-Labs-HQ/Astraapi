@@ -1,63 +1,67 @@
-# AstraAPI 0.2.11 Release Notes
+# AstraAPI 0.2.3 Release Notes
 
-**PyPI:** https://pypi.org/project/astraapi/0.2.11  
+**PyPI:** https://pypi.org/project/astraapi/0.2.3
 **Python:** 3.14+ | **C++:** 20
 
 ---
 
 ## Overview
 
-Patch release with CORS reliability fixes, Server-Sent Events (SSE) support, C++ build fixes, and deep DI/validation/middleware performance optimizations.
-
----
-
-## New Features
-
-### Server-Sent Events (SSE)
-
-- **`astraapi/_response.py`** — Added `EventSourceResponse` and `ServerSentEvent` classes for native SSE streaming. `EventSourceResponse` extends `StreamingResponse` with `media_type = "text/event-stream"` and automatically encodes `ServerSentEvent` dataclass instances (including `data`, `event`, `id`, `retry` fields) into SSE-formatted chunks. Re-exported via `astraapi.responses`.
-
----
-
-## Bug Fixes
-
-### CORS Headers on All Response Paths
-
-- **`astraapi/applications.py`** — When `CORSMiddleware` is registered, `_sync_routes_to_core_body` now forces `_needs_request_context = True`. This ensures the C++ fast path parses raw headers into the `_current_raw_headers` ContextVar so that async Python handlers (`_handle_stream`, `_handle_async`, `_handle_async_di`, `_handle_pydantic`, `_handle_middleware_result`) and `_dispatch_exception` can extract the `Origin` header and inject CORS headers.
-- **`astraapi/_cpp_server.py`** — `run_server` also sets `_needs_request_context = True` whenever `CORSMiddleware` is detected in `app.user_middleware`.
-
-### C++ Build Fix
-
-- **`cpp_core/src/app.cpp`** — Added missing `#include "compat.hpp"` to resolve `'LIKELY' was not declared in this scope` and `'UNLIKELY' was not declared in this scope` compiler errors.
-
-### Response Model Validation/Serialization Robustness
-
-- **`astraapi/_compat/v2.py`** — `ModelField.validate()` now catches `TypeError` and `AttributeError` in addition to `ValidationError`. Pydantic v2's `validate_python(..., from_attributes=True)` can raise these exceptions when re-validating model instances that contain nested dicts (e.g., `model_construct` bypass) or when computed fields access missing attributes.
-- **`astraapi/applications.py`** — Both `_make_response_model_shim` and `_make_response_class_shim` now wrap `response_field.serialize()` in try-except to catch `TypeError` and `AttributeError` and convert them to `ResponseValidationError` instead of letting raw exceptions propagate and crash the request.
+Major performance release — pydantic validation and dependency injection overhead reduced by 3-8x on complex routes. `response_model` endpoints now skip redundant Pydantic re-validation. C++ coroutine inlining eliminates event-loop bounces for trivial async deps.
 
 ---
 
 ## Performance Improvements
 
-### CORS Origin Extraction Deduplication
+### Pydantic Validation Fast Path
 
-- **`astraapi/_cpp_server.py`** — Added `_extract_origin(raw_headers)` helper that scans the raw header list once and extracts the `Origin` value. Replaced 6 copy-pasted inline origin-scan blocks across `_dispatch_exception`, `_handle_async`, `_handle_stream`, `_handle_async_di`, `_handle_middleware_result`, and `_handle_pydantic`.
+- **`astraapi/routing.py`** — Extended `_is_trivial_schema()` to accept `int`/`float`/`bool` alongside `str`. The `_fast_validate` closure now performs lightweight builtin coercion (~50ns) instead of Pydantic `TypeAdapter.validate_python()` (~2-5µs) for scalar params with no constraints (`min_length`, `ge`, `le`, `pattern`, etc.). C++ fast_spec extraction already supplies the correct raw types.
 
-### Middleware Chain Optimizations
+- **`astraapi/dependencies/utils.py`** — `_validate_value_with_model_field()` now skips Pydantic entirely when the value is already the correct Python type and the core_schema has no constraint keys. Uses module-level `_TRIVIAL_CONSTRAINT_KEYS` frozenset (avoiding per-call construction). Only applies to non-body params (query/header/cookie/path).
 
-- **`astraapi/_cpp_server.py`** — Hoisted `Request`, `Response`, and `JSONResponse` imports in `_run_http_middleware` from per-call to module level. Added `_ConstNext` class (with `__slots__`) to eliminate per-layer closure allocation in the middleware dispatch chain.
+### Pre-Encoded Response Body Fast Path
 
-### CORSMiddleware Optimizations
+- **`astraapi/applications.py`** — `_make_fast_dep_shim()` detects when an endpoint returns a Pydantic model instance AND the route has a `response_model` configured. Calls `model_dump_json(by_alias=True)` directly and returns the JSON string, skipping C++ `TypeAdapter.validate_python()` + `serialize_python()` + JSON re-serialization (3 redundant operations).
 
-- **`astraapi/_middleware_impl.py`** — Added `_CorsSendWrapper` class with `__slots__` to replace the per-request `_send_wrapper` closure inside `CORSMiddleware.__call__`. Pre-computed `frozenset` for `allow_headers` enables O(1) preflight header validation instead of rebuilding a `set` on every preflight request. Switched to raw-bytes comparison before `decode()` when scanning for the `Origin` header.
+- **`cpp_core/src/app.cpp`** — Pre-encoded body fast path (bytes/str check) placed BEFORE the `response_model_local` validation block. When Python returns bytes or str, C++ writes it directly to transport without touching response_model validation or JSON serialization.
 
-### GZipMiddleware Optimization
+### Pre-Interned Spec Keys
 
-- **`astraapi/_middleware_impl.py`** — Hoisted `import gzip` from inside `GZipMiddleware.__call__` to module level.
+- **`astraapi/dependencies/utils.py`** — `sys.intern()` called on field names and aliases at route registration time (inside `_precomputed_batch_specs`). Pre-interned `py_field_name` and `py_lookup_key` passed as extra dict fields in the batch specs.
 
-### Dependency Injection Import Hoisting
+- **`cpp_core/src/param_extractor.cpp`** — `batch_extract_params_inline()` checks for pre-interned keys from Python before calling `PyUnicode_InternFromString()`. Uses `Py_INCREF` on cached refs instead of interning per-request. Added cleanup loop (`Py_XDECREF`) at function exit.
 
-- **`astraapi/routing.py`** — Hoisted `BackgroundTasks`, `SecurityScopes`, `contextmanager`, `TypeAdapter`, and `_cpp_server` ContextVars (`_current_raw_headers`, `_current_method`, `_current_path`, `_current_query_string`) to module level. All three DI resolvers (`_resolve_deps_sync`, `_resolve_deps_async`, `_resolve_deps_gen`) now use these module-level references instead of inline `try/except ImportError` blocks on every call.
+### Response Cache Size Guard
+
+- **`cpp_core/src/app.cpp`** — `hash_dict_content()` returns 0 (skip cache) for dicts with >50 keys, avoiding expensive recursive hashing on large responses.
+
+### Memory Allocation Reductions
+
+- **`astraapi/dependencies/utils.py`** — `all_param_fields` construction replaced 5 list allocations (`list(path) + list(query) + list(header) + list(cookie)`) with `itertools.chain()` iterator. Cookie string parsing uses list-accumulate-then-join instead of O(N²) `+=` concatenation in both batch and fallback paths.
+
+### Multi-Worker SO_REUSEPORT Detection Fix
+
+- **`astraapi/_multiworker.py`** — SO_REUSEPORT capability test now binds to ephemeral port (0) instead of the actual listen port, avoiding conflict with the parent's already-bound socket.
+
+---
+
+## Architecture
+
+```
+                      ┌─────────────────────────────────────┐
+                      │  Python _fast_dep_shim               │
+                      │  model_dump_json() → str             │
+                      └──────────────┬──────────────────────┘
+                                     │ JSON string
+                      ┌──────────────▼──────────────────────┐
+                      │  C++ dispatch_one_request            │
+                      │  PyBytes/PyUnicode check FIRST       │
+                      │  ↓ skip validate_python              │
+                      │  ↓ skip serialize_python             │
+                      │  ↓ skip json_writer re-serialize      │
+                      │  → transport.write(raw_bytes)        │
+                      └──────────────────────────────────────┘
+```
 
 ---
 
@@ -66,5 +70,3 @@ Patch release with CORS reliability fixes, Server-Sent Events (SSE) support, C++
 ```bash
 pip install astraapi
 ```
-
-Requires **Python 3.14+** and a C++20-capable compiler (GCC 10+, Clang 12+, MSVC 2019+). Pre-built wheels are provided for Linux x86_64/aarch64, macOS arm64, and Windows x64.

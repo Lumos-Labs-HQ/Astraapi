@@ -947,6 +947,13 @@ async def solve_dependencies(
 
 _IMMUTABLE_TYPES = (type(None), str, int, float, bool, tuple, frozenset, bytes)
 
+# Module-level frozenset for _validate_value_with_model_field trivial-schema check.
+# Avoids ~200ns frozenset() construction per field per request.
+_TRIVIAL_CONSTRAINT_KEYS = frozenset((
+    'min_length', 'max_length', 'pattern', 'ge', 'le', 'gt', 'lt',
+    'multiple_of', 'strict', 'max_digits', 'decimal_places',
+))
+
 
 def _safe_default(val: Any) -> Any:
     """Return field default efficiently: skip copy for immutable types."""
@@ -963,27 +970,15 @@ def _validate_value_with_model_field(
             return None, [get_missing_field_error(loc=loc)]
         else:
             return _safe_default(field.default), []
-    # Trivial-schema fast path: C++ batch_extract_params_inline already coerces
-    # str/int/float/bool from query/header/cookie sources.  Skip Pydantic
-    # TypeAdapter.validate_python() when the core_schema has no constraints.
-    # Saves ~2-5µs per field (up to 50µs for endpoints with many params).
-    # NOTE: Skip only for query/header/cookie/path — body params need full
-    # Pydantic model validation (raw dicts, not coerced scalars).
-    # Also verify correct Python type — C++ batch_coerce_scalars returns raw
-    # strings when coercion fails, so we must route those to Pydantic for 422.
+    # Trivial-schema fast path: C++ batch_coerce_scalars already returned
+    # the correct Python type.  Skip Pydantic TypeAdapter.validate_python()
+    # when core_schema has no constraints and the value type matches.
     _ta = field._type_adapter
     _cs = _ta.core_schema
     _loc0 = loc[0] if loc else ""
     if _loc0 not in ("body",) and isinstance(_cs, dict):
         _st = _cs.get('type')
-        _CONSTRAINT_KEYS = frozenset((
-            'min_length', 'max_length', 'pattern', 'ge', 'le', 'gt', 'lt',
-            'multiple_of', 'strict', 'max_digits', 'decimal_places',
-        ))
-        if _st in ('str', 'int', 'float', 'bool') and not _CONSTRAINT_KEYS.intersection(_cs):
-            # C++ batch_coerce_scalars already returned the correct Python type.
-            # If it couldn't coerce (raw string for int/float/bool), fall through
-            # to Pydantic for proper 422 validation error.
+        if _st in ('str', 'int', 'float', 'bool') and not _TRIVIAL_CONSTRAINT_KEYS.intersection(_cs):
             if (_st == 'str' and isinstance(value, str)) or \
                (_st == 'int' and isinstance(value, int)) or \
                (_st == 'float' and isinstance(value, (int, float)) and not isinstance(value, bool)) or \

@@ -1432,6 +1432,9 @@ class AstraAPI(AppBase):
             '__bg_tasks__', '__exit_stack__', '__gen_deps_ran__',
         ))
 
+        # Check if route has a response_model — enables model_dump_json() fast path
+        _has_response_model = getattr(route, 'response_model', None) is not None
+
         async def _fast_dep_shim(**kwargs: Any) -> Any:
             # Pop C++ meta keys that dep_solver / C++ may have left behind
             for _mk in _META_KEYS:
@@ -1468,8 +1471,9 @@ class AstraAPI(AppBase):
 
             try:
                 if _is_async:
-                    return await original_endpoint(**kwargs)
-                return original_endpoint(**kwargs)
+                    _raw = await original_endpoint(**kwargs)
+                else:
+                    _raw = original_endpoint(**kwargs)
             except Exception as _exc:
                 if _exc_handlers:
                     for _exc_cls, _exc_handler in _exc_handlers.items():
@@ -1480,6 +1484,19 @@ class AstraAPI(AppBase):
                                 _hr = await _hr
                             return _hr
                 raise
+
+            # When route has response_model and endpoint returns a Pydantic model,
+            # call model_dump_json(by_alias=True) to skip C++ validate_python +
+            # serialize_python + JSON re-serialize (3 redundant operations).
+            if _has_response_model and _raw is not None:
+                try:
+                    _mdj = getattr(_raw, 'model_dump_json', None)
+                    if _mdj is not None:
+                        return _mdj(by_alias=True)
+                except Exception:
+                    pass
+
+            return _raw
 
         _fast_dep_shim.__name__ = getattr(original_endpoint, '__name__', '_fast_dep_shim')
         return _fast_dep_shim

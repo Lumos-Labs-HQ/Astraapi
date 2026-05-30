@@ -5352,6 +5352,40 @@ body_done:
     }
 
     if (send_status == PYGEN_RETURN) {
+        // ── Pre-encoded body fast path — bytes or str from Python ──────────
+        // When _fast_dep_shim returns model_dump_json() output (str) or
+        // encoded JSON bytes, write directly to transport — skip response_model
+        // validation + serialize_python + JSON re-serialize.
+        if (raw_result && (PyBytes_Check(raw_result) || PyUnicode_Check(raw_result))) {
+            const char* body_ptr = nullptr;
+            Py_ssize_t body_len = 0;
+            PyObject* encoded = nullptr;
+            if (PyBytes_Check(raw_result)) {
+                body_ptr = PyBytes_AS_STRING(raw_result);
+                body_len = PyBytes_GET_SIZE(raw_result);
+            } else {
+                encoded = PyUnicode_AsUTF8String(raw_result);
+                if (encoded) {
+                    body_ptr = PyBytes_AS_STRING(encoded);
+                    body_len = PyBytes_GET_SIZE(encoded);
+                }
+            }
+            if (body_ptr && body_len > 0) {
+                PyRef resp_bytes(build_http_response_bytes(status_code_local, body_ptr, (size_t)body_len, req.keep_alive,
+                                                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
+                                                            nullptr, is_head_method));
+                if (resp_bytes) {
+                    write_to_transport(transport, resp_bytes.get());
+                }
+            }
+            Py_XDECREF(encoded);
+            Py_DECREF(raw_result);
+            fire_post_response_hook(self, req.method.data, req.method.len,
+                                    req.path.data, req.path.len, status_code_local, request_start_time);
+            --self->counters.active_requests;
+            return make_consumed_true(self, req.total_consumed);
+        }
+
         // ── Response model validation ────────────────────────────────────
         // If route has a response_model, validate + serialize through Pydantic
         if (response_model_local && response_model_local != Py_None) {
