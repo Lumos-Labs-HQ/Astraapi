@@ -5353,10 +5353,11 @@ body_done:
 
     if (send_status == PYGEN_RETURN) {
         // ── Pre-encoded body fast path — bytes or str from Python ──────────
-        // When _fast_dep_shim returns model_dump_json() output (str) or
-        // encoded JSON bytes, write directly to transport — skip response_model
-        // validation + serialize_python + JSON re-serialize.
-        if (raw_result && (PyBytes_Check(raw_result) || PyUnicode_Check(raw_result))) {
+        // When response_model is configured AND Python shim returns bytes or
+        // model_dump_json() str, write directly — skip validate/JSON re-serialize.
+        // Only for response_model routes: ensures the str is valid JSON.
+        if (raw_result && response_model_local && response_model_local != Py_None &&
+            (PyBytes_Check(raw_result) || PyUnicode_Check(raw_result))) {
             const char* body_ptr = nullptr;
             Py_ssize_t body_len = 0;
             PyObject* encoded = nullptr;
