@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - 'astraapi/**'
-      - 'core/**'
+      - 'cpp_core/**'
       - 'scripts/**'
       - 'pyproject.toml'
       - 'docs_src/**'
