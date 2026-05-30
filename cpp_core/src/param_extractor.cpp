@@ -2,9 +2,10 @@
 #include <Python.h>
 #include "pyref.hpp"
 #include "compat.hpp"
+#include "platform.hpp"
 #include <cstring>
+#include <cstdlib>
 #include <vector>
-#include <charconv>
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Inline param extraction — no global registry, no mutex.
@@ -41,17 +42,17 @@ static PyObject* coerce_value(PyObject* val, int type_tag) {
 
     switch (type_tag) {
         case 1: {  // int
-            long long v;
-            auto ec = std::from_chars(s, s + slen, v);
-            if (LIKELY(ec.ec == std::errc{} && ec.ptr == s + slen))
+            char* endptr;
+            long long v = strtoll(s, &endptr, 10);
+            if (LIKELY(endptr == s + slen))
                 return PyLong_FromLongLong(v);
             Py_INCREF(val);
             return val;
         }
-        case 2: {  // float
-            double v;
-            auto ec = std::from_chars(s, s + slen, v);
-            if (LIKELY(ec.ec == std::errc{} && ec.ptr == s + slen))
+        case 2: {  // float — use strtod for macOS compatibility (Apple Clang 15 lacks from_chars<double>)
+            char* endptr;
+            double v = strtod(s, &endptr);
+            if (LIKELY(endptr == s + slen))
                 return PyFloat_FromDouble(v);
             Py_INCREF(val);
             return val;
