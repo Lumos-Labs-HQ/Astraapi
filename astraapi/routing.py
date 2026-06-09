@@ -2578,28 +2578,35 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
         _all_sync = not any(n['is_coro'] for n in _fast_nodes)
 
         if _all_coro:
-            async def _fast_solve_multi_async(kd: dict) -> tuple:
+            # Inline coroutine driver: sync solver that tries coro.send(None)
+            # for zero-overhead dep resolution. If a dep yields (real I/O),
+            # falls back to returning an async coroutine that C++ drives.
+            def _fast_solve_multi_inline(kd: dict) -> tuple:
                 _ov = (
                     getattr(dependency_overrides_provider, 'dependency_overrides', None)
                     if dependency_overrides_provider is not None else None
                 ) or {}
                 if _ov:
+                    import asyncio as _ialo
                     _nodes, _inj, _consumed2 = _build_nodes(dependant, _ov, dep_consumed_params)
-                    try:
-                        from astraapi._cpp_server import _current_query_string as _cqs
-                        _qs_bytes = _cqs.get()
-                    except Exception:
-                        _qs_bytes = b''
-                    if _qs_bytes:
-                        from urllib.parse import parse_qs as _pqs
-                        for _qk, _qvs in _pqs(_qs_bytes.decode('latin-1'), keep_blank_values=True).items():
-                            if _qk not in kd:
-                                kd[_qk] = _qvs[0] if len(_qvs) == 1 else _qvs
-                    _resolved, _errors, _sub = await _resolve_deps_async(_nodes, kd, _app=dependency_overrides_provider)
-                    _injected = {k: v for k, v in _resolved.items() if k in _inj} if _inj else {}
-                    for pname in _consumed2:
-                        kd.pop(pname, None)
-                    return (_injected, _errors, kd.get('__bg_tasks__'), _sub)
+                    async def _override_wrapper():
+                        try:
+                            from astraapi._cpp_server import _current_query_string as _cqs
+                            _qs_bytes = _cqs.get()
+                        except Exception:
+                            _qs_bytes = b''
+                        if _qs_bytes:
+                            from urllib.parse import parse_qs as _pqs
+                            for _qk, _qvs in _pqs(_qs_bytes.decode('latin-1'), keep_blank_values=True).items():
+                                if _qk not in kd:
+                                    kd[_qk] = _qvs[0] if len(_qvs) == 1 else _qvs
+                        await _ialo.sleep(0)
+                        _resolved, _errors, _sub = await _resolve_deps_async(_nodes, kd, _app=dependency_overrides_provider)
+                        _inj2 = {k: v for k, v in _resolved.items() if k in _inj} if _inj else {}
+                        for pname in _consumed2:
+                            kd.pop(pname, None)
+                        return (_inj2, _errors, kd.get('__bg_tasks__'), _sub)
+                    return _override_wrapper()
 
                 resolved: dict = {}
                 errors: list = []
@@ -2609,12 +2616,45 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
                     if len(errors) > _prev_err_count:
                         continue
                     _dk = _build_node_kwargs(kd, node, resolved)
+                    _coro = node['call'](**_dk)
                     try:
-                        _result = await node['call'](**_dk)
+                        _coro.send(None)
+                    except StopIteration as _si:
+                        _result = _si.value
                     except _DepHTTPExc:
+                        try: _coro.close()
+                        except Exception: pass
                         raise
                     except Exception as _e:
+                        try: _coro.close()
+                        except Exception: pass
                         raise _DepHTTPExc(status_code=500, detail=str(_e)) from _e
+                    else:
+                        # Yielded — needs event loop. Fall back to async.
+                        try: _coro.close()
+                        except Exception: pass
+                        import asyncio as _ialo2
+
+                        async def _yield_fallback():
+                            _resolved2: dict = {}
+                            _errs: list = list(errors)
+                            for _n2 in _fast_nodes:
+                                _dk2 = _build_node_kwargs(kd, _n2, _resolved2)
+                                try:
+                                    _cr2 = _n2['call'](**_dk2)
+                                    _result2 = await _cr2
+                                except _DepHTTPExc:
+                                    raise
+                                except Exception as _e2:
+                                    raise _DepHTTPExc(status_code=500, detail=str(_e2)) from _e2
+                                _resolved2[_n2['name']] = _result2
+                                for _a in _n2['aliases']:
+                                    _resolved2[_a] = _result2
+                            for _pn in _consumed:
+                                kd.pop(_pn, None)
+                            _inj2 = {_k: _v for _k, _v in _resolved2.items() if _k in injectable_names} if injectable_names else {}
+                            return (_inj2, _errs, None, None)
+                        return _yield_fallback()
                     resolved[node['name']] = _result
                     for alias in node['aliases']:
                         resolved[alias] = _result
@@ -2624,8 +2664,8 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
                 _injected = {k: v for k, v in resolved.items() if k in injectable_names} if injectable_names else {}
                 return (_injected, errors, None, None)
 
-            _fast_solve_multi_async._has_gen_deps = False
-            return _fast_solve_multi_async
+            _fast_solve_multi_inline._has_gen_deps = False
+            return _fast_solve_multi_inline
 
         elif _all_sync:
             def _fast_solve_multi_sync(kd: dict) -> tuple:
