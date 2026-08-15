@@ -118,6 +118,8 @@ class WebSocket(HTTPConnection):
         """Send a text message."""
         cpp_ws = self._cpp_ws
         if cpp_ws is not None:
+            # FIX M-28: Check state before sending via C++ fast path
+            self._assert_connected()
             await cpp_ws.send_text(data)
             return
         self._assert_connected()
@@ -127,6 +129,8 @@ class WebSocket(HTTPConnection):
         """Send a binary message."""
         cpp_ws = self._cpp_ws
         if cpp_ws is not None:
+            # FIX M-28: Check state before sending via C++ fast path
+            self._assert_connected()
             await cpp_ws.send_bytes(data)
             return
         self._assert_connected()

@@ -483,7 +483,9 @@ def _run_fork_supervisor(
                     worker_started_at[worker_id] = time.monotonic()
                     print(f"  Worker {worker_id} restarted (pid {new_pid})")
         else:
-            time.sleep(0.1)
+            # FIX M-06: Use 1.0s sleep instead of 0.1s busy-spin when all workers alive.
+            # Signal interrupts will break out of sleep early via EINTR.
+            time.sleep(1.0)
 
     # ── Shutdown ──
     print("\nShutting down workers...")
@@ -586,7 +588,8 @@ def _run_subprocess_supervisor(
             print(f"  Worker {worker_id} restarted (pid {proc.pid})")
 
         if not _shutdown:
-            time.sleep(0.1)
+            # FIX M-06: Use 1.0s sleep instead of 0.1s busy-spin
+            time.sleep(1.0)
 
     # Shutdown
     print("\nShutting down workers...")

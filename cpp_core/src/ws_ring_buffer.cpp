@@ -272,6 +272,10 @@ std::pair<uint8_t*, size_t> WsRingBuffer::readable_contiguous() {
 // Pre-allocates a pool of WsConnectionState objects and uses a free-list
 // for O(1) acquire/release. Better cache locality and zero malloc overhead
 // per connection. Falls back to new/delete when pool is exhausted.
+// FIX C-13: Added mutex for thread-safety under free-threaded Python.
+// FIX H-26: Added bounds check in release() to prevent buffer overflow on double-free.
+
+#include <mutex>
 
 namespace {
 
@@ -282,6 +286,7 @@ class WsConnectionSlab {
     WsConnectionState slab_[SLAB_SIZE];
     WsConnectionState* free_list_[SLAB_SIZE];
     size_t free_count_ = 0;
+    std::mutex mtx_;  // FIX C-13: thread-safe access
 
 public:
     WsConnectionSlab() {
@@ -292,6 +297,7 @@ public:
     }
 
     WsConnectionState* acquire() {
+        std::lock_guard<std::mutex> lock(mtx_);
         if (free_count_ > 0) {
             auto* state = free_list_[--free_count_];
             state->reset();  // ensure clean state
@@ -302,8 +308,14 @@ public:
     }
 
     void release(WsConnectionState* state) {
+        std::lock_guard<std::mutex> lock(mtx_);
         // Check if state belongs to our slab
         if (state >= &slab_[0] && state < &slab_[SLAB_SIZE]) {
+            // FIX H-26: bounds check to prevent buffer overflow on double-free
+            if (free_count_ >= SLAB_SIZE) {
+                // Already full — this is a double-free. Just ignore.
+                return;
+            }
             state->reset();
             free_list_[free_count_++] = state;
         } else {

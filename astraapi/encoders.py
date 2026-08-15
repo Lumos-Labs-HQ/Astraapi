@@ -198,6 +198,7 @@ def jsonable_encoder(
             """
         ),
     ] = True,
+    _seen_ids: Optional[set[int]] = None,
 ) -> Any:
     """
     Convert any object to something that can be encoded in JSON.
@@ -224,6 +225,17 @@ def jsonable_encoder(
         and isinstance(obj, (str, int, float, bool, type(None)))
     ):
         return obj  # Already JSON-safe primitive
+
+    # Circular reference detection: track mutable container objects by id within
+    # the current recursion path. Immutable primitives are skipped since they
+    # cannot form reference cycles.
+    if _seen_ids is None:
+        _seen_ids = set()
+    if not isinstance(obj, (str, int, float, bool, bytes, type(None))):
+        obj_id = id(obj)
+        if obj_id in _seen_ids:
+            return None
+        _seen_ids = _seen_ids | {obj_id}
 
     custom_encoder = custom_encoder or {}
     if custom_encoder:
@@ -252,6 +264,7 @@ def jsonable_encoder(
             exclude_none=exclude_none,
             exclude_defaults=exclude_defaults,
             sqlalchemy_safe=sqlalchemy_safe,
+            _seen_ids=_seen_ids,
         )
     if dataclasses.is_dataclass(obj):
         assert not isinstance(obj, type)
@@ -266,6 +279,7 @@ def jsonable_encoder(
             exclude_none=exclude_none,
             custom_encoder=custom_encoder,
             sqlalchemy_safe=sqlalchemy_safe,
+            _seen_ids=_seen_ids,
         )
     if isinstance(obj, Enum):
         return obj.value
@@ -299,6 +313,7 @@ def jsonable_encoder(
                     exclude_none=exclude_none,
                     custom_encoder=custom_encoder,
                     sqlalchemy_safe=sqlalchemy_safe,
+                    _seen_ids=_seen_ids,
                 )
                 encoded_value = jsonable_encoder(
                     value,
@@ -307,6 +322,7 @@ def jsonable_encoder(
                     exclude_none=exclude_none,
                     custom_encoder=custom_encoder,
                     sqlalchemy_safe=sqlalchemy_safe,
+                    _seen_ids=_seen_ids,
                 )
                 encoded_dict[encoded_key] = encoded_value
         return encoded_dict
@@ -324,6 +340,7 @@ def jsonable_encoder(
                     exclude_none=exclude_none,
                     custom_encoder=custom_encoder,
                     sqlalchemy_safe=sqlalchemy_safe,
+                    _seen_ids=_seen_ids,
                 )
             )
         return encoded_list
@@ -358,4 +375,5 @@ def jsonable_encoder(
         exclude_none=exclude_none,
         custom_encoder=custom_encoder,
         sqlalchemy_safe=sqlalchemy_safe,
+        _seen_ids=_seen_ids,
     )

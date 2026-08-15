@@ -57,7 +57,10 @@ class _CorsSendWrapper:
             _origin = self.origin
             _mw = self.middleware
             if _origin and _mw._is_origin_allowed(_origin):
-                if _mw.allow_all_origins:
+                # FIX M-24: When allow_credentials is True, MUST echo the
+                # specific origin instead of "*" per the Fetch spec.
+                # Browsers reject Access-Control-Allow-Origin: * with credentials.
+                if _mw.allow_all_origins and not _mw.allow_credentials:
                     response_headers.append((b"access-control-allow-origin", b"*"))
                 else:
                     response_headers.append((b"access-control-allow-origin", _origin.encode("latin-1")))
@@ -375,9 +378,18 @@ class CORSMiddleware:
 
         if method == 'OPTIONS' and origin and self._is_origin_allowed(origin):
             # Preflight request
-            headers = dict(scope.get('headers', []))
-            requested_method = headers.get(b'access-control-request-method', b'').decode('latin-1')
-            requested_headers = headers.get(b'access-control-request-headers', b'').decode('latin-1')
+            # FIX H-18: Use direct iteration instead of dict() to handle duplicate headers
+            raw_headers = scope.get('headers', [])
+            requested_method = b''
+            requested_headers = b''
+            for h_name, h_value in raw_headers:
+                if h_name == b'access-control-request-method':
+                    requested_method = h_value
+                elif h_name == b'access-control-request-headers':
+                    # Multiple values should be comma-joined per spec
+                    requested_headers = h_value if not requested_headers else requested_headers + b', ' + h_value
+            requested_method = requested_method.decode('latin-1')
+            requested_headers = requested_headers.decode('latin-1')
             preflight_headers = list(self.preflight_headers)
             if not self.allow_all_origins:
                 preflight_headers.append((b"access-control-allow-origin", origin.encode("latin-1")))
@@ -461,6 +473,9 @@ class GZipMiddleware:
     """ASGI middleware that gzip-compresses response bodies larger than
     the configured minimum size.
 
+    FIX H-16: Uses streaming compression with zlib.compressobj() to handle
+    chunked responses without buffering everything in memory.
+
     Parameters
     ----------
     app : ASGIApp
@@ -486,34 +501,105 @@ class GZipMiddleware:
             await self.app(scope, receive, send)
             return
         # Check if client accepts gzip
-        headers = dict(scope.get('headers', []))
-        accept_enc = headers.get(b'accept-encoding', b'').decode('latin-1')
+        # FIX H-18 (also here): iterate headers directly instead of dict()
+        accept_enc = ''
+        for h_name, h_value in scope.get('headers', []):
+            if h_name == b'accept-encoding':
+                accept_enc = h_value.decode('latin-1')
+                break
         if 'gzip' not in accept_enc:
             await self.app(scope, receive, send)
             return
-        # Collect response
-        _status = [200]
+
+        import zlib
+        # Streaming gzip state
+        _initial_body = bytearray()
+        _started = [False]
         _resp_headers = [[]]
-        _body = [b'']
+        _status = [200]
+        _compressor = [None]
+        _more_body_seen = [False]
+
         async def _send_wrapper(msg: Any) -> None:
             if msg['type'] == 'http.response.start':
                 _status[0] = msg['status']
                 _resp_headers[0] = list(msg.get('headers', []))
+                _started[0] = True
             elif msg['type'] == 'http.response.body':
-                _body[0] += msg.get('body', b'')
+                body_chunk = msg.get('body', b'')
+                more_body = msg.get('more_body', False)
+
+                if _compressor[0] is not None:
+                    # Already streaming compressed — compress this chunk
+                    compressed = _compressor[0].compress(body_chunk)
+                    if not more_body:
+                        compressed += _compressor[0].flush(zlib.Z_FINISH)
+                    if compressed:
+                        await send({
+                            'type': 'http.response.body',
+                            'body': bytes(compressed),
+                            'more_body': more_body,
+                        })
+                    elif not more_body:
+                        await send({
+                            'type': 'http.response.body',
+                            'body': b'',
+                            'more_body': False,
+                        })
+                elif more_body:
+                    # First chunk with more_body=True — decide based on size
+                    _initial_body.extend(body_chunk)
+                    if len(_initial_body) >= self.minimum_size:
+                        # Start streaming compression
+                        _compressor[0] = zlib.compressobj(
+                            self.compresslevel, zlib.DEFLATED,
+                            zlib.MAX_WBITS | 16  # gzip format
+                        )
+                        hdrs = [(k, v) for k, v in _resp_headers[0]
+                                if k.lower() not in (b'content-length', b'content-encoding')]
+                        hdrs.append((b'content-encoding', b'gzip'))
+                        hdrs.append((b'vary', b'Accept-Encoding'))
+                        # Remove content-length since we're streaming compressed
+                        await send({'type': 'http.response.start', 'status': _status[0], 'headers': hdrs})
+                        compressed = _compressor[0].compress(bytes(_initial_body))
+                        if compressed:
+                            await send({'type': 'http.response.body', 'body': bytes(compressed), 'more_body': True})
+                    _more_body_seen[0] = True
+                else:
+                    # Single body message (no streaming) — buffer and decide
+                    full_body = bytes(_initial_body) + body_chunk if _initial_body else body_chunk
+                    if len(full_body) >= self.minimum_size:
+                        compressed = _gzip.compress(full_body, compresslevel=self.compresslevel)
+                        hdrs = [(k, v) for k, v in _resp_headers[0]
+                                if k.lower() not in (b'content-length', b'content-encoding')]
+                        hdrs.append((b'content-encoding', b'gzip'))
+                        hdrs.append((b'content-length', str(len(compressed)).encode()))
+                        hdrs.append((b'vary', b'Accept-Encoding'))
+                        await send({'type': 'http.response.start', 'status': _status[0], 'headers': hdrs})
+                        await send({'type': 'http.response.body', 'body': compressed})
+                    else:
+                        # Too small to compress — send as-is
+                        if not _more_body_seen[0]:
+                            await send({'type': 'http.response.start', 'status': _status[0], 'headers': _resp_headers[0]})
+                        await send({'type': 'http.response.body', 'body': full_body})
+
         await self.app(scope, receive, _send_wrapper)
-        body = _body[0]
-        if len(body) >= self.minimum_size:
-            compressed = _gzip.compress(body, compresslevel=self.compresslevel)
-            hdrs = [(k, v) for k, v in _resp_headers[0]
-                    if k.lower() not in (b'content-length', b'content-encoding')]
-            hdrs.append((b'content-encoding', b'gzip'))
-            hdrs.append((b'content-length', str(len(compressed)).encode()))
-            await send({'type': 'http.response.start', 'status': _status[0], 'headers': hdrs})
-            await send({'type': 'http.response.body', 'body': compressed})
-        else:
-            await send({'type': 'http.response.start', 'status': _status[0], 'headers': _resp_headers[0]})
-            await send({'type': 'http.response.body', 'body': body})
+
+        # If streaming was deferred (all chunks received without triggering compression)
+        # and no body was sent yet, flush buffered content
+        if _started[0] and _compressor[0] is None and _more_body_seen[0] and _initial_body:
+            full_body = bytes(_initial_body)
+            if len(full_body) >= self.minimum_size:
+                compressed = _gzip.compress(full_body, compresslevel=self.compresslevel)
+                hdrs = [(k, v) for k, v in _resp_headers[0]
+                        if k.lower() not in (b'content-length', b'content-encoding')]
+                hdrs.append((b'content-encoding', b'gzip'))
+                hdrs.append((b'content-length', str(len(compressed)).encode()))
+                await send({'type': 'http.response.start', 'status': _status[0], 'headers': hdrs})
+                await send({'type': 'http.response.body', 'body': compressed})
+            else:
+                await send({'type': 'http.response.start', 'status': _status[0], 'headers': _resp_headers[0]})
+                await send({'type': 'http.response.body', 'body': full_body})
 
 
 # ---------------------------------------------------------------------------

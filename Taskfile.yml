@@ -1,0 +1,51 @@
+version: "3"
+
+vars:
+  GO: go1.27rc2
+  UV: uv
+  ASTRA_PORT: 8001
+  FAST_PORT: 8002
+  DURATION: 10s
+  CONNS: 64
+
+tasks:
+  build:
+    desc: Build C++ core extension
+    cmds:
+      - bash scripts/build_core.sh
+
+  test:
+    desc: Run full test suite
+    cmds:
+      - "{{.UV}} run pytest tests/ -q"
+
+  run-astra:
+    desc: Start AstraAPI server (1 worker, CPU 0)
+    cmds:
+      - taskset -c 0 {{.UV}} run python bench/servers/astraapi_server.py
+
+  run-fast:
+    desc: Start FastAPI+Uvicorn server (1 worker, CPU 1)
+    cmds:
+      - taskset -c 1 {{.UV}} run uvicorn bench.servers.fastapi_server:app --host 127.0.0.1 --port {{.FAST_PORT}} --workers 1 --log-level error
+
+  stop:
+    desc: Stop all benchmark servers
+    cmds:
+      - pkill -f "astraapi_server.py" || true
+      - pkill -f "fastapi_server:app" || true
+
+  bench-astra:
+    desc: benchmark AstraAPI (all workloads)
+    cmds:
+      - cd bench && {{.GO}} run . -target astra -d {{.DURATION}} -c {{.CONNS}}
+
+  bench-fast:
+    desc: benchmark FastAPI (all workloads)
+    cmds:
+      - cd bench && {{.GO}} run . -target fast -d {{.DURATION}} -c {{.CONNS}}
+
+  bench:
+    desc: benchmark both AstraAPI and FastAPI (comparison)
+    cmds:
+      - cd bench && {{.GO}} run . -target both -d {{.DURATION}} -c {{.CONNS}}

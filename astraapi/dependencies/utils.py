@@ -595,7 +595,15 @@ async def solve_dependencies(
     # people might be monkey patching this function (although that's not supported)
     async_exit_stack: AsyncExitStack,
     embed_body_fields: bool,
+    _depth: int = 0,
 ) -> SolvedDependency:
+    # FIX M-23: Prevent infinite recursion from circular dependencies
+    _MAX_DEPENDENCY_DEPTH = 100
+    if _depth > _MAX_DEPENDENCY_DEPTH:
+        raise RuntimeError(
+            f"Maximum dependency resolution depth ({_MAX_DEPENDENCY_DEPTH}) exceeded. "
+            f"This likely indicates circular dependencies in your dependency tree."
+        )
     # Fast exit for endpoints with no params and no deps (e.g. simple() -> dict)
     if (
         not dependant.dependencies
@@ -669,6 +677,7 @@ async def solve_dependencies(
             dependency_cache=dependency_cache,
             async_exit_stack=async_exit_stack,
             embed_body_fields=embed_body_fields,
+            _depth=_depth + 1,
         )
         background_tasks = solved_result.background_tasks
         if solved_result.errors:

@@ -551,6 +551,7 @@ void json_writer_cleanup() {
     Py_CLEAR(s_uuid_type);
     Py_CLEAR(s_enum_type);
     Py_CLEAR(s_isoformat);
+    Py_CLEAR(s_total_seconds);  // FIX L-12: was missing from cleanup
     Py_CLEAR(s_value);
     Py_CLEAR(s_model_dump);
     Py_CLEAR(s_is_dataclass);

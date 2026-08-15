@@ -155,9 +155,14 @@ class MutableHeaders:
         return f"MutableHeaders({self.items()!r})"
 
     def append(self, key: str, value: str) -> None:
-        """Append a header value without removing existing entries."""
+        """Append a header value without removing existing entries.
+        FIX H-20: Don't overwrite _index for multi-value headers —
+        the index tracks only the FIRST occurrence for __setitem__/__delitem__.
+        Multi-value headers (like Set-Cookie) use getlist() for retrieval."""
         key_bytes = key.lower().encode("latin-1")
-        self._index[key_bytes] = len(self._raw)
+        # Only index the first occurrence — subsequent appends are multi-value
+        if key_bytes not in self._index:
+            self._index[key_bytes] = len(self._raw)
         self._raw.append((key_bytes, value.encode("latin-1")))
 
     def update(self, other: Union[Mapping[str, str], Sequence[tuple[str, str]]]) -> None:
@@ -266,22 +271,29 @@ class Response:
         httponly: bool = False,
         samesite: Optional[str] = "lax",
     ) -> None:
-        """Append a Set-Cookie header."""
-        cookie_val = f"{quote(key)}={quote(value)}"
+        """Append a Set-Cookie header.
+        FIX M-21: Use http.cookies.Morsel-compatible quoting instead of
+        urllib.parse.quote() which produces incorrect percent-encoding for cookies."""
+        import http.cookies
+        cookie: http.cookies.BaseCookie = http.cookies.BaseCookie()
+        cookie[key] = value
+        morsel = cookie[key]
         if max_age is not None:
-            cookie_val += f"; Max-Age={max_age}"
+            morsel["max-age"] = str(max_age)
         if expires is not None:
-            cookie_val += f"; Expires={expires}"
+            morsel["expires"] = str(expires)
         if path:
-            cookie_val += f"; Path={path}"
+            morsel["path"] = path
         if domain:
-            cookie_val += f"; Domain={domain}"
+            morsel["domain"] = domain
         if secure:
-            cookie_val += "; Secure"
+            morsel["secure"] = True
         if httponly:
-            cookie_val += "; HttpOnly"
+            morsel["httponly"] = True
         if samesite:
-            cookie_val += f"; SameSite={samesite}"
+            morsel["samesite"] = samesite
+        # OutputString() produces the header value after "Set-Cookie: "
+        cookie_val = morsel.OutputString()
         self._raw_headers.append(
             (b"set-cookie", cookie_val.encode("latin-1"))
         )
@@ -459,6 +471,42 @@ class StreamingResponse(Response):
                 content_type += f"; charset={self.charset}"
             self._set_raw_header(b"content-type", content_type.encode("latin-1"))
 
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        """FIX H-15: Override __call__ to properly iterate body_iterator
+        instead of inheriting Response.__call__ which just sends empty self.body."""
+        await send({
+            "type": "http.response.start",
+            "status": self.status_code,
+            "headers": self._raw_headers,
+        })
+        # Iterate body_iterator — handle both async and sync iterators
+        async for chunk in self._iterate():
+            if not isinstance(chunk, bytes):
+                chunk = chunk.encode(self.charset) if isinstance(chunk, str) else bytes(chunk)
+            await send({
+                "type": "http.response.body",
+                "body": chunk,
+                "more_body": True,
+            })
+        # Send final empty chunk to signal end of body
+        await send({
+            "type": "http.response.body",
+            "body": b"",
+            "more_body": False,
+        })
+        if self.background is not None:
+            await self.background()
+
+    async def _iterate(self):
+        """Yield chunks from body_iterator (supports both async and sync iterators)."""
+        iterator = self.body_iterator
+        if hasattr(iterator, "__aiter__"):
+            async for chunk in iterator:
+                yield chunk
+        else:
+            for chunk in iterator:
+                yield chunk
+
 
 # ---------------------------------------------------------------------------
 # EventSourceResponse (SSE)
@@ -518,10 +566,16 @@ class EventSourceResponse(StreamingResponse):
         headers: Optional[dict[str, str]] = None,
         background: Any = None,
     ) -> None:
+        # FIX L-21: Add Cache-Control and Connection headers for proper SSE behavior
+        # behind CDNs and reverse proxies.
+        merged_headers = dict(headers) if headers else {}
+        merged_headers.setdefault("cache-control", "no-cache")
+        merged_headers.setdefault("connection", "keep-alive")
+        merged_headers.setdefault("x-accel-buffering", "no")  # nginx proxy buffering disable
         super().__init__(
             content=_sse_iterable(content),
             status_code=status_code,
-            headers=headers,
+            headers=merged_headers,
             background=background,
         )
 

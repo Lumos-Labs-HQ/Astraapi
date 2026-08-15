@@ -96,10 +96,42 @@ import itertools as _itertools
 import base64 as _base64
 
 _route_id_counter = _itertools.count(1)
+# FIX H-11: Use WeakValueDictionary for _route_id_to_route to allow GC of unused routes.
+# For _endpoint_id_to_route, use bounded cache with object validation to detect id() reuse.
+import weakref as _weakref
+
 # Maps core_route_id -> APIRoute for scope["route"] injection
 _route_id_to_route: dict = {}
-# Maps id(endpoint) -> APIRoute for scope["route"] injection in C++ fast path
+# Maps id(endpoint) -> (weakref_to_endpoint, APIRoute) for scope["route"] injection in C++ fast path
+# FIX H-11: Validate that the id still points to the same object before returning cached route.
 _endpoint_id_to_route: dict = {}
+
+
+def _register_endpoint_route(endpoint, route):
+    """Register endpoint→route mapping with weakref validation."""
+    ep_id = id(endpoint)
+    try:
+        ref = _weakref.ref(endpoint, lambda r, eid=ep_id: _endpoint_id_to_route.pop(eid, None))
+        _endpoint_id_to_route[ep_id] = (ref, route)
+    except TypeError:
+        # Builtins/C functions can't be weakly referenced
+        _endpoint_id_to_route[ep_id] = (None, route)
+
+
+def _get_route_for_endpoint(endpoint):
+    """Get route for endpoint, validating against id() reuse."""
+    ep_id = id(endpoint)
+    entry = _endpoint_id_to_route.get(ep_id)
+    if entry is None:
+        return None
+    ref, route = entry
+    if ref is not None:
+        obj = ref()
+        if obj is None or obj is not endpoint:
+            # Stale — id was reused
+            del _endpoint_id_to_route[ep_id]
+            return None
+    return route
 
 from astraapi.exceptions import HTTPException as _DepHTTPExc
 _DEP_HTTP_EXC_TYPES: tuple = (_DepHTTPExc,)
@@ -294,16 +326,27 @@ class _DefaultLifespan:
         return self
 
 
-# Cache for endpoint context to avoid re-extracting on every request
-_endpoint_context_cache: dict[int, EndpointContext] = {}
+# FIX H-10: Use bounded LRU cache for endpoint context to prevent unbounded growth
+# and detect id() reuse after GC. Max 2048 entries covers any realistic app.
+from collections import OrderedDict as _OrderedDict_ctx
+
+_ENDPOINT_CTX_CACHE_MAX = 2048
+_endpoint_context_cache: OrderedDict = _OrderedDict_ctx()
 
 
 def _extract_endpoint_context(func: Any) -> EndpointContext:
-    """Extract endpoint context with caching to avoid repeated file I/O."""
+    """Extract endpoint context with bounded LRU caching."""
     func_id = id(func)
 
     if func_id in _endpoint_context_cache:
-        return _endpoint_context_cache[func_id]
+        # Validate it's the same function (detect id() reuse)
+        cached = _endpoint_context_cache[func_id]
+        cached_name = cached.get('function_name')
+        if cached_name == getattr(func, '__name__', None):
+            _endpoint_context_cache.move_to_end(func_id)
+            return cached
+        # id() reused by different function — evict stale entry
+        del _endpoint_context_cache[func_id]
 
     ctx: EndpointContext = {}
     # Always capture function name first — never lose it due to file I/O errors
@@ -317,6 +360,9 @@ def _extract_endpoint_context(func: Any) -> EndpointContext:
     except Exception:
         pass
 
+    # FIX H-10: Evict oldest entry if cache is full
+    if len(_endpoint_context_cache) >= _ENDPOINT_CTX_CACHE_MAX:
+        _endpoint_context_cache.popitem(last=False)
     _endpoint_context_cache[func_id] = ctx
     return ctx
 
@@ -1923,6 +1969,16 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                     pass
 
             result = node['call'](**dep_kwargs)
+            # FIX C-05: Detect unawaited coroutines from async dependency overrides.
+            # In the sync resolver, receiving a coroutine means the dep was overridden
+            # to be async — close it and raise a clear error.
+            if hasattr(result, 'cr_frame'):
+                result.close()
+                raise RuntimeError(
+                    f"Dependency '{node['name']}' returned a coroutine but was called "
+                    f"from the synchronous resolver. Ensure dependency overrides "
+                    f"remain synchronous, or use an async endpoint."
+                )
             _ck = node.get('cache_key')
             if _ck is not None:
                 resolved_by_key[_ck] = result

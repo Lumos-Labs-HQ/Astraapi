@@ -8,6 +8,14 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <atomic>  // FIX C-11: atomic counter for tmp filenames
+
+#ifdef _WIN32
+#include <process.h>
+#define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 
 // ── Static Python object cache ────────────────────────────────────────────────
 PyObject* StreamingMultipartParser::s_bytes_io_cls_   = nullptr;
@@ -227,8 +235,16 @@ FeedResult StreamingMultipartParser::process_data(
         size_t safe = (len >= delim_len - 1) ? len - (delim_len - 1) : 0;
         if (safe > 0) {
             if (cur_is_file_ && cur_file_) {
+                // FIX C-12: Check per-part size to prevent unbounded memory growth
+                if (cur_file_->data_buf.size() + safe > max_body_size_) {
+                    return FeedResult::ERR;  // Part exceeds max size
+                }
                 cur_file_->data_buf.insert(cur_file_->data_buf.end(), data, data + safe);
             } else {
+                // FIX C-12: Check field data size too
+                if (cur_field_data_.size() + safe > max_body_size_) {
+                    return FeedResult::ERR;
+                }
                 cur_field_data_.append((const char*)data, safe);
             }
         }
@@ -377,9 +393,12 @@ PyObject* StreamingMultipartParser::build_kwargs(PyObject* existing_kwargs) cons
             // Then open it as a Python file object
             char tmppath[512];
             auto tmpdir = std::filesystem::temp_directory_path();
-            static int tmp_counter = 0;
-            snprintf(tmppath, sizeof(tmppath), "%s/astraapi_upload_%d.tmp",
-                     tmpdir.string().c_str(), tmp_counter++);
+            // FIX C-11: Use atomic counter to prevent race condition in concurrent uploads.
+            // Also use pid and thread id to make path unique even across processes.
+            static std::atomic<int> tmp_counter{0};
+            int counter_val = tmp_counter.fetch_add(1, std::memory_order_relaxed);
+            snprintf(tmppath, sizeof(tmppath), "%s/astraapi_upload_%d_%ld.tmp",
+                     tmpdir.string().c_str(), counter_val, (long)getpid());
             FILE* fp = std::fopen(tmppath, "wb+");
             if (fp) {
                 // Write all data via C fwrite() — no Python GIL overhead
@@ -389,8 +408,8 @@ PyObject* StreamingMultipartParser::build_kwargs(PyObject* existing_kwargs) cons
                 PyRef path_str(PyUnicode_FromString(tmppath));
                 PyRef mode_str(PyUnicode_FromString("r+b"));
                 if (path_str && mode_str) {
-                    file_obj = PyObject_CallFunctionObjArgs(
-                        (PyObject*)&PyBaseObject_Type, nullptr);  // placeholder
+                    // FIX H-23: Don't create a placeholder PyBaseObject — go directly to open()
+                    file_obj = nullptr;
                     // Use builtins.open()
                     PyRef builtins(PyImport_ImportModule("builtins"));
                     if (builtins) {

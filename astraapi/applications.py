@@ -73,10 +73,23 @@ _app_instance_counter = itertools.count(1)
 # validator is ~0.3µs/call — a 200× speed-up for API hot paths.  We patch
 # pydantic.networks.validate_email at import time so all EmailStr fields
 # (including user-defined models) benefit automatically.
+# FIX C-06: Improved regex to enforce RFC 5321/5322 constraints:
+# - No consecutive dots in local part
+# - No leading/trailing dots in local part
+# - Domain labels must not start/end with hyphen
+# - At least 2-char TLD
+# - Maximum label length of 63 chars
 try:
     import pydantic.networks as _pn_mod
     _orig_pydantic_validate_email = _pn_mod.validate_email
-    _FAST_EMAIL_RE = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$', re.ASCII)
+    _FAST_EMAIL_RE = re.compile(
+        r'^(?!\.)(?!.*\.\.)(?!.*\.@)'  # no leading dot, no consecutive dots, no trailing dot before @
+        r"[a-zA-Z0-9!#$%&'*+/=?^_`{|}~.-]{1,64}"  # local part (RFC 5321 max 64 chars)
+        r'@'
+        r'(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)'  # domain labels (no leading/trailing hyphen)
+        r'+[a-zA-Z]{2,63}$',  # TLD (2-63 chars, alpha only)
+        re.ASCII
+    )
     _MAX_EMAIL_LEN = getattr(_pn_mod, 'MAX_EMAIL_LENGTH', 254)
 
     class _FastValidatedEmail:

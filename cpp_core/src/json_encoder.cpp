@@ -22,11 +22,12 @@ static PyObject* g_uuid_type = nullptr;
 static PyObject* g_decimal_type = nullptr;
 static PyObject* g_enum_type = nullptr;
 static PyObject* g_purepath_type = nullptr;
-static bool g_types_initialized = false;
 
-void ensure_types_initialized() {
-    if (g_types_initialized) return;
+// FIX C-14: Use std::call_once for thread-safe lazy initialization
+#include <mutex>
+static std::once_flag g_types_init_flag;
 
+static void _do_ensure_types() {
     // datetime types
     PyRef dt_mod(PyImport_ImportModule("datetime"));
     if (dt_mod) {
@@ -56,8 +57,10 @@ void ensure_types_initialized() {
     PyRef pathlib_mod(PyImport_ImportModule("pathlib"));
     if (pathlib_mod) g_purepath_type = PyObject_GetAttrString(pathlib_mod.get(), "PurePath");
     PyErr_Clear();
+}
 
-    g_types_initialized = true;
+void ensure_types_initialized() {
+    std::call_once(g_types_init_flag, _do_ensure_types);
 }
 
 static PyObject* encode_recursive(PyObject* obj, int depth);
@@ -148,13 +151,20 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
     }
 
     // Pydantic BaseModel — try model_dump()
-    // Fast path: check type name before expensive HasAttrString
-    const char* tp_name = Py_TYPE(obj)->tp_name;
-    if ((tp_name && (strstr(tp_name, "Model") || strstr(tp_name, "Schema"))) ||
-        PyObject_HasAttrString(obj, "model_dump")) {
-        PyRef dumped(PyObject_CallMethod(obj, "model_dump", nullptr));
-        if (dumped) return encode_recursive(dumped.get(), depth + 1);
-        PyErr_Clear();
+    // FIX H-24: Use type check + HasAttr instead of pure strstr matching.
+    // Check model_dump first (definitive Pydantic v2 marker).
+    // Use PyObject_GetOptionalAttrString on Python 3.13+ to avoid warnings.
+    {
+        PyObject* md_attr = nullptr;
+        int has_md = PyObject_GetOptionalAttrString(obj, "model_dump", &md_attr);
+        if (has_md > 0 && md_attr != nullptr) {
+            Py_DECREF(md_attr);
+            PyRef dumped(PyObject_CallMethod(obj, "model_dump", nullptr));
+            if (dumped) return encode_recursive(dumped.get(), depth + 1);
+            PyErr_Clear();
+        } else {
+            PyErr_Clear();
+        }
     }
 
     // Pydantic v1 — try dict()
@@ -165,37 +175,60 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
     }
 
     // Enum — get .value
-    if (g_enum_type && PyObject_IsInstance(obj, g_enum_type)) {
-        PyRef val(PyObject_GetAttrString(obj, "value"));
-        if (val) return encode_recursive(val.get(), depth + 1);
-        PyErr_Clear();
+    // FIX H-25: Check PyObject_IsInstance return value (-1 = error)
+    if (g_enum_type) {
+        int r = PyObject_IsInstance(obj, g_enum_type);
+        if (r < 0) return nullptr;  // propagate exception
+        if (r) {
+            PyRef val(PyObject_GetAttrString(obj, "value"));
+            if (val) return encode_recursive(val.get(), depth + 1);
+            PyErr_Clear();
+        }
     }
 
     // datetime, date, time → .isoformat()
-    if ((g_datetime_type && PyObject_IsInstance(obj, g_datetime_type)) ||
-        (g_date_type && PyObject_IsInstance(obj, g_date_type)) ||
-        (g_time_type && PyObject_IsInstance(obj, g_time_type))) {
-        return PyObject_CallMethod(obj, "isoformat", nullptr);
+    if (g_datetime_type) {
+        int r = PyObject_IsInstance(obj, g_datetime_type);
+        if (r < 0) return nullptr;
+        if (r) return PyObject_CallMethod(obj, "isoformat", nullptr);
+    }
+    if (g_date_type) {
+        int r = PyObject_IsInstance(obj, g_date_type);
+        if (r < 0) return nullptr;
+        if (r) return PyObject_CallMethod(obj, "isoformat", nullptr);
+    }
+    if (g_time_type) {
+        int r = PyObject_IsInstance(obj, g_time_type);
+        if (r < 0) return nullptr;
+        if (r) return PyObject_CallMethod(obj, "isoformat", nullptr);
     }
 
     // timedelta → total_seconds()
-    if (g_timedelta_type && PyObject_IsInstance(obj, g_timedelta_type)) {
-        return PyObject_CallMethod(obj, "total_seconds", nullptr);
+    if (g_timedelta_type) {
+        int r = PyObject_IsInstance(obj, g_timedelta_type);
+        if (r < 0) return nullptr;
+        if (r) return PyObject_CallMethod(obj, "total_seconds", nullptr);
     }
 
     // UUID → str(uuid)
-    if (g_uuid_type && PyObject_IsInstance(obj, g_uuid_type)) {
-        return PyObject_Str(obj);
+    if (g_uuid_type) {
+        int r = PyObject_IsInstance(obj, g_uuid_type);
+        if (r < 0) return nullptr;
+        if (r) return PyObject_Str(obj);
     }
 
-    // Decimal → float
-    if (g_decimal_type && PyObject_IsInstance(obj, g_decimal_type)) {
-        return PyFloat_FromDouble(PyFloat_AsDouble(obj));
+    // FIX M-30: Decimal → str (preserves precision instead of lossy float conversion)
+    if (g_decimal_type) {
+        int r = PyObject_IsInstance(obj, g_decimal_type);
+        if (r < 0) return nullptr;
+        if (r) return PyObject_Str(obj);
     }
 
     // PurePath → str
-    if (g_purepath_type && PyObject_IsInstance(obj, g_purepath_type)) {
-        return PyObject_Str(obj);
+    if (g_purepath_type) {
+        int r = PyObject_IsInstance(obj, g_purepath_type);
+        if (r < 0) return nullptr;
+        if (r) return PyObject_Str(obj);
     }
 
     // Generator/Iterator → list

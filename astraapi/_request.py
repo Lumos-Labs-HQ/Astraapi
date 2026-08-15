@@ -170,7 +170,14 @@ class Headers:
             for name_bytes, value_bytes in self._raw:
                 name = name_bytes.decode("latin-1").lower() if isinstance(name_bytes, bytes) else name_bytes.lower()
                 value = value_bytes.decode("latin-1") if isinstance(value_bytes, bytes) else value_bytes
-                d[name] = value
+                # FIX M-29: Join duplicate header values with ", " per RFC 9110 §5.3
+                # This preserves all values instead of silently dropping earlier ones.
+                # Note: Set-Cookie is an exception (should use getlist()), but the
+                # dict representation must still be valid for all other combinable headers.
+                if name in d:
+                    d[name] = f"{d[name]}, {value}"
+                else:
+                    d[name] = value
                 items.append((name, value))
             self._dict = d
             self._list = items
@@ -617,14 +624,24 @@ class Request(HTTPConnection):
             await self._form.close()
 
     async def is_disconnected(self) -> bool:
-        """Check if the client has disconnected."""
+        """Check if the client has disconnected.
+        FIX H-17: Use non-blocking check with asyncio.wait_for(timeout=0) and
+        buffer any non-disconnect messages so they aren't lost."""
         if self._disconnected:
             return True
-        # Non-blocking check
+        import asyncio
         try:
-            message = await self.receive()
+            message = await asyncio.wait_for(self.receive(), timeout=0.0)
             if message.get("type") == "http.disconnect":
                 self._disconnected = True
+            else:
+                # Buffer the message so it can be consumed by stream()/body() later
+                if not hasattr(self, '_buffered_messages'):
+                    self._buffered_messages = []
+                self._buffered_messages.append(message)
+        except (asyncio.TimeoutError, TimeoutError):
+            # No message available — not disconnected
+            pass
         except Exception:
             self._disconnected = True
         return self._disconnected

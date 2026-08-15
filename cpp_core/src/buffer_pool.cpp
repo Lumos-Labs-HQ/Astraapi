@@ -13,7 +13,7 @@ std::vector<char> acquire_buffer() {
     if (!pool.empty()) {
         auto buf = std::move(pool.back());
         pool.pop_back();
-        buf.clear();
+        // PERF: No clear() needed — release_buffer() already clears before pooling
         return buf;
     }
     std::vector<char> buf;
@@ -23,7 +23,9 @@ std::vector<char> acquire_buffer() {
 
 void release_buffer(std::vector<char> buf) {
     if (pool.size() < tl_pool_max) {
-        if (buf.capacity() > BUFFER_INITIAL_CAPACITY * 4) {
+        // PERF: Raise threshold from 4x to 8x (64KB) to avoid malloc thrashing
+        // for medium-sized API responses (16-32KB)
+        if (buf.capacity() > BUFFER_INITIAL_CAPACITY * 8) {
             // Replace oversized buffer with a fresh right-sized one (single alloc)
             std::vector<char> fresh;
             fresh.reserve(BUFFER_INITIAL_CAPACITY);

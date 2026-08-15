@@ -37,6 +37,9 @@ static inline bool ci_starts_mw(const char* s, size_t s_len, const char* prefix,
 }
 
 static inline bool ci_contains_mw(const char* s, size_t s_len, const char* needle, size_t n_len) {
+    // FIX L-19: Token-boundary-aware matching. The needle must be delimited by
+    // string boundaries, commas, semicolons, or spaces to prevent false positives
+    // (e.g., "br" matching inside "hebrew" or "abbreviate").
     if (s_len < n_len) return false;
     for (size_t i = 0; i <= s_len - n_len; i++) {
         bool match = true;
@@ -45,7 +48,21 @@ static inline bool ci_contains_mw(const char* s, size_t s_len, const char* needl
             if (c >= 'A' && c <= 'Z') c += 32;
             if (c != needle[j]) { match = false; break; }
         }
-        if (match) return true;
+        if (match) {
+            // Check left boundary: must be start of string, or preceded by delimiter
+            if (i > 0) {
+                char left = s[i - 1];
+                if (left != ',' && left != ' ' && left != '\t' && left != ';') continue;
+            }
+            // Check right boundary: must be end of string, or followed by delimiter
+            size_t end_pos = i + n_len;
+            if (end_pos < s_len) {
+                char right = s[end_pos];
+                if (right != ',' && right != ' ' && right != '\t' &&
+                    right != ';' && right != '=' && right != '\0') continue;
+            }
+            return true;
+        }
     }
     return false;
 }
@@ -163,6 +180,9 @@ PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
     std::vector<uint8_t> output;
     int zret;
     static constexpr size_t MAX_DECOMPRESSED = 256 * 1024 * 1024;  // 256 MB
+    // FIX M-25: Decompression bomb ratio check. If output grows to >1000x input,
+    // reject as a potential zip bomb (a 1KB payload should not decompress to 1MB+).
+    static constexpr size_t MAX_DECOMPRESS_RATIO = 1000;
 
     Py_BEGIN_ALLOW_THREADS
 
@@ -188,6 +208,11 @@ PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
                 size_t new_size = output.size() * 2;
                 if (new_size > MAX_DECOMPRESSED) {
                     zret = Z_MEM_ERROR;
+                    break;
+                }
+                // FIX M-25: Ratio check — reject zip bombs
+                if (data_len > 0 && new_size / (size_t)data_len > MAX_DECOMPRESS_RATIO) {
+                    zret = Z_DATA_ERROR;
                     break;
                 }
                 output.resize(new_size);

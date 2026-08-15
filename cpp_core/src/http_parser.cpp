@@ -6,6 +6,7 @@ extern "C" {
 }
 
 #include <cstring>
+#include <mutex>  // FIX: thread-safe ensure_settings
 
 struct ParserContext {
     ParsedHttpRequest* out;
@@ -181,18 +182,16 @@ static int on_message_complete(llhttp_t* parser) {
     auto* ctx = static_cast<ParserContext*>(parser->data);
 
     ctx->message_done = true;
-    llhttp_pause(parser);
 
+    // In llhttp 9.x, returning HPE_PAUSED from a callback is the correct way
+    // to pause parsing mid-stream. llhttp_pause() is for pausing from outside.
     return HPE_PAUSED;
 }
 
 static llhttp_settings_t settings;
-static bool settings_init = false;
+static std::once_flag settings_init_flag;
 
-static void ensure_settings() {
-    if (settings_init)
-        return;
-
+static void _do_init_settings() {
     llhttp_settings_init(&settings);
 
     settings.on_method = on_method;
@@ -204,8 +203,10 @@ static void ensure_settings() {
     settings.on_headers_complete = on_headers_complete;
     settings.on_body = on_body;
     settings.on_message_complete = on_message_complete;
+}
 
-    settings_init = true;
+static void ensure_settings() {
+    std::call_once(settings_init_flag, _do_init_settings);
 }
 
 int parse_http_request(

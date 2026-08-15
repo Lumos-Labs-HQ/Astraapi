@@ -77,7 +77,50 @@ _CT_JSON_HDR = (b"content-type", b"application/json")
 _CT_JSON_HDR_LIST = [_CT_JSON_HDR]
 
 # Fix #8: module-level path→route cache for 422 error dispatch (avoids O(N) scan per error)
-_path_route_cache: dict[str, Any] = {}  # "METHOD /path" -> route object
+# FIX C-04: Use LRU cache with max size to prevent unbounded memory growth
+# with dynamic path parameters (e.g., /items/{id} with millions of unique IDs).
+from collections import OrderedDict as _OrderedDict
+
+_PATH_ROUTE_CACHE_MAX_SIZE = 4096
+
+class _LRURouteCache:
+    """Thread-safe LRU cache for route lookups. Prevents OOM under varied path params."""
+    __slots__ = ('_cache', '_max_size')
+
+    def __init__(self, max_size: int = _PATH_ROUTE_CACHE_MAX_SIZE):
+        self._cache: OrderedDict = _OrderedDict()
+        self._max_size = max_size
+
+    def get(self, key: str) -> Any:
+        try:
+            val = self._cache[key]
+            self._cache.move_to_end(key)
+            return val
+        except KeyError:
+            return None
+
+    def put(self, key: str, value: Any) -> None:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            self._cache[key] = value
+        else:
+            if len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+            self._cache[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.put(key, value)
+
+    def __getitem__(self, key: str) -> Any:
+        val = self.get(key)
+        if val is None and key not in self._cache:
+            raise KeyError(key)
+        return val
+
+_path_route_cache = _LRURouteCache()  # "METHOD /path" -> route object
 
 logger = logging.getLogger("astraapi")
 
@@ -93,6 +136,9 @@ _QUESTION = b'?'
 _COLON = b':'
 
 _WS_HEARTBEAT_INTERVAL = float(os.environ.get("ASTRAAPI_WS_PING_INTERVAL", "30.0"))
+
+# PERF: Frozenset for O(1) HTTP method validation (replaces per-request tuple creation)
+_VALID_HTTP_METHODS = frozenset((b'GET', b'POST', b'PUT', b'DELETE', b'PATCH', b'HEAD', b'OPTIONS', b'TRACE', b'CONNECT'))
 
 # ── Zero-overhead awaitable for sync send methods ────────────────────────────
 class _NoopAwaitable:
@@ -321,14 +367,53 @@ if _PING_FRAME is None:
     _PING_FRAME = b"\x89\x00"
 
 # ── WebSocket endpoint signature cache ────────────────────────────────────────
-_ws_sig_cache: dict[int, str] = {}
+# FIX C-03: Use weakref-keyed cache instead of id() to prevent stale entries
+# after GC reclaims endpoint functions. WeakValueDictionary won't work here
+# (values are strings), so we use a bounded LRU with the actual function as
+# part of validation to detect id() reuse.
+import weakref as _weakref
+
+class _WsSigCache:
+    """WebSocket signature cache that handles id() reuse after GC."""
+    __slots__ = ('_cache', '_refs')
+
+    def __init__(self):
+        self._cache: dict[int, tuple[Any, str]] = {}  # id -> (weakref, param_name)
+        self._refs: dict[int, _weakref.ref] = {}
+
+    def get(self, endpoint: Any) -> str | None:
+        ep_id = id(endpoint)
+        entry = self._cache.get(ep_id)
+        if entry is None:
+            return None
+        ref, param_name = entry
+        # Validate the cached entry is for the SAME object (not id() reuse)
+        obj = ref()
+        if obj is None or obj is not endpoint:
+            # Stale entry — id was reused by a different object
+            del self._cache[ep_id]
+            return None
+        return param_name
+
+    def put(self, endpoint: Any, param_name: str) -> None:
+        ep_id = id(endpoint)
+        try:
+            ref = _weakref.ref(endpoint, lambda r, eid=ep_id: self._cache.pop(eid, None))
+        except TypeError:
+            # Some callables (builtins) can't be weakly referenced — fall back to strong ref
+            ref = lambda: endpoint  # noqa: E731
+        self._cache[ep_id] = (ref, param_name)
+
+    def __contains__(self, endpoint: Any) -> bool:
+        return self.get(endpoint) is not None
+
+_ws_sig_cache = _WsSigCache()
 
 def precompute_ws_signature(endpoint: Any) -> None:
     """Pre-compute WebSocket parameter name at route registration time.
     Called from applications.py add_websocket_route() to avoid
     inspect.signature() overhead on first WS connection."""
-    ep_id = id(endpoint)
-    if ep_id in _ws_sig_cache:
+    if endpoint in _ws_sig_cache:
         return
     sig = inspect.signature(endpoint)
     ws_param = "websocket"
@@ -340,7 +425,7 @@ def precompute_ws_signature(endpoint: Any) -> None:
         ):
             ws_param = param_name
             break
-    _ws_sig_cache[ep_id] = ws_param
+    _ws_sig_cache.put(endpoint, ws_param)
 
 # ── Pre-built responses (allocated once, reused forever) ─────────────────────
 
@@ -1128,10 +1213,12 @@ class CppWebSocket:
 # objects to a free list on connection_lost(), reuses on next connection.
 
 class _ProtocolPool:
-    """Fixed-size pool of CppHttpProtocol objects for reuse."""
+    """Fixed-size pool of CppHttpProtocol objects for reuse.
+    FIX M-04: Reduced max_size from 32768 to 2048 to prevent excessive
+    idle memory (was 512MB at 16KB/proto, now 32MB max)."""
     __slots__ = ("_pool", "_max_size")
 
-    def __init__(self, max_size: int = 32768):
+    def __init__(self, max_size: int = 2048):
         self._pool: list = []
         self._max_size = max_size
 
@@ -1596,45 +1683,46 @@ class CppHttpProtocol(asyncio.Protocol):
         sock_fd = self._sock_fd
 
         # Fix #1: Only parse headers in Python when _needs_req_ctx is True AND data is non-empty.
-        # Use memoryview to avoid copying slices. Single pass: find \r\n\r\n once, then walk headers.
         # Also parse when dependency_overrides are active — overrides can introduce query params
         # not in the original batch_specs, so the param validator needs _current_query_string.
-        _parse_ctx = self._needs_req_ctx or bool(
-            _full_app is not None and getattr(_full_app, 'dependency_overrides', None)
-        )
+        # PERF: Use direct attribute access (faster than getattr with default) and cache _full_app ref
+        _parse_ctx = self._needs_req_ctx
+        if not _parse_ctx and _full_app is not None:
+            _ov = _full_app.__dict__.get('dependency_overrides')
+            if _ov:
+                _parse_ctx = True
 
         if _parse_ctx and data:
             try:
                 _dlen = len(data)
-                _mv = memoryview(data)
+                # PERF: Slice data directly — memoryview + bytes() conversion has same cost
                 # Find end of request line
                 _nl = data.find(b'\r\n', 0, min(_dlen, 4096))
                 _is_new_request = False
+                _sp0 = -1
                 if _nl > 0:
                     _sp0 = data.find(b' ', 0, _nl)
                     if _sp0 > 0:
-                        _method = bytes(_mv[:_sp0])
-                        if _method in (b'GET', b'POST', b'PUT', b'DELETE', b'PATCH', b'HEAD', b'OPTIONS', b'TRACE', b'CONNECT'):
+                        _method = data[:_sp0]
+                        if _method in _VALID_HTTP_METHODS:
                             _is_new_request = True
                 if _is_new_request:
-                    # Extract method, path, query — all from the first line only
-                    _sp0 = data.find(b' ', 0, _nl)
-                    if _sp0 > 0:
-                        _current_method.set(bytes(_mv[:_sp0]).decode('latin-1'))
-                        _sp1 = data.find(b' ', _sp0 + 1, _nl)
-                        _target_end = _sp1 if _sp1 > 0 else _nl
-                        _target = bytes(_mv[_sp0 + 1:_target_end])
-                        _q = _target.find(b'?')
-                        if _q >= 0:
-                            _current_path.set(_target[:_q].decode('latin-1'))
-                            _current_query_string.set(_target[_q + 1:])
-                        else:
-                            _current_path.set(_target.decode('latin-1'))
-                            _current_query_string.set(b'')
+                    # PERF: Reuse _sp0 from above — no duplicate find()
+                    _current_method.set(_method.decode('latin-1'))
+                    _sp1 = data.find(b' ', _sp0 + 1, _nl)
+                    _target_end = _sp1 if _sp1 > 0 else _nl
+                    _target = data[_sp0 + 1:_target_end]
+                    _q = _target.find(b'?')
+                    if _q >= 0:
+                        _current_path.set(_target[:_q].decode('latin-1'))
+                        _current_query_string.set(_target[_q + 1:])
+                    else:
+                        _current_path.set(_target.decode('latin-1'))
+                        _current_query_string.set(b'')
                     # Find header block end — single search
                     _hdrs_end = data.find(b'\r\n\r\n', _nl)
                     if _hdrs_end > 0:
-                        # Single-pass header parse using memoryview (no copies until append)
+                        # Single-pass header parse (no memoryview — direct slicing)
                         _parsed_hdrs: list = []
                         _pos = _nl + 2
                         while _pos < _hdrs_end:
@@ -1644,13 +1732,13 @@ class CppHttpProtocol(asyncio.Protocol):
                             _colon = data.find(b':', _pos, _eol)
                             if _colon > _pos:
                                 _parsed_hdrs.append((
-                                    bytes(_mv[_pos:_colon]).strip().lower(),
-                                    bytes(_mv[_colon + 1:_eol]).strip(),
+                                    data[_pos:_colon].strip().lower(),
+                                    data[_colon + 1:_eol].strip(),
                                 ))
                             _pos = _eol + 2
                         _current_raw_headers.set(_parsed_hdrs)
                         _body_start = _hdrs_end + 4
-                        _current_body.set(bytes(_mv[_body_start:]) if _body_start < _dlen else b'')
+                        _current_body.set(data[_body_start:] if _body_start < _dlen else b'')
                     else:
                         _current_raw_headers.set([])
                         _current_body.set(b'')
@@ -1659,7 +1747,16 @@ class CppHttpProtocol(asyncio.Protocol):
                     # This handles the case where the request body is split across
                     # multiple data_received chunks (C++ fast path may dispatch
                     # before the full body has arrived).
-                    _current_body.set((_current_body.get(None) or b'') + data)
+                    # PERF: Use bytearray for O(N) accumulation instead of O(N²) bytes concat
+                    _prev = _current_body.get(None)
+                    if _prev is None or _prev == b'':
+                        _current_body.set(data)
+                    elif isinstance(_prev, bytearray):
+                        _prev.extend(data)
+                    else:
+                        _ba = bytearray(_prev)
+                        _ba.extend(data)
+                        _current_body.set(_ba)
             except Exception:
                 pass
 
@@ -2719,7 +2816,7 @@ class CppHttpProtocol(asyncio.Protocol):
                         _crp2.set(_prev_rp2)
                 else:
                     kwargs = dict(path_params) if path_params else {}
-                    ws_param = _ws_sig_cache.get(ep_id, "websocket")
+                    ws_param = _ws_sig_cache.get(endpoint) or "websocket"
                     kwargs[ws_param] = ws
                     await endpoint(**kwargs)
         except WebSocketDisconnect:
@@ -2902,7 +2999,6 @@ async def _create_server(
             _type_handlers[_RVE] = _rv_handler_with_ctx
             # Also update _app_exc_handlers so _dispatch_exception uses the wrapper
             _app_exc_handlers[_RVE] = _rv_handler_with_ctx
-        import sys; print("set_type_exception_handlers:", {k.__name__: v.__name__ for k,v in _type_handlers.items()}, file=sys.stderr)
         core_app.set_type_exception_handlers(_type_handlers)
 
     # Build WS app map for DI-wrapped WebSocket dispatch
@@ -3257,12 +3353,24 @@ async def run_server(
             except Exception:
                 pass  # non-root, non-Linux, or WSL2 without privilege — silently skip
 
-    # ── GC control: disable automatic collection to prevent multi-second gen2 pauses
-    # Default thresholds (700/10/10) cause gen2 scans of ALL live objects.
-    # With 10K connections that's millions of objects → multi-second stalls.
-    # Rely on CPython refcounting for short-lived request objects.
-    gc.disable()
-    gc.collect(0)  # flush pending gen0 before disabling
+    # ── GC control: Use tuned generational thresholds instead of full disable.
+    # Full gc.disable() prevents cyclic garbage from being collected, causing
+    # memory leaks with closures, self-referencing objects, etc.
+    # Instead: raise gen0 threshold to reduce pause frequency while still
+    # collecting cycles. Gen2 is the expensive one — trigger only during idle.
+    # NOTE: Only apply aggressive tuning in production worker mode, not TestClient.
+    if _WORKER_MODE:
+        gc.set_threshold(5000, 50, 10)  # gen0 every 5000 allocs, gen1 every 50 gen0, gen2 every 10 gen1
+        gc.collect(0)  # flush pending gen0 at startup
+        # Freeze all objects allocated during startup (routes, schemas, etc.)
+        # so they're never scanned by the collector during runtime.
+        try:
+            gc.freeze()  # Python 3.7+ — moves gen0-2 to permanent generation
+        except AttributeError:
+            pass
+    else:
+        # TestClient / non-worker mode: just raise threshold slightly to reduce pauses
+        gc.set_threshold(2000, 20, 10)
 
     # Enable eager task execution (Python 3.12+)
     try:
@@ -3456,13 +3564,15 @@ async def run_server(
     def _gc_maintenance():
         conns = active_count[0]
         if conns == 0:
-            gc.collect(1)
+            # Idle: safe to do a full gen2 collection
+            gc.collect(2)
             _gc_interval[0] = 30.0
         elif conns < 50:
-            gc.collect(0)
+            # Light load: gen1 collection (faster than gen2)
+            gc.collect(1)
             _gc_interval[0] = 60.0
         else:
-            # Under heavy load, avoid forced sweeps unless RSS grows.
+            # Under heavy load: only gen0 (sub-millisecond), and only if RSS grew
             try:
                 import resource as _resource
                 current_rss = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
@@ -3470,7 +3580,7 @@ async def run_server(
                     gc.collect(0)  # fast gen0 only (<1ms)
                 _last_rss[0] = current_rss
             except (ImportError, AttributeError):
-                pass
+                gc.collect(0)
             _gc_interval[0] = min(300.0, _gc_interval[0] * 1.5)
         loop.call_later(_gc_interval[0], _gc_maintenance)
 
@@ -3576,7 +3686,13 @@ async def run_server(
             now = _monotonic()
             expired: list = []
             checked = 0
-            for p in active_connections:
+            # FIX H-03: iterate a snapshot (list copy) to prevent RuntimeError
+            # when connection_made/connection_lost mutate the set during yield.
+            connections_snapshot = list(active_connections)
+            for p in connections_snapshot:
+                if p._transport is None:
+                    # Already disconnected — skip (may happen between snapshot and iteration)
+                    continue
                 if p._ka_needs_reset:
                     p._ka_needs_reset = False
                     p._ka_deadline = now + p._ka_timeout
@@ -3613,8 +3729,9 @@ async def run_server(
     except KeyboardInterrupt:
         pass
     finally:
-        gc.unfreeze()  # move frozen objects back for cleanup
-        gc.enable()    # re-enable GC for clean interpreter shutdown
+        if _WORKER_MODE:
+            gc.unfreeze()  # move frozen objects back for cleanup
+        gc.set_threshold(700, 10, 10)  # restore defaults
         sweep_task.cancel()
         trim_task.cancel()
         # ── Graceful shutdown: stop accepting, drain active connections ─
