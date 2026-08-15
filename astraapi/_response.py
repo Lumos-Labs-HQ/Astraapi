@@ -17,7 +17,6 @@ from urllib.parse import quote
 
 from astraapi._types import Scope
 
-# Optional C++ accelerated JSON serialization
 try:
     from astraapi._core_bridge import encode_to_json_bytes as _core_json_bytes
     _CORE_JSON = True
@@ -30,9 +29,7 @@ except Exception:
     _jsonable_encoder = None  # type: ignore
 
 
-# ---------------------------------------------------------------------------
 # MutableHeaders — thin wrapper over ASGI raw header list
-# ---------------------------------------------------------------------------
 
 
 class MutableHeaders:
@@ -65,7 +62,6 @@ class MutableHeaders:
     def raw(self) -> list:
         return self._raw
 
-    # -- read helpers --
 
     def _find(self, key: str) -> int:
         key_lower = key.lower().encode("latin-1") if isinstance(key, str) else key.lower()
@@ -110,7 +106,6 @@ class MutableHeaders:
             for n, v in self._raw
         ]
 
-    # -- write helpers --
 
     def __setitem__(self, key: str, value: str) -> None:
         key_bytes = key.lower().encode("latin-1")
@@ -174,9 +169,7 @@ class MutableHeaders:
             self[key] = value
 
 
-# ---------------------------------------------------------------------------
 # Response — base ASGI response
-# ---------------------------------------------------------------------------
 
 
 class Response:
@@ -348,9 +341,7 @@ class Response:
             await self.background()
 
 
-# ---------------------------------------------------------------------------
 # JSONResponse
-# ---------------------------------------------------------------------------
 
 
 class JSONResponse(Response):
@@ -387,9 +378,7 @@ class JSONResponse(Response):
         return _json_dumps(content)
 
 
-# ---------------------------------------------------------------------------
 # HTMLResponse
-# ---------------------------------------------------------------------------
 
 
 class HTMLResponse(Response):
@@ -398,9 +387,7 @@ class HTMLResponse(Response):
     media_type = "text/html"
 
 
-# ---------------------------------------------------------------------------
 # PlainTextResponse
-# ---------------------------------------------------------------------------
 
 
 class PlainTextResponse(Response):
@@ -409,9 +396,7 @@ class PlainTextResponse(Response):
     media_type = "text/plain"
 
 
-# ---------------------------------------------------------------------------
 # RedirectResponse
-# ---------------------------------------------------------------------------
 
 
 class RedirectResponse(Response):
@@ -434,9 +419,7 @@ class RedirectResponse(Response):
         )
 
 
-# ---------------------------------------------------------------------------
 # StreamingResponse
-# ---------------------------------------------------------------------------
 
 
 class StreamingResponse(Response):
@@ -508,9 +491,7 @@ class StreamingResponse(Response):
                 yield chunk
 
 
-# ---------------------------------------------------------------------------
 # EventSourceResponse (SSE)
-# ---------------------------------------------------------------------------
 
 import dataclasses
 
@@ -566,7 +547,6 @@ class EventSourceResponse(StreamingResponse):
         headers: Optional[dict[str, str]] = None,
         background: Any = None,
     ) -> None:
-        # FIX L-21: Add Cache-Control and Connection headers for proper SSE behavior
         # behind CDNs and reverse proxies.
         merged_headers = dict(headers) if headers else {}
         merged_headers.setdefault("cache-control", "no-cache")
@@ -628,9 +608,7 @@ def _sse_format_item(item: Any) -> str:
     return _sse_format_event(data=item)
 
 
-# ---------------------------------------------------------------------------
 # FileResponse
-# ---------------------------------------------------------------------------
 
 
 class FileResponse(Response):

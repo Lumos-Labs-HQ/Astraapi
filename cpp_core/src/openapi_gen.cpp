@@ -1,50 +1,60 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
+#include "buffer_pool.hpp"
 #include "json_parser.hpp"
 #include "json_writer.hpp"
-#include "buffer_pool.hpp"
 #include "pyref.hpp"
+
+#include <Python.h>
+
 #include <cstring>
 #include <string>
 #include <vector>
 
-// ══════════════════════════════════════════════════════════════════════════════
 // Helper: write JSON, skipping None values in dicts (OpenAPI-clean output)
-// ══════════════════════════════════════════════════════════════════════════════
 
-static int write_openapi_json(PyObject* obj, std::vector<char>& buf, int depth);
+static int write_openapi_json(PyObject *obj, std::vector<char> &buf, int depth);
 
-static void write_json_str_oa(std::vector<char>& buf, const char* s, Py_ssize_t len) {
+static void write_json_str_oa(std::vector<char> &buf, const char *s, Py_ssize_t len) {
     buf.push_back('"');
     for (Py_ssize_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)s[i];
-        if (c == '"') { buf.push_back('\\'); buf.push_back('"'); }
-        else if (c == '\\') { buf.push_back('\\'); buf.push_back('\\'); }
-        else if (c == '\n') { buf.push_back('\\'); buf.push_back('n'); }
-        else if (c == '\r') { buf.push_back('\\'); buf.push_back('r'); }
-        else if (c == '\t') { buf.push_back('\\'); buf.push_back('t'); }
-        else if (c < 0x20) {
+        if (c == '"') {
+            buf.push_back('\\');
+            buf.push_back('"');
+        } else if (c == '\\') {
+            buf.push_back('\\');
+            buf.push_back('\\');
+        } else if (c == '\n') {
+            buf.push_back('\\');
+            buf.push_back('n');
+        } else if (c == '\r') {
+            buf.push_back('\\');
+            buf.push_back('r');
+        } else if (c == '\t') {
+            buf.push_back('\\');
+            buf.push_back('t');
+        } else if (c < 0x20) {
             char hex[7];
             snprintf(hex, sizeof(hex), "\\u%04x", c);
             buf.insert(buf.end(), hex, hex + 6);
-        }
-        else buf.push_back(c);
+        } else
+            buf.push_back(c);
     }
     buf.push_back('"');
 }
 
-static int write_openapi_json(PyObject* obj, std::vector<char>& buf, int depth) {
+static int write_openapi_json(PyObject *obj, std::vector<char> &buf, int depth) {
     if (depth > 64) return -1;
 
     if (obj == Py_None) {
         // Skip None in OpenAPI context — caller handles this
-        const char* null_str = "null";
+        const char *null_str = "null";
         buf.insert(buf.end(), null_str, null_str + 4);
         return 0;
     }
 
     if (PyUnicode_Check(obj)) {
-        const char* s;
+        const char *s;
         Py_ssize_t len;
         s = PyUnicode_AsUTF8AndSize(obj, &len);
         if (!s) return -1;
@@ -54,8 +64,8 @@ static int write_openapi_json(PyObject* obj, std::vector<char>& buf, int depth) 
 
     if (PyDict_Check(obj)) {
         buf.push_back('{');
-        PyObject* key;
-        PyObject* value;
+        PyObject *key;
+        PyObject *value;
         Py_ssize_t pos = 0;
         bool first = true;
         while (PyDict_Next(obj, &pos, &key, &value)) {
@@ -66,7 +76,7 @@ static int write_openapi_json(PyObject* obj, std::vector<char>& buf, int depth) 
 
             // Key
             if (PyUnicode_Check(key)) {
-                const char* ks;
+                const char *ks;
                 Py_ssize_t klen;
                 ks = PyUnicode_AsUTF8AndSize(key, &klen);
                 if (!ks) return -1;
@@ -74,7 +84,7 @@ static int write_openapi_json(PyObject* obj, std::vector<char>& buf, int depth) 
             } else {
                 PyRef ks(PyObject_Str(key));
                 if (!ks) return -1;
-                const char* s;
+                const char *s;
                 Py_ssize_t len;
                 s = PyUnicode_AsUTF8AndSize(ks.get(), &len);
                 write_json_str_oa(buf, s, len);
@@ -90,38 +100,29 @@ static int write_openapi_json(PyObject* obj, std::vector<char>& buf, int depth) 
     return write_json(obj, buf, depth);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // build_openapi_schema(...) → PyBytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_build_openapi_schema(PyObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {
-        "title", "version", "openapi_version",
-        "summary", "description", "terms_of_service",
-        "contact", "license_info", "routes_info", "schemas",
-        "servers", "tags", "external_docs", nullptr
-    };
+PyObject *py_build_openapi_schema(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static const char *kwlist[] = {"title", "version", "openapi_version", "summary", "description", "terms_of_service",
+        "contact", "license_info", "routes_info", "schemas", "servers", "tags", "external_docs", nullptr};
 
-    const char* title;
-    const char* version;
-    const char* openapi_version = "3.1.0";
-    const char* summary = nullptr;
-    const char* description = nullptr;
-    const char* terms_of_service = nullptr;
-    PyObject* contact = Py_None;
-    PyObject* license_info = Py_None;
-    PyObject* routes_info = Py_None;
-    PyObject* schemas = Py_None;
-    PyObject* servers = Py_None;
-    PyObject* tags = Py_None;
-    PyObject* external_docs = Py_None;
+    const char *title;
+    const char *version;
+    const char *openapi_version = "3.1.0";
+    const char *summary = nullptr;
+    const char *description = nullptr;
+    const char *terms_of_service = nullptr;
+    PyObject *contact = Py_None;
+    PyObject *license_info = Py_None;
+    PyObject *routes_info = Py_None;
+    PyObject *schemas = Py_None;
+    PyObject *servers = Py_None;
+    PyObject *tags = Py_None;
+    PyObject *external_docs = Py_None;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-            "ss|szzzOOOOOOO", (char**)kwlist,
-            &title, &version, &openapi_version,
-            &summary, &description, &terms_of_service,
-            &contact, &license_info, &routes_info, &schemas,
-            &servers, &tags, &external_docs)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|szzzOOOOOOO", (char **)kwlist, &title, &version,
+            &openapi_version, &summary, &description, &terms_of_service, &contact, &license_info, &routes_info,
+            &schemas, &servers, &tags, &external_docs)) {
         return nullptr;
     }
 
@@ -165,14 +166,14 @@ PyObject* py_build_openapi_schema(PyObject* self, PyObject* args, PyObject* kwar
         PyRef paths(PyDict_New());
         Py_ssize_t n = PyList_GET_SIZE(routes_info);
         for (Py_ssize_t i = 0; i < n; i++) {
-            PyObject* route = PyList_GET_ITEM(routes_info, i);
+            PyObject *route = PyList_GET_ITEM(routes_info, i);
             if (!PyDict_Check(route)) continue;
 
-            PyObject* path_obj = PyDict_GetItemString(route, "path");
-            PyObject* methods_obj = PyDict_GetItemString(route, "methods");
+            PyObject *path_obj = PyDict_GetItemString(route, "path");
+            PyObject *methods_obj = PyDict_GetItemString(route, "methods");
             if (!path_obj || !methods_obj) continue;
 
-            PyObject* path_entry = PyDict_GetItem(paths.get(), path_obj);
+            PyObject *path_entry = PyDict_GetItem(paths.get(), path_obj);
             if (!path_entry) {
                 path_entry = PyDict_New();
                 PyDict_SetItem(paths.get(), path_obj, path_entry);
@@ -183,28 +184,25 @@ PyObject* py_build_openapi_schema(PyObject* self, PyObject* args, PyObject* kwar
             if (PyList_Check(methods_obj)) {
                 Py_ssize_t nm = PyList_GET_SIZE(methods_obj);
                 for (Py_ssize_t j = 0; j < nm; j++) {
-                    PyObject* method = PyList_GET_ITEM(methods_obj, j);
-                    const char* ms = PyUnicode_AsUTF8(method);
+                    PyObject *method = PyList_GET_ITEM(methods_obj, j);
+                    const char *ms = PyUnicode_AsUTF8(method);
                     if (!ms) continue;
                     std::string m_lower(ms);
-                    for (auto& c : m_lower) if (c >= 'A' && c <= 'Z') c += 32;
+                    for (auto &c : m_lower)
+                        if (c >= 'A' && c <= 'Z') c += 32;
 
                     // Build operation object from route metadata
                     PyRef op(PyDict_New());
 
-                    PyObject* op_summary = PyDict_GetItemString(route, "summary");
-                    PyObject* op_desc = PyDict_GetItemString(route, "description");
-                    PyObject* op_id = PyDict_GetItemString(route, "operation_id");
-                    PyObject* op_tags = PyDict_GetItemString(route, "tags");
+                    PyObject *op_summary = PyDict_GetItemString(route, "summary");
+                    PyObject *op_desc = PyDict_GetItemString(route, "description");
+                    PyObject *op_id = PyDict_GetItemString(route, "operation_id");
+                    PyObject *op_tags = PyDict_GetItemString(route, "tags");
 
-                    if (op_summary && op_summary != Py_None)
-                        PyDict_SetItemString(op.get(), "summary", op_summary);
-                    if (op_desc && op_desc != Py_None)
-                        PyDict_SetItemString(op.get(), "description", op_desc);
-                    if (op_id && op_id != Py_None)
-                        PyDict_SetItemString(op.get(), "operationId", op_id);
-                    if (op_tags && op_tags != Py_None)
-                        PyDict_SetItemString(op.get(), "tags", op_tags);
+                    if (op_summary && op_summary != Py_None) PyDict_SetItemString(op.get(), "summary", op_summary);
+                    if (op_desc && op_desc != Py_None) PyDict_SetItemString(op.get(), "description", op_desc);
+                    if (op_id && op_id != Py_None) PyDict_SetItemString(op.get(), "operationId", op_id);
+                    if (op_tags && op_tags != Py_None) PyDict_SetItemString(op.get(), "tags", op_tags);
 
                     // responses placeholder
                     PyRef responses(PyDict_New());
@@ -251,27 +249,24 @@ PyObject* py_build_openapi_schema(PyObject* self, PyObject* args, PyObject* kwar
     auto buf = acquire_buffer();
     if (write_openapi_json(schema.get(), buf, 0) < 0) {
         release_buffer(std::move(buf));
-        if (!PyErr_Occurred())
-            PyErr_SetString(PyExc_RuntimeError, "Failed to serialize OpenAPI schema");
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_RuntimeError, "Failed to serialize OpenAPI schema");
         return nullptr;
     }
 
-    PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
     return result;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // build_openapi_schema_pretty — same but indented
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_build_openapi_schema_pretty(PyObject* self, PyObject* args, PyObject* kwargs) {
+PyObject *py_build_openapi_schema_pretty(PyObject *self, PyObject *args, PyObject *kwargs) {
     // Build schema dict using same logic
     PyRef schema_bytes(py_build_openapi_schema(self, args, kwargs));
     if (!schema_bytes) return nullptr;
 
     // Parse bytes back to dict (yyjson), then pretty-print with json.dumps
-    static PyObject* json_dumps = nullptr;
+    static PyObject *json_dumps = nullptr;
     if (!json_dumps) {
         PyRef json_mod(PyImport_ImportModule("json"));
         if (!json_mod) return nullptr;
@@ -279,7 +274,7 @@ PyObject* py_build_openapi_schema_pretty(PyObject* self, PyObject* args, PyObjec
     }
 
     // Extract raw bytes from schema_bytes (PyBytes) and parse with yyjson
-    char* schema_data = nullptr;
+    char *schema_data = nullptr;
     Py_ssize_t schema_len = 0;
     if (PyBytes_AsStringAndSize(schema_bytes.get(), &schema_data, &schema_len) < 0) return nullptr;
     PyRef parsed(yyjson_parse_to_pyobject(schema_data, static_cast<size_t>(schema_len)));
@@ -302,11 +297,9 @@ PyObject* py_build_openapi_schema_pretty(PyObject* self, PyObject* args, PyObjec
     return pretty.release();
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // openapi_dict_to_json_bytes(openapi_dict: PyDict) → PyBytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_openapi_dict_to_json_bytes(PyObject* self, PyObject* arg) {
+PyObject *py_openapi_dict_to_json_bytes(PyObject *self, PyObject *arg) {
     if (!PyDict_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected dict");
         return nullptr;
@@ -315,12 +308,11 @@ PyObject* py_openapi_dict_to_json_bytes(PyObject* self, PyObject* arg) {
     auto buf = acquire_buffer();
     if (write_openapi_json(arg, buf, 0) < 0) {
         release_buffer(std::move(buf));
-        if (!PyErr_Occurred())
-            PyErr_SetString(PyExc_RuntimeError, "Failed to serialize OpenAPI dict");
+        if (!PyErr_Occurred()) PyErr_SetString(PyExc_RuntimeError, "Failed to serialize OpenAPI dict");
         return nullptr;
     }
 
-    PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
     return result;
 }

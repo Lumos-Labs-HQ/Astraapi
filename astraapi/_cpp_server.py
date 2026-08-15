@@ -29,7 +29,6 @@ from collections import deque
 from typing import Any
 
 from astraapi._websocket import WebSocketDisconnect, WebSocketState
-# Hoisted hot-path imports (avoid per-request module dict lookups)
 try:
     from astraapi.routing import _endpoint_id_to_route as _endpoint_id_to_route_map
     from astraapi.background import BackgroundTasks as _BackgroundTasks
@@ -43,21 +42,18 @@ except ImportError:
     _is_async_callable = None  # type: ignore
     _run_in_threadpool = None  # type: ignore
 
-# Fix #9: hoist imports used inside _handle_middleware_result to module level
 try:
     from astraapi.responses import HTMLResponse as _HTMLResponse, Response as _ResponseClass
 except ImportError:
     _HTMLResponse = None  # type: ignore
     _ResponseClass = None  # type: ignore
 
-# Fix #12: hoist JSON utils for WebSocket + error paths
 try:
     from astraapi._json_utils import json_dumps as _json_dumps, json_loads as _json_loads
 except ImportError:
     _json_dumps = None  # type: ignore
     _json_loads = None  # type: ignore
 
-# Fix #10: hoist Request/Response/JSONResponse for _run_http_middleware
 try:
     from astraapi.requests import Request as _Request
     from astraapi.responses import Response as _Response, JSONResponse as _JSONResponse
@@ -66,18 +62,14 @@ except ImportError:
     _Response = None  # type: ignore
     _JSONResponse = None  # type: ignore
 
-# Fix #11: _ConstNext eliminates per-layer closure allocation in middleware chain
 class _ConstNext:
     __slots__ = ('resp',)
     def __init__(self, resp): self.resp = resp
     async def __call__(self, req): return self.resp
 
-# Fix #6: pre-build the content-type header tuple used in _inject_headers_into_response
 _CT_JSON_HDR = (b"content-type", b"application/json")
 _CT_JSON_HDR_LIST = [_CT_JSON_HDR]
 
-# Fix #8: module-level path→route cache for 422 error dispatch (avoids O(N) scan per error)
-# FIX C-04: Use LRU cache with max size to prevent unbounded memory growth
 # with dynamic path parameters (e.g., /items/{id} with millions of unique IDs).
 from collections import OrderedDict as _OrderedDict
 
@@ -124,7 +116,6 @@ _path_route_cache = _LRURouteCache()  # "METHOD /path" -> route object
 
 logger = logging.getLogger("astraapi")
 
-# ── Module-level capability checks (avoid per-connection try/except) ──────────
 _HAS_QUICKACK = hasattr(socket, "TCP_QUICKACK") or sys.platform == "linux"
 _TCP_QUICKACK = 12  # constant for TCP_QUICKACK
 
@@ -140,7 +131,6 @@ _WS_HEARTBEAT_INTERVAL = float(os.environ.get("ASTRAAPI_WS_PING_INTERVAL", "30.0
 # PERF: Frozenset for O(1) HTTP method validation (replaces per-request tuple creation)
 _VALID_HTTP_METHODS = frozenset((b'GET', b'POST', b'PUT', b'DELETE', b'PATCH', b'HEAD', b'OPTIONS', b'TRACE', b'CONNECT'))
 
-# ── Zero-overhead awaitable for sync send methods ────────────────────────────
 class _NoopAwaitable:
     """Awaitable that completes immediately with no overhead.
     Used by send_text/send_bytes to avoid coroutine frame creation."""
@@ -150,7 +140,6 @@ class _NoopAwaitable:
 
 _NOOP = _NoopAwaitable()
 
-# ── HTTP status reason phrases ────────────────────────────────────────────────
 _STATUS_PHRASES: dict[int, str] = {
     200: "OK",
     201: "Created",
@@ -194,7 +183,6 @@ _STREAMING_STATUS_LINES: dict[int, bytes] = {
     for code, phrase in _STATUS_PHRASES.items()
 }
 
-# ── Lightweight single-producer single-consumer channel ──────────────────────
 class _WsFastChannel:
     """Ultra-fast message channel replacing asyncio.Queue for WebSocket.
 
@@ -325,7 +313,6 @@ except ImportError as e:
     ) from e
 
 
-# ── WebSocket connection state pool ───────────────────────────────────────────
 class _WsConnectionPool:
     """Pool pre-allocated WS connection state capsules for reuse."""
     __slots__ = ('_capsules', '_max_size')
@@ -366,8 +353,6 @@ if _PING_FRAME is None:
     # Python fallback: raw PING frame (opcode 0x89, no payload, no mask)
     _PING_FRAME = b"\x89\x00"
 
-# ── WebSocket endpoint signature cache ────────────────────────────────────────
-# FIX C-03: Use weakref-keyed cache instead of id() to prevent stale entries
 # after GC reclaims endpoint functions. WeakValueDictionary won't work here
 # (values are strings), so we use a bounded LRU with the actual function as
 # part of validation to detect id() reuse.
@@ -427,7 +412,6 @@ def precompute_ws_signature(endpoint: Any) -> None:
             break
     _ws_sig_cache.put(endpoint, ws_param)
 
-# ── Pre-built responses (allocated once, reused forever) ─────────────────────
 
 _500_RESP = (
     b"HTTP/1.1 500 Internal Server Error\r\n"
@@ -438,7 +422,6 @@ _500_RESP = (
     b'Internal Server Error'
 )
 
-# ── Type cache (initialized at import time) ──────────────────────────────────
 
 try:
     from astraapi._core_bridge import (
@@ -449,7 +432,6 @@ except ImportError:
     _InlineResult = None
     _encode_to_json_bytes = None
 
-# ── App-level exception handler registry (set once at server start) ──────────
 _app_exc_handlers: dict = {}
 _app_status_handlers: dict = {}
 
@@ -620,7 +602,6 @@ def _get_lifespan_state() -> dict:
     return _lifespan_state
 
 
-# ── Pydantic validation (initialized at import time) ─────────────────────────
 
 try:
     from astraapi.dependencies.utils import request_body_to_args as _request_body_to_args
@@ -628,7 +609,6 @@ except ImportError:
     _request_body_to_args = None
 
 
-# ── WebSocket shared helpers ──────────────────────────────────────────────────
 
 def _send_close_response(transport, payload: bytes) -> None:
     """Build and send close frame response. Single place for close logic."""
@@ -675,7 +655,6 @@ def _feed_frames(ws, transport, frames, ring_buf) -> bool:
     return False
 
 
-# ── Per-connection metrics ────────────────────────────────────────────────────
 
 class _WsMetrics:
     """Lightweight WebSocket connection metrics."""
@@ -696,7 +675,6 @@ class _WsMetrics:
         self.last_activity = now
 
 
-# ── Server-level WebSocket metrics ───────────────────────────────────────────
 
 class _WsServerMetrics:
     """Aggregate metrics across all WebSocket connections."""
@@ -710,7 +688,6 @@ class _WsServerMetrics:
 _server_ws_metrics = _WsServerMetrics()
 
 
-# ── WebSocket wrapper for Python endpoint access ────────────────────────────
 
 class CppWebSocket:
     """WebSocket connection wrapper for asyncio transport.
@@ -773,7 +750,6 @@ class CppWebSocket:
             "state": {},
         }
 
-    # ── Lifecycle ─────────────────────────────────────────────────────
 
     async def accept(self, subprotocol: str | None = None, headers: list | None = None) -> None:
         """Accept the WebSocket connection (upgrade already sent by C++).
@@ -825,7 +801,6 @@ class CppWebSocket:
         finally:
             self._close_waiter = None
 
-    # ── Write helpers ─────────────────────────────────────────────────
 
     def _queue_send(self, opcode: int, payload: bytes) -> None:
         """Queue a send for batch building: coalesces within same event loop tick."""
@@ -876,7 +851,6 @@ class CppWebSocket:
         if transport is not None and not transport.is_closing():
             transport.write(frame)
 
-    # ── Send methods ──────────────────────────────────────────────────
 
     def send_text(self, data: str) -> _NoopAwaitable:
         """Send a text message. Returns awaitable for API compatibility."""
@@ -964,7 +938,6 @@ class CppWebSocket:
             self._queue_send(opcode, payload)
         return _NOOP
 
-    # ── Receive methods ───────────────────────────────────────────────
 
     def _parse_close_code(self, payload: bytes) -> int:
         """Extract close code from close frame payload (RFC 6455 §5.5.1)."""
@@ -1025,7 +998,6 @@ class CppWebSocket:
         self._last_received_json = result
         return result
 
-    # ── Dict-based ASGI protocol methods ──────────────────────────────
 
     async def receive(self) -> dict:
         """Receive an ASGI-style WebSocket message dict."""
@@ -1058,7 +1030,6 @@ class CppWebSocket:
         elif msg_type == "websocket.close":
             await self.close(code=message.get("code", 1000), reason=message.get("reason"))
 
-    # ── Async iterators ───────────────────────────────────────────────
 
     async def iter_text(self):
         """Async iterator yielding text messages until disconnect."""
@@ -1105,7 +1076,6 @@ class CppWebSocket:
         if assembler:
             yield bytes(assembler)
 
-    # ── Write batching (cork/uncork) ─────────────────────────────────
 
     def cork(self) -> None:
         """Start buffering outgoing frames for batch write.
@@ -1166,7 +1136,6 @@ class CppWebSocket:
                     transport.write(self._build_frame_py(op, pl))
         self._cork_buf.clear()
 
-    # ── Metrics & Configuration ────────────────────────────────────────
 
     @property
     def metrics(self) -> _WsMetrics:
@@ -1177,7 +1146,6 @@ class CppWebSocket:
         """Disable echo auto-detection for non-echo endpoints."""
         self._echo_detect_count = -1
 
-    # ── Internal ──────────────────────────────────────────────────────
 
     def feed_frame(self, opcode: int, payload: bytes) -> None:
         """Feed a parsed frame from the protocol handler."""
@@ -1207,7 +1175,6 @@ class CppWebSocket:
         return bytes(header) + payload
 
 
-# ── OPT-14: Protocol Object Pool ──────────────────────────────────────────
 # Reuse CppHttpProtocol instances to avoid per-connection __init__ overhead
 # and reduce GC pressure under high connection rates. Pool returns protocol
 # objects to a free list on connection_lost(), reuses on next connection.
@@ -1266,7 +1233,6 @@ class _RejectProtocol(asyncio.Protocol):
         transport.close()  # type: ignore[union-attr]
 
 
-# ── Coroutine driver — properly forwards exceptions via throw() ──────────────
 
 def _inject_headers_into_response(resp: bytes, extra_headers: list) -> bytes:
     """Inject extra headers into pre-built HTTP response bytes, before \r\n\r\n."""
@@ -1274,7 +1240,6 @@ def _inject_headers_into_response(resp: bytes, extra_headers: list) -> bytes:
     idx = resp.find(sep)
     if idx == -1:
         return resp
-    # Fix #6: build extra block with a list join instead of repeated += on bytes
     parts: list[bytes] = []
     for k, v in extra_headers:
         if isinstance(k, str): k = k.encode('latin-1')
@@ -1441,7 +1406,6 @@ async def _write_chunked_streaming(transport: Any, raw: Any, cors_headers: list 
     if not headers_list and hasattr(raw, 'headers'):
         headers_list = list(raw.headers.items())
     prefix = _STREAMING_STATUS_LINES.get(status)
-    # Fix #7: build header block with a single list-join instead of bytearray extend
     hdr_parts: list[bytes] = [prefix] if prefix is not None else [
         f"HTTP/1.1 {status} {_STATUS_PHRASES.get(status, '')}\r\ntransfer-encoding: chunked\r\n".encode()
     ]
@@ -1573,11 +1537,9 @@ class CppHttpProtocol(asyncio.Protocol):
         _nrc_entry = _core_app_needs_req_ctx.get(id(core_app))
         self._needs_req_ctx = _nrc_entry[1] if (_nrc_entry is not None and _nrc_entry[0] is core_app) else True
 
-    # ── Connection lifecycle ─────────────────────────────────────────────
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         self._transport = transport  # type: ignore[assignment]
-        # Fix #10: get socket once, extract fd + set opts in one block — no repeated get_extra_info
         sock: socket.socket | None = transport.get_extra_info("socket")  # type: ignore[union-attr]
         if sock is not None:
             try:
@@ -1642,7 +1604,6 @@ class CppHttpProtocol(asyncio.Protocol):
         # OPT-14: Return protocol to pool for reuse
         _protocol_pool.release(self)
 
-    # ── Data handling — the hot path ─────────────────────────────────────
 
     def data_received(self, data: bytes) -> None:
         # TCP_QUICKACK re-armed inside C++ handle_http_append_and_dispatch() / handle_http_batch_v2().
@@ -1682,7 +1643,6 @@ class CppHttpProtocol(asyncio.Protocol):
 
         sock_fd = self._sock_fd
 
-        # Fix #1: Only parse headers in Python when _needs_req_ctx is True AND data is non-empty.
         # Also parse when dependency_overrides are active — overrides can introduce query params
         # not in the original batch_specs, so the param validator needs _current_query_string.
         # PERF: Use direct attribute access (faster than getattr with default) and cache _full_app ref
@@ -1760,7 +1720,6 @@ class CppHttpProtocol(asyncio.Protocol):
             except Exception:
                 pass
 
-        # ── Get first result: fused append+dispatch if available, else separate ────────────
         core_ad = self._core_append_dispatch
         if core_ad is not None:
             # Single C++ call: appends data + dispatches
@@ -1806,13 +1765,11 @@ class CppHttpProtocol(asyncio.Protocol):
                 _http_buf_clear(http_buf)
                 return
 
-        # ── Dispatch loop — handles async/ws/stream/async_di/InlineResult ────────────────
         # Reached only when result is a tuple or InlineResult (not int/None/False).
         # IR and core_batch loaded here — not on the sync hot path.
         IR = _InlineResult
         core_batch = self._core_batch
         create_task = self._loop_create_task
-        # Fix #12: cache pending_tasks set + discard method once before loop
         # avoids 2 LOAD_ATTR (self._pending_tasks, .discard) per async task created
         pt = self._pending_tasks
         pt_discard = self._pending_tasks_discard
@@ -1900,7 +1857,6 @@ class CppHttpProtocol(asyncio.Protocol):
                             pass
                     task = create_task(
                         self._handle_async(coro, first_yield, status_code, keep_alive, _origin))
-                    # Fix #12: use cached pt/pt_discard refs — avoids 2 LOAD_ATTR per task
                     if not task.done():
                         pt.add(task)
                         task.add_done_callback(pt_discard)
@@ -1972,7 +1928,6 @@ class CppHttpProtocol(asyncio.Protocol):
                 return
             # else: another tuple/InlineResult — continue dispatching
 
-    # ── WebSocket frame handling ─────────────────────────────────────────
 
     def _handle_ws_frames(self, data: bytes) -> None:
         """Normal frame handler — single C++ call parses + feeds directly to channel."""
@@ -2092,7 +2047,6 @@ class CppHttpProtocol(asyncio.Protocol):
             if self._transport and not self._transport.is_closing():
                 self._transport.close()
 
-    # ── Back-pressure (write flow control) ───────────────────────────────
 
     def pause_writing(self) -> None:
         self._wr_paused = True
@@ -2112,7 +2066,6 @@ class CppHttpProtocol(asyncio.Protocol):
         if not self._wr_paused and _http_buf_len(self._http_buf) > 0:
             self._loop.call_soon(self._drain_buf)
 
-    # ── WebSocket heartbeat (PING/PONG) ───────────────────────────────────
 
     def _start_ws_heartbeat(self, interval: float = _WS_HEARTBEAT_INTERVAL) -> None:
         """Start periodic PING frames to detect dead connections."""
@@ -2149,7 +2102,6 @@ class CppHttpProtocol(asyncio.Protocol):
             h.cancel()
             self._ws_ping_handle = None
 
-    # ── Starlette Response helper ─────────────────────────────────────────
 
     def _write_response_obj(self, resp_obj: Any, keep_alive: bool) -> None:
         """Write a Starlette Response object (HTMLResponse, etc.) to transport."""
@@ -2235,7 +2187,6 @@ class CppHttpProtocol(asyncio.Protocol):
                 try:
                     _route = _current_route.get()
                     if _route is None:
-                        # Fix #8: use module-level cache to avoid O(N) route scan on every 422
                         _path = _current_path.get()
                         _method = _current_method.get() or 'GET'
                         if _path:
@@ -2306,7 +2257,6 @@ class CppHttpProtocol(asyncio.Protocol):
         else:
             transport.write(_500_RESP)
 
-    # ── Async endpoint dispatch ──────────────────────────────────────────
 
     async def _handle_async(self, coro: Any, first_yield: Any, status_code: int, keep_alive: bool, _origin: str = "") -> None:
         """Await async endpoint coroutine, serialize + write response.
@@ -2506,7 +2456,6 @@ class CppHttpProtocol(asyncio.Protocol):
             # Capture response object from DI values for post-endpoint header merging
             _di_response_obj = solved[3] if isinstance(solved, tuple) and len(solved) >= 4 else None
 
-            # Fix #3: inline _call_and_write logic directly — eliminates per-request
             # closure allocation + coroutine frame for the inner async def.
             async def _exec_endpoint_and_write(
                 _endpoint=endpoint, _kwargs=kwargs, _is_async=_is_async_endpoint,
@@ -2631,7 +2580,6 @@ class CppHttpProtocol(asyncio.Protocol):
                 _current_route.reset(_route_token)
             self._core.record_request_end()
 
-    # ── HTTP middleware result path ──
 
     async def _handle_middleware_result(self, raw: Any, status_code: int, keep_alive: bool,
                                         raw_headers: Any = None, method: str = 'GET', path: str = '/') -> None:
@@ -2640,7 +2588,6 @@ class CppHttpProtocol(asyncio.Protocol):
             _rh = raw_headers or _current_raw_headers.get() or []
             _origin = _extract_origin(_rh if isinstance(_rh, list) else None)
             _cors_hdrs = _get_cors_headers_for_origin(_origin, _orig_app) if _orig_app and _origin else []
-            # Fix #9: use module-level hoisted imports instead of per-call import
             if isinstance(raw, str) and not (hasattr(raw, 'body') or hasattr(raw, 'media_type')):
                 _p = path or '/'
                 if _p.endswith('.json') and _ResponseClass is not None:
@@ -2675,7 +2622,6 @@ class CppHttpProtocol(asyncio.Protocol):
         finally:
             self._core.record_request_end()
 
-    # ── Pydantic body validation path ────────────────────────────────────
 
     async def _handle_pydantic(self, ir: Any) -> None:
         """Handle routes needing Pydantic validation (POST with body models)."""
@@ -2728,7 +2674,6 @@ class CppHttpProtocol(asyncio.Protocol):
         finally:
             self._core.record_request_end()
 
-    # ── WebSocket lifecycle handler ──────────────────────────────────────
 
     async def _handle_websocket(self, endpoint: Any, path_params: dict) -> None:
         """Run WebSocket endpoint with CppWebSocket wrapper."""
@@ -2865,7 +2810,6 @@ class CppHttpProtocol(asyncio.Protocol):
             except Exception:
                 pass
 
-    # ── Keep-alive (batch sweep — no per-connection timers) ─────────────
 
     def _ka_reset(self, now: float = 0.0) -> None:
         # Update deadline only — batch sweep handles expiry checking
@@ -2878,9 +2822,7 @@ class CppHttpProtocol(asyncio.Protocol):
         self._ka_deadline = 0.0
 
 
-# ═════════════════════════════════════════════════════════════════════════════
 # Server creation (reusable by TestClient)
-# ═════════════════════════════════════════════════════════════════════════════
 
 
 async def _create_server(
@@ -3089,7 +3031,6 @@ async def _create_server(
     if hasattr(core_app, "freeze_routes"):
         core_app.freeze_routes()
 
-    # ── Warm-up: eliminate first-request lazy initialization overhead ──
     _init_cached_refs()       # Pre-import modules + intern strings in C++
     _prewarm_buffer_pool(4)   # Pre-allocate thread-local response buffers
     if hasattr(core_app, 'warmup'):
@@ -3185,9 +3126,7 @@ async def _create_server(
     return server
 
 
-# ═════════════════════════════════════════════════════════════════════════════
 # Master-accept fd receiver (multi-worker connection dispatch)
-# ═════════════════════════════════════════════════════════════════════════════
 
 
 def _setup_fd_receiver(
@@ -3284,9 +3223,7 @@ def _setup_fd_receiver_win(
     t.start()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
 # Server startup
-# ═════════════════════════════════════════════════════════════════════════════
 
 async def run_server(
     app: Any, host: str = "127.0.0.1", port: int = 8000,
@@ -3328,7 +3265,6 @@ async def run_server(
 
     loop = asyncio.get_event_loop()
 
-    # ── Scheduler tuning: reduce OS preemption jitter (Linux/WSL2 only) ──────────
     # Root cause of benchmark variance: Hyper-V vCPU steal time + Linux CFS jitter.
     # SCHED_FIFO prevents CFS from preempting this process for any normal-priority
     # task, and reduces Hyper-V VMBus interrupt frequency (fewer context switches
@@ -3353,7 +3289,6 @@ async def run_server(
             except Exception:
                 pass  # non-root, non-Linux, or WSL2 without privilege — silently skip
 
-    # ── GC control: Use tuned generational thresholds instead of full disable.
     # Full gc.disable() prevents cyclic garbage from being collected, causing
     # memory leaks with closures, self-referencing objects, etc.
     # Instead: raise gen0 threshold to reduce pause frequency while still
@@ -3433,7 +3368,6 @@ async def run_server(
     # Store per-app-instance so protocols read correct value regardless of test ordering
     _core_app_needs_req_ctx[id(core_app)] = (core_app, _needs_request_context)
 
-    # ── Sync CORS config to C++ core ─────────────────────────────────────
     if hasattr(core_app, "configure_cors"):
         for mw in getattr(app, "user_middleware", []):
             cls = getattr(mw, "cls", None) or (mw[0] if isinstance(mw, (list, tuple)) else None)
@@ -3453,7 +3387,6 @@ async def run_server(
                     print(f"[cpp-server] CORS sync failed: {exc}", file=sys.stderr)
                 break
 
-    # ── Configure C++ native middleware (silent) ────────────────────────
     for mw in getattr(app, "user_middleware", []):
         cls = getattr(mw, "cls", None) or (mw[0] if isinstance(mw, (list, tuple)) else None)
         cls_name = getattr(cls, "__name__", "") if cls else ""
@@ -3478,19 +3411,16 @@ async def run_server(
     if not _is_worker and hasattr(core_app, "freeze_routes"):
         core_app.freeze_routes()
 
-    # ── Warm-up: eliminate first-request lazy initialization overhead ──
     _init_cached_refs()       # Pre-import modules + intern strings in C++
     _prewarm_buffer_pool(4)   # Pre-allocate thread-local response buffers
     if hasattr(core_app, 'warmup'):
         core_app.warmup()     # Exercise parse→route→serialize→build to warm icache
 
-    # ── Lifespan context manager detection ──────────────────────────────
     router = getattr(app, "router", None)
     lifespan_handler = None
     if router is not None:
         lifespan_handler = getattr(router, "lifespan_context", None)
 
-    # ── Lifespan context manager or on_startup/on_shutdown ────────────
     lifespan_cm = None
     if lifespan_handler is not None:
         # lifespan_handler is the user's async context manager factory
@@ -3520,7 +3450,6 @@ async def run_server(
     except Exception:
         pass
 
-    # ── Track active connections for graceful shutdown ──────────────────
     active_connections: set[CppHttpProtocol] = set()
     active_count = [0]  # mutable int via list — faster than len(set) in hot path
 
@@ -3533,7 +3462,6 @@ async def run_server(
         proto = CppHttpProtocol(core_app, loop, keep_alive_timeout, None)
         _protocol_pool.release(proto)
 
-    # ── gc.freeze(): move ALL startup objects to permanent generation ──
     # After warm-up + pool pre-warm, hundreds of thousands of objects exist
     # (protocols, modules, cached strings, route tables). gc.freeze() moves
     # them to a permanent generation that gc.collect(0/1/2) never scans.
@@ -3545,7 +3473,6 @@ async def run_server(
     # CPython refcounting handles short-lived objects; gen2 cycles are rare at startup.
     gc.freeze()     # move ALL survivors to permanent generation
 
-    # ── GC strategy: freeze + refcounting, no runtime collections ───────
     # gc.freeze() above moved startup objects to permanent generation.
     # CPython refcounting handles short-lived request objects (coroutines,
     # tuples, dicts). NO periodic gc.collect() — it blocks the event loop
@@ -3638,7 +3565,6 @@ async def run_server(
         print(f"C++ HTTP server running on http://{host}:{port}")
         print("Press Ctrl+C to stop")
 
-    # ── Defer OpenAPI schema generation to background (non-blocking) ──────
     # OpenAPI is only needed for /docs and /openapi.json — no need to block
     # startup for it.  The openapi() method caches its result, so if a user
     # hits /docs before this task finishes, it generates on-demand once.
@@ -3682,11 +3608,9 @@ async def run_server(
     async def _ka_sweep() -> None:
         while not stop_event.is_set():
             await asyncio.sleep(10.0)
-            # Fix #13: call _monotonic() ONCE per sweep, not once per connection
             now = _monotonic()
             expired: list = []
             checked = 0
-            # FIX H-03: iterate a snapshot (list copy) to prevent RuntimeError
             # when connection_made/connection_lost mutate the set during yield.
             connections_snapshot = list(active_connections)
             for p in connections_snapshot:
@@ -3708,7 +3632,6 @@ async def run_server(
 
     sweep_task = loop.create_task(_ka_sweep())
 
-    # ── Idle pool trim: reclaim memory when connections drop ─────────────
     async def _pool_trim() -> None:
         while not stop_event.is_set():
             await asyncio.sleep(120.0)
@@ -3734,7 +3657,6 @@ async def run_server(
         gc.set_threshold(700, 10, 10)  # restore defaults
         sweep_task.cancel()
         trim_task.cancel()
-        # ── Graceful shutdown: stop accepting, drain active connections ─
         if server is not None:
             server.close()
             await server.wait_closed()
@@ -3773,7 +3695,6 @@ async def run_server(
                         transport.close()
                 active_connections.clear()
 
-        # ── Lifespan: shutdown ─────────────────────────────────────────
         if lifespan_cm is not None:
             await lifespan_cm.__aexit__(None, None, None)
 

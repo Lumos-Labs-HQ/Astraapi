@@ -15,9 +15,6 @@ from pydantic import BaseModel
 app = AstraAPI()
 
 
-# ── Models ────────────────────────────────────────────────────────────────────
-
-
 class Item(BaseModel):
     name: str
     price: float
@@ -44,8 +41,6 @@ class NestedResponse(BaseModel):
     total: int
     page: int
 
-
-# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
 @app.get("/plaintext")

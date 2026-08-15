@@ -2,7 +2,6 @@
 
 __version__ = "0.2.0"
 
-# ── Lazy imports via __getattr__ ────────────────────────────────────────────
 # Deferring heavy imports (pydantic, openapi models, dependency resolution)
 # until the symbol is actually accessed.  This reduces
 # `from astraapi import AstraAPI` from ~4.7s to ~1-1.5s on Windows.

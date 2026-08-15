@@ -1,16 +1,18 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #include "json_writer.hpp"
+
 #include "asgi_constants.hpp"
 #include "buffer_pool.hpp"
 #include "compat.hpp"
 #include "pyref.hpp"
-#include <cstring>
-#include <cstdio>
+
+#include <Python.h>
+
 #include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <mutex>
 
-// SIMD headers for accelerated JSON string escaping
 #if defined(__AVX2__)
 #include <immintrin.h>
 #define HAS_AVX2 1
@@ -28,22 +30,20 @@ extern "C" {
 #include "ryu/ryu.h"
 }
 
-// ── Cached type objects for special serialization ─────────────────────────────
-static PyObject* s_datetime_type = nullptr;    // datetime.datetime
-static PyObject* s_date_type = nullptr;        // datetime.date
-static PyObject* s_time_type = nullptr;        // datetime.time
-static PyObject* s_timedelta_type = nullptr;   // datetime.timedelta
-static PyObject* s_decimal_type = nullptr;     // decimal.Decimal
-static PyObject* s_uuid_type = nullptr;        // uuid.UUID
-static PyObject* s_enum_type = nullptr;        // enum.Enum
-static PyObject* s_isoformat = nullptr;        // cached "isoformat" string
-static PyObject* s_value = nullptr;            // cached "value" string
-static PyObject* s_model_dump = nullptr;       // cached "model_dump" string (Pydantic v2)
-static PyObject* s_is_dataclass = nullptr;    // dataclasses.is_dataclass
-static PyObject* s_asdict = nullptr;           // dataclasses.asdict
-static PyObject* s_total_seconds = nullptr;    // "total_seconds"
+static PyObject *s_datetime_type = nullptr;  // datetime.datetime
+static PyObject *s_date_type = nullptr;      // datetime.date
+static PyObject *s_time_type = nullptr;      // datetime.time
+static PyObject *s_timedelta_type = nullptr; // datetime.timedelta
+static PyObject *s_decimal_type = nullptr;   // decimal.Decimal
+static PyObject *s_uuid_type = nullptr;      // uuid.UUID
+static PyObject *s_enum_type = nullptr;      // enum.Enum
+static PyObject *s_isoformat = nullptr;      // cached "isoformat" string
+static PyObject *s_value = nullptr;          // cached "value" string
+static PyObject *s_model_dump = nullptr;     // cached "model_dump" string (Pydantic v2)
+static PyObject *s_is_dataclass = nullptr;   // dataclasses.is_dataclass
+static PyObject *s_asdict = nullptr;         // dataclasses.asdict
+static PyObject *s_total_seconds = nullptr;  // "total_seconds"
 
-// TS-1: Thread-safe lazy init for free-threaded Python (PEP 703) readiness
 static std::once_flag s_types_init_flag;
 
 static void _do_ensure_special_types() {
@@ -53,7 +53,6 @@ static void _do_ensure_special_types() {
     s_model_dump = PyUnicode_InternFromString("model_dump");
     s_total_seconds = PyUnicode_InternFromString("total_seconds");
 
-    // datetime module
     PyRef dt_mod(PyImport_ImportModule("datetime"));
     if (dt_mod) {
         s_datetime_type = PyObject_GetAttrString(dt_mod.get(), "datetime");
@@ -63,28 +62,24 @@ static void _do_ensure_special_types() {
     }
     PyErr_Clear();
 
-    // decimal module
     PyRef dec_mod(PyImport_ImportModule("decimal"));
     if (dec_mod) {
         s_decimal_type = PyObject_GetAttrString(dec_mod.get(), "Decimal");
     }
     PyErr_Clear();
 
-    // uuid module
     PyRef uuid_mod(PyImport_ImportModule("uuid"));
     if (uuid_mod) {
         s_uuid_type = PyObject_GetAttrString(uuid_mod.get(), "UUID");
     }
     PyErr_Clear();
 
-    // enum module
     PyRef enum_mod(PyImport_ImportModule("enum"));
     if (enum_mod) {
         s_enum_type = PyObject_GetAttrString(enum_mod.get(), "Enum");
     }
     PyErr_Clear();
 
-    // dataclasses module
     PyRef dc_mod(PyImport_ImportModule("dataclasses"));
     if (dc_mod) {
         s_is_dataclass = PyObject_GetAttrString(dc_mod.get(), "is_dataclass");
@@ -93,74 +88,82 @@ static void _do_ensure_special_types() {
     PyErr_Clear();
 }
 
-static void ensure_special_types() {
-    std::call_once(s_types_init_flag, _do_ensure_special_types);
-}
+static void ensure_special_types() { std::call_once(s_types_init_flag, _do_ensure_special_types); }
 
-void json_writer_init() {
-    ensure_special_types();
-}
+void json_writer_init() { ensure_special_types(); }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-static inline void buf_append(std::vector<char>& buf, const char* s, size_t len) {
+static inline void buf_append(std::vector<char> &buf, const char *s, size_t len) {
     size_t old = buf.size();
     buf.resize(old + len);
     std::memcpy(buf.data() + old, s, len);
 }
 
-static inline void buf_push(std::vector<char>& buf, char c) {
-    buf.push_back(c);
-}
+static inline void buf_push(std::vector<char> &buf, char c) { buf.push_back(c); }
 
 // Batch-scan string escaping: copy safe ranges in one memcpy, only branch on escapable chars.
 // Most strings are pure ASCII with no escapes — this is ~3-5x faster than per-character switch.
-// Scalar escape handler (shared by both scalar and SIMD paths)
-static inline void emit_escape(std::vector<char>& buf, unsigned char c) {
+static inline void emit_escape(std::vector<char> &buf, unsigned char c) {
     switch (c) {
-        case '"':  buf.push_back('\\'); buf.push_back('"');  break;
-        case '\\': buf.push_back('\\'); buf.push_back('\\'); break;
-        case '\b': buf.push_back('\\'); buf.push_back('b');  break;
-        case '\f': buf.push_back('\\'); buf.push_back('f');  break;
-        case '\n': buf.push_back('\\'); buf.push_back('n');  break;
-        case '\r': buf.push_back('\\'); buf.push_back('r');  break;
-        case '\t': buf.push_back('\\'); buf.push_back('t');  break;
-        default: {
-            char esc[7];
-            snprintf(esc, sizeof(esc), "\\u%04x", c);
-            buf_append(buf, esc, 6);
-            break;
-        }
+    case '"':
+        buf.push_back('\\');
+        buf.push_back('"');
+        break;
+    case '\\':
+        buf.push_back('\\');
+        buf.push_back('\\');
+        break;
+    case '\b':
+        buf.push_back('\\');
+        buf.push_back('b');
+        break;
+    case '\f':
+        buf.push_back('\\');
+        buf.push_back('f');
+        break;
+    case '\n':
+        buf.push_back('\\');
+        buf.push_back('n');
+        break;
+    case '\r':
+        buf.push_back('\\');
+        buf.push_back('r');
+        break;
+    case '\t':
+        buf.push_back('\\');
+        buf.push_back('t');
+        break;
+    default: {
+        char esc[7];
+        snprintf(esc, sizeof(esc), "\\u%04x", c);
+        buf_append(buf, esc, 6);
+        break;
+    }
     }
 }
 
-static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize_t len) {
+static void write_escaped_string(std::vector<char> &buf, const char *s, Py_ssize_t len) {
     buf.push_back('"');
-    const char* p = s;
-    const char* end = s + len;
-    const char* safe = p;
+    const char *p = s;
+    const char *end = s + len;
+    const char *safe = p;
 
 #if HAS_AVX2
-    // AVX2 fast path: scan 32 bytes at a time (2x throughput vs SSE2).
-    // Same algorithm as SSE2 but with 256-bit registers.
     if (len >= 32) {
         const __m256i v_space = _mm256_set1_epi8(0x20);
         const __m256i v_quote = _mm256_set1_epi8('"');
         const __m256i v_bslash = _mm256_set1_epi8('\\');
         const __m256i v_high = _mm256_set1_epi8((char)0x80);
 
-        const char* simd_end = end - 31;  // safe to read 32 bytes
+        const char *simd_end = end - 31; // safe to read 32 bytes
         while (p < simd_end) {
-            __m256i chunk = _mm256_loadu_si256((const __m256i*)p);
+            __m256i chunk = _mm256_loadu_si256((const __m256i *)p);
 
             __m256i is_high = _mm256_and_si256(chunk, v_high);
             __m256i high_mask = _mm256_cmpeq_epi8(is_high, v_high);
-            __m256i is_ctrl = _mm256_andnot_si256(high_mask,
-                _mm256_cmpgt_epi8(v_space, chunk));
+            __m256i is_ctrl = _mm256_andnot_si256(high_mask, _mm256_cmpgt_epi8(v_space, chunk));
             __m256i is_quote_ = _mm256_cmpeq_epi8(chunk, v_quote);
             __m256i is_bslash_ = _mm256_cmpeq_epi8(chunk, v_bslash);
-            __m256i need_escape = _mm256_or_si256(is_ctrl,
-                _mm256_or_si256(is_quote_, is_bslash_));
+            __m256i need_escape = _mm256_or_si256(is_ctrl, _mm256_or_si256(is_quote_, is_bslash_));
 
             int mask = _mm256_movemask_epi8(need_escape);
             if (mask == 0) {
@@ -181,12 +184,9 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
             safe = ++p;
         }
     }
-    // SSE2 handles 16-byte tail after AVX2 (bytes between simd_end and end-15)
-#endif  // HAS_AVX2
+#endif // HAS_AVX2
 
 #if HAS_SSE2
-    // SSE2 fast path: scan 16 bytes at a time for characters needing escape.
-    // Characters that need escaping: < 0x20 (control), '"' (0x22), '\\' (0x5C)
     // Characters >= 0x80 are valid UTF-8 and must NOT be escaped.
     if (len >= 16) {
         const __m128i v_space = _mm_set1_epi8(0x20);
@@ -194,14 +194,13 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
         const __m128i v_bslash = _mm_set1_epi8('\\');
         const __m128i v_high = _mm_set1_epi8((char)0x80);
 
-        const char* simd_end = end - 15;  // safe to read 16 bytes
+        const char *simd_end = end - 15; // safe to read 16 bytes
         while (p < simd_end) {
-            __m128i chunk = _mm_loadu_si128((const __m128i*)p);
+            __m128i chunk = _mm_loadu_si128((const __m128i *)p);
 
             __m128i is_high = _mm_and_si128(chunk, v_high);
             __m128i high_mask = _mm_cmpeq_epi8(is_high, v_high);
-            __m128i is_ctrl = _mm_andnot_si128(high_mask,
-                _mm_cmplt_epi8(chunk, v_space));
+            __m128i is_ctrl = _mm_andnot_si128(high_mask, _mm_cmplt_epi8(chunk, v_space));
             __m128i is_quote_ = _mm_cmpeq_epi8(chunk, v_quote);
             __m128i is_bslash_ = _mm_cmpeq_epi8(chunk, v_bslash);
             __m128i need_escape = _mm_or_si128(is_ctrl, _mm_or_si128(is_quote_, is_bslash_));
@@ -225,12 +224,14 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
             safe = ++p;
         }
     }
-#endif  // HAS_SSE2
+#endif // HAS_SSE2
 
-    // Scalar tail (also handles all data when no SSE2)
     while (p < end) {
         unsigned char c = (unsigned char)*p;
-        if ((c >= 0x20 && c != '"' && c != '\\') || c >= 0x80) { p++; continue; }
+        if ((c >= 0x20 && c != '"' && c != '\\') || c >= 0x80) {
+            p++;
+            continue;
+        }
         if (p > safe) buf_append(buf, safe, p - safe);
         emit_escape(buf, c);
         safe = ++p;
@@ -239,21 +240,17 @@ static void write_escaped_string(std::vector<char>& buf, const char* s, Py_ssize
     buf.push_back('"');
 }
 
-// ── Main writer ─────────────────────────────────────────────────────────────
-
-int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
+int write_json(PyObject *obj, std::vector<char> &buf, int depth) {
     if (depth > 64) {
         PyErr_SetString(PyExc_ValueError, "JSON nesting too deep (>64)");
         return -1;
     }
 
-    // None → null (most common case — mark as likely)
     if (LIKELY(obj == Py_None)) {
         buf_append(buf, "null", 4);
         return 0;
     }
 
-    // Bool (check before int — bool is subclass of int)
     if (LIKELY(PyBool_Check(obj))) {
         if (obj == Py_True) {
             buf_append(buf, "true", 4);
@@ -263,7 +260,6 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         return 0;
     }
 
-    // Int
     if (LIKELY(PyLong_Check(obj))) {
         int overflow = 0;
         long long val = PyLong_AsLongLongAndOverflow(obj, &overflow);
@@ -274,18 +270,19 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
             return 0;
         }
         PyErr_Clear();
-        // Fallback: convert to string
-        PyObject* str = PyObject_Str(obj);
+        PyObject *str = PyObject_Str(obj);
         if (!str) return -1;
         Py_ssize_t slen;
-        const char* s = PyUnicode_AsUTF8AndSize(str, &slen);
-        if (!s) { Py_DECREF(str); return -1; }
+        const char *s = PyUnicode_AsUTF8AndSize(str, &slen);
+        if (!s) {
+            Py_DECREF(str);
+            return -1;
+        }
         buf_append(buf, s, (size_t)slen);
         Py_DECREF(str);
         return 0;
     }
 
-    // Float
     if (LIKELY(PyFloat_Check(obj))) {
         double val = PyFloat_AS_DOUBLE(obj);
         // Handle special values
@@ -301,37 +298,37 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         int n = d2s_buffered_n(val, num_buf);
         // ryu uses 'E' for exponent — JSON convention is lowercase 'e'
         for (int i = 0; i < n; i++) {
-            if (num_buf[i] == 'E') { num_buf[i] = 'e'; break; }
+            if (num_buf[i] == 'E') {
+                num_buf[i] = 'e';
+                break;
+            }
         }
         buf_append(buf, num_buf, (size_t)n);
         return 0;
     }
 
-    // String
     if (LIKELY(PyUnicode_Check(obj))) {
         Py_ssize_t slen;
-        const char* s = PyUnicode_AsUTF8AndSize(obj, &slen);
+        const char *s = PyUnicode_AsUTF8AndSize(obj, &slen);
         if (!s) return -1;
         write_escaped_string(buf, s, slen);
         return 0;
     }
 
-    // Bytes → base64 or raw string
     if (LIKELY(PyBytes_Check(obj))) {
         Py_ssize_t blen;
-        char* bdata;
+        char *bdata;
         PyBytes_AsStringAndSize(obj, &bdata, &blen);
         write_escaped_string(buf, bdata, blen);
         return 0;
     }
 
-    // Dict
     if (LIKELY(PyDict_Check(obj))) {
         Py_ssize_t dict_size = PyDict_GET_SIZE(obj);
         if (dict_size > 4) buf.reserve(buf.size() + dict_size * 48);
         buf_push(buf, '{');
-        PyObject* key;
-        PyObject* value;
+        PyObject *key;
+        PyObject *value;
         Py_ssize_t pos = 0;
         bool first = true;
         while (PyDict_Next(obj, &pos, &key, &value)) {
@@ -341,16 +338,19 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
             // Key must be string
             if (PyUnicode_Check(key)) {
                 Py_ssize_t klen;
-                const char* ks = PyUnicode_AsUTF8AndSize(key, &klen);
+                const char *ks = PyUnicode_AsUTF8AndSize(key, &klen);
                 if (!ks) return -1;
                 write_escaped_string(buf, ks, klen);
             } else {
                 // Convert key to string
-                PyObject* key_str = PyObject_Str(key);
+                PyObject *key_str = PyObject_Str(key);
                 if (!key_str) return -1;
                 Py_ssize_t klen;
-                const char* ks = PyUnicode_AsUTF8AndSize(key_str, &klen);
-                if (!ks) { Py_DECREF(key_str); return -1; }
+                const char *ks = PyUnicode_AsUTF8AndSize(key_str, &klen);
+                if (!ks) {
+                    Py_DECREF(key_str);
+                    return -1;
+                }
                 write_escaped_string(buf, ks, klen);
                 Py_DECREF(key_str);
             }
@@ -362,7 +362,6 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         return 0;
     }
 
-    // List
     if (PyList_Check(obj)) {
         buf_push(buf, '[');
         Py_ssize_t len = PyList_GET_SIZE(obj);
@@ -370,20 +369,19 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         if (len > 4) buf.reserve(buf.size() + len * 128);
         for (Py_ssize_t i = 0; i < len; i++) {
             if (i > 0) buf_push(buf, ',');
-            PyObject* item = PyList_GET_ITEM(obj, i);  // borrowed ref
+            PyObject *item = PyList_GET_ITEM(obj, i); // borrowed ref
             if (write_json(item, buf, depth + 1) < 0) return -1;
         }
         buf_push(buf, ']');
         return 0;
     }
 
-    // Tuple (treat like list)
     if (PyTuple_Check(obj)) {
         buf_push(buf, '[');
         Py_ssize_t len = PyTuple_GET_SIZE(obj);
         for (Py_ssize_t i = 0; i < len; i++) {
             if (i > 0) buf_push(buf, ',');
-            PyObject* item = PyTuple_GET_ITEM(obj, i);
+            PyObject *item = PyTuple_GET_ITEM(obj, i);
             if (write_json(item, buf, depth + 1) < 0) return -1;
         }
         buf_push(buf, ']');
@@ -396,7 +394,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         PyRef iter(PyObject_GetIter(obj));
         if (!iter) return -1;
         bool first = true;
-        PyObject* item;
+        PyObject *item;
         while ((item = PyIter_Next(iter.get())) != nullptr) {
             if (!first) buf_push(buf, ',');
             first = false;
@@ -408,9 +406,6 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         buf_push(buf, ']');
         return 0;
     }
-
-    // ── Special types (datetime, Decimal, UUID, Enum) ──────────────────────
-    // Types are initialized at module load via json_writer_init()
 
     // Enum → serialize .value (must check before other types since Enum can wrap int/str)
     if (s_enum_type && PyObject_IsInstance(obj, s_enum_type)) {
@@ -426,7 +421,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         PyRef iso(PyObject_CallMethodNoArgs(obj, s_isoformat));
         if (!iso) return -1;
         Py_ssize_t slen;
-        const char* s = PyUnicode_AsUTF8AndSize(iso.get(), &slen);
+        const char *s = PyUnicode_AsUTF8AndSize(iso.get(), &slen);
         if (!s) return -1;
         write_escaped_string(buf, s, slen);
         return 0;
@@ -456,7 +451,7 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         PyRef str_val(PyObject_Str(obj));
         if (!str_val) return -1;
         Py_ssize_t slen;
-        const char* s = PyUnicode_AsUTF8AndSize(str_val.get(), &slen);
+        const char *s = PyUnicode_AsUTF8AndSize(str_val.get(), &slen);
         if (!s) return -1;
         // Check for special Decimal values (NaN, Infinity, -Infinity)
         if (slen > 0 && (s[0] == 'N' || s[0] == 'I' || (s[0] == '-' && slen > 1 && s[1] == 'I'))) {
@@ -472,15 +467,14 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         PyRef str_val(PyObject_Str(obj));
         if (!str_val) return -1;
         Py_ssize_t slen;
-        const char* s = PyUnicode_AsUTF8AndSize(str_val.get(), &slen);
+        const char *s = PyUnicode_AsUTF8AndSize(str_val.get(), &slen);
         if (!s) return -1;
         write_escaped_string(buf, s, slen);
         return 0;
     }
 
-    // Pydantic v2 model → call model_dump() to get a dict, then serialize
     if (s_model_dump) {
-        PyObject* dump_method = PyObject_GetAttr(obj, s_model_dump);
+        PyObject *dump_method = PyObject_GetAttr(obj, s_model_dump);
         if (dump_method) {
             PyRef dict_result(PyObject_CallNoArgs(dump_method));
             Py_DECREF(dump_method);
@@ -498,13 +492,14 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
             PyRef dc_dict(PyObject_CallOneArg(s_asdict, obj));
             if (dc_dict) return write_json(dc_dict.get(), buf, depth);
             PyErr_Clear();
-        } else if (!is_dc) PyErr_Clear();
+        } else if (!is_dc)
+            PyErr_Clear();
     }
 
     // Try __dict__ for plain Python objects before str() fallback
     // Skip if object is a str subclass (e.g. Pydantic AnyUrl) - serialize as string
     if (!PyUnicode_Check(obj)) {
-        PyObject* dict_attr = PyObject_GetAttrString(obj, "__dict__");
+        PyObject *dict_attr = PyObject_GetAttrString(obj, "__dict__");
         if (dict_attr && PyDict_Check(dict_attr) && PyDict_Size(dict_attr) > 0) {
             // Only use __dict__ if str(obj) looks like an object repr (contains " object at ")
             // This avoids serializing URL-like objects as dicts
@@ -512,12 +507,13 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
             bool is_obj_repr = false;
             if (str_check) {
                 Py_ssize_t slen;
-                const char* s = PyUnicode_AsUTF8AndSize(str_check.get(), &slen);
+                const char *s = PyUnicode_AsUTF8AndSize(str_check.get(), &slen);
                 if (s && slen > 10) {
                     // Check for " object at 0x" pattern
                     for (Py_ssize_t i = 0; i < slen - 10; i++) {
-                        if (s[i] == ' ' && s[i+1] == 'o' && s[i+2] == 'b' && s[i+3] == 'j') {
-                            is_obj_repr = true; break;
+                        if (s[i] == ' ' && s[i + 1] == 'o' && s[i + 2] == 'b' && s[i + 3] == 'j') {
+                            is_obj_repr = true;
+                            break;
                         }
                     }
                 }
@@ -531,12 +527,14 @@ int write_json(PyObject* obj, std::vector<char>& buf, int depth) {
         Py_XDECREF(dict_attr);
         PyErr_Clear();
     }
-    // Fallback: try str()
-    PyObject* str_repr = PyObject_Str(obj);
+    PyObject *str_repr = PyObject_Str(obj);
     if (!str_repr) return -1;
     Py_ssize_t slen;
-    const char* s = PyUnicode_AsUTF8AndSize(str_repr, &slen);
-    if (!s) { Py_DECREF(str_repr); return -1; }
+    const char *s = PyUnicode_AsUTF8AndSize(str_repr, &slen);
+    if (!s) {
+        Py_DECREF(str_repr);
+        return -1;
+    }
     write_escaped_string(buf, s, slen);
     Py_DECREF(str_repr);
     return 0;
@@ -551,20 +549,20 @@ void json_writer_cleanup() {
     Py_CLEAR(s_uuid_type);
     Py_CLEAR(s_enum_type);
     Py_CLEAR(s_isoformat);
-    Py_CLEAR(s_total_seconds);  // FIX L-12: was missing from cleanup
+    Py_CLEAR(s_total_seconds);
     Py_CLEAR(s_value);
     Py_CLEAR(s_model_dump);
     Py_CLEAR(s_is_dataclass);
     Py_CLEAR(s_asdict);
 }
 
-PyObject* serialize_to_json_pybytes(PyObject* obj) {
+PyObject *serialize_to_json_pybytes(PyObject *obj) {
     auto buf = acquire_buffer();
     if (write_json(obj, buf, 0) < 0) {
         release_buffer(std::move(buf));
         return nullptr;
     }
-    PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
     return result;
 }

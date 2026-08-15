@@ -21,9 +21,6 @@ import (
 	"golang.org/x/net/websocket"
 )
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Result
-// ═══════════════════════════════════════════════════════════════════════════════
 
 type BenchResult struct {
 	Name      string
@@ -70,16 +67,6 @@ func percentile(lats []time.Duration, p float64) time.Duration {
 	return sorted[idx]
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HTTP Benchmark — maximum throughput optimized
-//
-// Key optimizations:
-// - Pre-built request bytes to eliminate per-request allocations
-// - Raw TCP pipelining (send multiple requests without waiting)
-// - Connection-local latency buffers (no mutex contention during bench)
-// - Preallocated read buffers
-// - Discard response bodies via io.Discard (zero-copy)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 type HTTPBench struct {
 	URL         string
@@ -93,7 +80,6 @@ type HTTPBench struct {
 }
 
 func (b *HTTPBench) Run() *BenchResult {
-	// Maximize file descriptors for high connection counts
 	var rlim syscall.Rlimit
 	_ = syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim)
 	rlim.Cur = rlim.Max
@@ -125,7 +111,6 @@ func (b *HTTPBench) Run() *BenchResult {
 		totalBytes atomic.Int64
 	)
 
-	// Each goroutine collects its own latencies — zero contention
 	type workerResult struct {
 		lats []time.Duration
 	}
@@ -134,7 +119,6 @@ func (b *HTTPBench) Run() *BenchResult {
 	deadline := time.Now().Add(b.Duration)
 	var wg sync.WaitGroup
 
-	// Pre-serialize body once (avoid repeated json.Marshal per request)
 	var bodyBytes []byte
 	if b.Body != nil {
 		bodyBytes = b.Body
@@ -145,7 +129,6 @@ func (b *HTTPBench) Run() *BenchResult {
 		go func(workerIdx int) {
 			defer wg.Done()
 
-			// Preallocate latency slice — avoids grow/copy during hot loop
 			lats := make([]time.Duration, 0, 16384)
 
 			for time.Now().Before(deadline) {
@@ -161,7 +144,6 @@ func (b *HTTPBench) Run() *BenchResult {
 				for k, v := range b.Headers {
 					req.Header.Set(k, v)
 				}
-				// Reuse connections aggressively
 				req.Close = false
 
 				start := time.Now()
@@ -191,7 +173,6 @@ func (b *HTTPBench) Run() *BenchResult {
 	wg.Wait()
 	transport.CloseIdleConnections()
 
-	// Merge latencies from all workers (single pass after benchmark completes)
 	totalLats := 0
 	for i := range results {
 		totalLats += len(results[i].lats)
@@ -207,9 +188,6 @@ func (b *HTTPBench) Run() *BenchResult {
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// WebSocket Benchmark — high throughput echo
-// ═══════════════════════════════════════════════════════════════════════════════
 
 type WSBench struct {
 	URL      string
@@ -245,7 +223,6 @@ func (b *WSBench) Run() *BenchResult {
 			}
 			defer ws.Close()
 
-			// Set large buffers for WebSocket
 			if tc, ok := ws.LocalAddr().(*net.TCPAddr); ok {
 				_ = tc
 			}
@@ -273,7 +250,6 @@ func (b *WSBench) Run() *BenchResult {
 	}
 	wg.Wait()
 
-	// Merge
 	total := 0
 	for _, r := range results {
 		total += len(r)
@@ -289,9 +265,6 @@ func (b *WSBench) Run() *BenchResult {
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Workloads
-// ═══════════════════════════════════════════════════════════════════════════════
 
 func buildWorkloads(baseURL string, duration time.Duration, conns int) []*HTTPBench {
 	smallBody, _ := json.Marshal(map[string]any{
@@ -327,9 +300,6 @@ func buildWorkloads(baseURL string, duration time.Duration, conns int) []*HTTPBe
 	}
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Output
-// ═══════════════════════════════════════════════════════════════════════════════
 
 func printHeader() {
 	fmt.Println("┌─────────────────┬────────────┬────────────┬──────────┬──────────┬──────────┬────────┐")
@@ -359,9 +329,6 @@ func fmtDur(d time.Duration) string {
 	return fmt.Sprintf("%.2fs", d.Seconds())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Main
-// ═══════════════════════════════════════════════════════════════════════════════
 
 func main() {
 	target := flag.String("target", "astra", "target: astra | fast | both")
@@ -374,10 +341,8 @@ func main() {
 	wsConns := flag.Int("ws-conns", 32, "WebSocket concurrent connections")
 	flag.Parse()
 
-	// Use all CPU cores for the benchmark client
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	// Raise file descriptor limit
 	var rlim syscall.Rlimit
 	_ = syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim)
 	rlim.Cur = rlim.Max
@@ -410,7 +375,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Verify servers are running
 	for _, t := range targets {
 		resp, err := http.Get(t.url + "/json")
 		if err != nil {
@@ -427,7 +391,6 @@ func main() {
 		fmt.Printf("  Connections: %d | Duration: %s | CPUs: %d\n", *conns, *duration, runtime.NumCPU())
 		fmt.Printf("══════════════════════════════════════════════════════════════════════════\n\n")
 
-		// Warmup — saturate connection pool
 		if *warmup > 0 {
 			fmt.Printf("  ⏳ warming up (%s)...\n\n", *warmup)
 			wb := &HTTPBench{URL: t.url + "/json", Method: "GET", Conns: *conns, Duration: *warmup, Name: "warmup"}
@@ -435,7 +398,6 @@ func main() {
 			time.Sleep(300 * time.Millisecond)
 		}
 
-		// Run all HTTP workloads
 		workloads := buildWorkloads(t.url, *duration, *conns)
 		printHeader()
 		for _, w := range workloads {
@@ -444,7 +406,6 @@ func main() {
 			time.Sleep(200 * time.Millisecond)
 		}
 
-		// WebSocket
 		wsb := &WSBench{
 			URL: t.wsURL, Conns: *wsConns, Duration: *duration,
 			MsgSize: *wsMsgSize, Name: "ws_echo",

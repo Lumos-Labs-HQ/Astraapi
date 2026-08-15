@@ -1,69 +1,70 @@
 #include "asgi_constants.hpp"
+
 #include "pyref.hpp"
+
 #include <cstring>
 
-// ── String constants ────────────────────────────────────────────────────────
-PyObject* g_str_type = nullptr;
-PyObject* g_str_method = nullptr;
-PyObject* g_str_path = nullptr;
-PyObject* g_str_query_string = nullptr;
-PyObject* g_str_headers = nullptr;
-PyObject* g_str_status = nullptr;
-PyObject* g_str_body = nullptr;
-PyObject* g_str_root_path = nullptr;
-PyObject* g_str_scheme = nullptr;
-PyObject* g_str_server = nullptr;
-PyObject* g_str_http = nullptr;
-PyObject* g_str_https = nullptr;
-PyObject* g_str_scope_type = nullptr;
+PyObject *g_str_type = nullptr;
+PyObject *g_str_method = nullptr;
+PyObject *g_str_path = nullptr;
+PyObject *g_str_query_string = nullptr;
+PyObject *g_str_headers = nullptr;
+PyObject *g_str_status = nullptr;
+PyObject *g_str_body = nullptr;
+PyObject *g_str_root_path = nullptr;
+PyObject *g_str_scheme = nullptr;
+PyObject *g_str_server = nullptr;
+PyObject *g_str_http = nullptr;
+PyObject *g_str_https = nullptr;
+PyObject *g_str_scope_type = nullptr;
 
-PyObject* g_str_http_response_start = nullptr;
-PyObject* g_str_http_response_body = nullptr;
-PyObject* g_str_http_request = nullptr;
-PyObject* g_str_http_disconnect = nullptr;
-PyObject* g_str_websocket = nullptr;
+PyObject *g_str_http_response_start = nullptr;
+PyObject *g_str_http_response_body = nullptr;
+PyObject *g_str_http_request = nullptr;
+PyObject *g_str_http_disconnect = nullptr;
+PyObject *g_str_websocket = nullptr;
 
-// ── Bytes constants ─────────────────────────────────────────────────────────
-PyObject* g_bytes_content_type = nullptr;
-PyObject* g_bytes_content_length = nullptr;
-PyObject* g_bytes_content_type_json = nullptr;
-PyObject* g_bytes_content_type_text = nullptr;
-PyObject* g_bytes_content_type_html = nullptr;
-PyObject* g_bytes_cookie = nullptr;
-PyObject* g_bytes_authorization = nullptr;
-PyObject* g_bytes_accept_encoding = nullptr;
+PyObject *g_bytes_content_type = nullptr;
+PyObject *g_bytes_content_length = nullptr;
+PyObject *g_bytes_content_type_json = nullptr;
+PyObject *g_bytes_content_type_text = nullptr;
+PyObject *g_bytes_content_type_html = nullptr;
+PyObject *g_bytes_cookie = nullptr;
+PyObject *g_bytes_authorization = nullptr;
+PyObject *g_bytes_accept_encoding = nullptr;
 
-// ── Common strings ──────────────────────────────────────────────────────────
-PyObject* g_str_content_type = nullptr;
-PyObject* g_str_content_length = nullptr;
-PyObject* g_str_application_json = nullptr;
-PyObject* g_str_text_plain = nullptr;
-PyObject* g_str_text_html = nullptr;
-PyObject* g_str_none_str = nullptr;
+PyObject *g_str_content_type = nullptr;
+PyObject *g_str_content_length = nullptr;
+PyObject *g_str_application_json = nullptr;
+PyObject *g_str_text_plain = nullptr;
+PyObject *g_str_text_html = nullptr;
+PyObject *g_str_none_str = nullptr;
 
-// ── Pre-built ASGI response objects ─────────────────────────────────────────
-PyObject* g_ct_json_header_pair = nullptr;
-PyObject* g_status_200 = nullptr;
-PyObject* g_status_201 = nullptr;
-PyObject* g_status_204 = nullptr;
-PyObject* g_status_301 = nullptr;
-PyObject* g_status_400 = nullptr;
-PyObject* g_status_404 = nullptr;
-PyObject* g_status_422 = nullptr;
-PyObject* g_status_500 = nullptr;
-PyObject* g_start_msg_template = nullptr;
-PyObject* g_body_msg_template = nullptr;
-PyObject* g_empty_tuple = nullptr;
-PyObject* g_500_start = nullptr;
-PyObject* g_500_body = nullptr;
+PyObject *g_ct_json_header_pair = nullptr;
+PyObject *g_status_200 = nullptr;
+PyObject *g_status_201 = nullptr;
+PyObject *g_status_204 = nullptr;
+PyObject *g_status_301 = nullptr;
+PyObject *g_status_400 = nullptr;
+PyObject *g_status_404 = nullptr;
+PyObject *g_status_422 = nullptr;
+PyObject *g_status_500 = nullptr;
+PyObject *g_start_msg_template = nullptr;
+PyObject *g_body_msg_template = nullptr;
+PyObject *g_empty_tuple = nullptr;
+PyObject *g_500_start = nullptr;
+PyObject *g_500_body = nullptr;
 
 // Fast integer formatting (~5x faster than snprintf for typical values)
-int fast_i64_to_buf(char* buf, long long val) {
+int fast_i64_to_buf(char *buf, long long val) {
     char tmp[21];
-    char* p = tmp + 20;
+    char *p = tmp + 20;
     bool neg = val < 0;
     unsigned long long uv = neg ? -(unsigned long long)val : (unsigned long long)val;
-    do { *--p = '0' + (char)(uv % 10); uv /= 10; } while (uv);
+    do {
+        *--p = '0' + (char)(uv % 10);
+        uv /= 10;
+    } while (uv);
     if (neg) *--p = '-';
     int len = (int)(tmp + 20 - p);
     memcpy(buf, p, len);
@@ -92,7 +93,6 @@ int init_asgi_constants() {
     g_str_http_disconnect = PyUnicode_InternFromString("http.disconnect");
     g_str_websocket = PyUnicode_InternFromString("websocket");
 
-    // Bytes constants — pre-allocated, never freed
     g_bytes_content_type = PyBytes_FromStringAndSize("content-type", 12);
     g_bytes_content_length = PyBytes_FromStringAndSize("content-length", 14);
     g_bytes_content_type_json = PyBytes_FromStringAndSize("application/json", 16);
@@ -110,7 +110,6 @@ int init_asgi_constants() {
     g_str_text_html = PyUnicode_InternFromString("text/html");
     g_str_none_str = PyUnicode_InternFromString("None");
 
-    // ── Pre-built ASGI response objects ────────────────────────────────────
     // These are created once and reused for every request (immortal objects).
 
     // [b"content-type", b"application/json"] — immutable tuple to prevent
@@ -122,7 +121,6 @@ int init_asgi_constants() {
     PyTuple_SET_ITEM(g_ct_json_header_pair, 0, g_bytes_content_type);
     PyTuple_SET_ITEM(g_ct_json_header_pair, 1, g_bytes_content_type_json);
 
-    // Cached status codes
     g_status_200 = PyLong_FromLong(200);
     g_status_201 = PyLong_FromLong(201);
     g_status_204 = PyLong_FromLong(204);
@@ -131,8 +129,9 @@ int init_asgi_constants() {
     g_status_404 = PyLong_FromLong(404);
     g_status_422 = PyLong_FromLong(422);
     g_status_500 = PyLong_FromLong(500);
-    if (!g_status_200 || !g_status_201 || !g_status_204 || !g_status_301 ||
-        !g_status_400 || !g_status_404 || !g_status_422 || !g_status_500) return -1;
+    if (!g_status_200 || !g_status_201 || !g_status_204 || !g_status_301 || !g_status_400 || !g_status_404 ||
+        !g_status_422 || !g_status_500)
+        return -1;
 
     // {"type": "http.response.start"} — template dict (will be copied per request)
     g_start_msg_template = PyDict_New();
@@ -148,7 +147,6 @@ int init_asgi_constants() {
     g_empty_tuple = PyTuple_New(0);
     if (!g_empty_tuple) return -1;
 
-    // Pre-built 500 response dicts
     g_500_start = PyDict_New();
     if (!g_500_start) return -1;
     PyDict_SetItem(g_500_start, g_str_type, g_str_http_response_start);
@@ -170,11 +168,9 @@ int init_asgi_constants() {
     PyDict_SetItem(g_500_body, g_str_body, body_500.get());
 
     // Check all succeeded
-    if (!g_str_type || !g_str_method || !g_str_path || !g_str_query_string ||
-        !g_str_headers || !g_str_status || !g_str_body ||
-        !g_bytes_content_type || !g_bytes_content_length ||
-        !g_ct_json_header_pair || !g_status_200 || !g_start_msg_template ||
-        !g_body_msg_template || !g_empty_tuple || !g_500_start || !g_500_body) {
+    if (!g_str_type || !g_str_method || !g_str_path || !g_str_query_string || !g_str_headers || !g_str_status ||
+        !g_str_body || !g_bytes_content_type || !g_bytes_content_length || !g_ct_json_header_pair || !g_status_200 ||
+        !g_start_msg_template || !g_body_msg_template || !g_empty_tuple || !g_500_start || !g_500_body) {
         return -1;
     }
     return 0;

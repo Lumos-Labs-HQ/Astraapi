@@ -1,20 +1,20 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #include "pyref.hpp"
+
+#include <Python.h>
+
 #include <string>
-#include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
-// ══════════════════════════════════════════════════════════════════════════════
 // compute_dependency_order(dependencies: List[Tuple[str, List[str]]]) → List[str]
 //
 // Topological sort using Kahn's algorithm.
 // Input: list of (node_name, [dependency_names])
 // Output: list of node names in execution order
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg) {
+PyObject *py_compute_dependency_order(PyObject *self, PyObject *arg) {
     if (!PyList_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected list of (str, list) tuples");
         return nullptr;
@@ -30,11 +30,11 @@ PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg) {
 
     // First pass: collect all node names
     for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* item = PyList_GET_ITEM(arg, i);
+        PyObject *item = PyList_GET_ITEM(arg, i);
         if (!PyTuple_Check(item) || PyTuple_GET_SIZE(item) < 2) continue;
 
-        PyObject* name_obj = PyTuple_GET_ITEM(item, 0);
-        const char* name = PyUnicode_AsUTF8(name_obj);
+        PyObject *name_obj = PyTuple_GET_ITEM(item, 0);
+        const char *name = PyUnicode_AsUTF8(name_obj);
         if (!name) continue;
 
         if (name_to_idx.find(name) == name_to_idx.end()) {
@@ -49,11 +49,11 @@ PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg) {
 
     // Second pass: build edges
     for (Py_ssize_t i = 0; i < n; i++) {
-        PyObject* item = PyList_GET_ITEM(arg, i);
+        PyObject *item = PyList_GET_ITEM(arg, i);
         if (!PyTuple_Check(item) || PyTuple_GET_SIZE(item) < 2) continue;
 
-        const char* name = PyUnicode_AsUTF8(PyTuple_GET_ITEM(item, 0));
-        PyObject* deps = PyTuple_GET_ITEM(item, 1);
+        const char *name = PyUnicode_AsUTF8(PyTuple_GET_ITEM(item, 0));
+        PyObject *deps = PyTuple_GET_ITEM(item, 1);
         if (!name || !PyList_Check(deps)) continue;
 
         auto it = name_to_idx.find(name);
@@ -62,7 +62,7 @@ PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg) {
 
         Py_ssize_t ndeps = PyList_GET_SIZE(deps);
         for (Py_ssize_t j = 0; j < ndeps; j++) {
-            const char* dep_name = PyUnicode_AsUTF8(PyList_GET_ITEM(deps, j));
+            const char *dep_name = PyUnicode_AsUTF8(PyList_GET_ITEM(deps, j));
             if (!dep_name) continue;
             auto dep_it = name_to_idx.find(dep_name);
             if (dep_it != name_to_idx.end()) {
@@ -100,7 +100,7 @@ PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg) {
     if (!result) return nullptr;
 
     for (size_t i = 0; i < order.size(); i++) {
-        PyObject* name_str = PyUnicode_FromString(names[order[i]].c_str());
+        PyObject *name_str = PyUnicode_FromString(names[order[i]].c_str());
         if (!name_str) return nullptr;
         PyList_SET_ITEM(result.get(), (Py_ssize_t)i, name_str);
     }

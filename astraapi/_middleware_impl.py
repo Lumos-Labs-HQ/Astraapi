@@ -44,9 +44,7 @@ from astraapi._response import (
 
 
 
-# ---------------------------------------------------------------------------
 # CORS send wrapper (avoids per-request closure allocation)
-# ---------------------------------------------------------------------------
 class _CorsSendWrapper:
     __slots__ = ('origin', 'send', 'middleware')
     def __init__(self, origin, send, middleware):
@@ -57,7 +55,6 @@ class _CorsSendWrapper:
             _origin = self.origin
             _mw = self.middleware
             if _origin and _mw._is_origin_allowed(_origin):
-                # FIX M-24: When allow_credentials is True, MUST echo the
                 # specific origin instead of "*" per the Fetch spec.
                 # Browsers reject Access-Control-Allow-Origin: * with credentials.
                 if _mw.allow_all_origins and not _mw.allow_credentials:
@@ -75,9 +72,7 @@ class _CorsSendWrapper:
         await self.send(message)
 
 
-# ---------------------------------------------------------------------------
 # Middleware descriptor
-# ---------------------------------------------------------------------------
 
 
 class Middleware:
@@ -106,9 +101,7 @@ class Middleware:
         return iter((self.cls, self.args, self.kwargs))
 
 
-# ---------------------------------------------------------------------------
 # ServerErrorMiddleware
-# ---------------------------------------------------------------------------
 
 
 class ServerErrorMiddleware:
@@ -136,9 +129,7 @@ class ServerErrorMiddleware:
         self.debug = debug
 
 
-# ---------------------------------------------------------------------------
 # ExceptionMiddleware
-# ---------------------------------------------------------------------------
 
 
 class ExceptionMiddleware:
@@ -199,9 +190,7 @@ class ExceptionMiddleware:
         return None
 
 
-# ---------------------------------------------------------------------------
 # BaseHTTPMiddleware
-# ---------------------------------------------------------------------------
 
 
 class BaseHTTPMiddleware:
@@ -240,9 +229,7 @@ class BaseHTTPMiddleware:
         raise NotImplementedError("Subclasses must implement dispatch()")
 
 
-# ---------------------------------------------------------------------------
 # CORSMiddleware
-# ---------------------------------------------------------------------------
 
 
 class CORSMiddleware:
@@ -378,7 +365,6 @@ class CORSMiddleware:
 
         if method == 'OPTIONS' and origin and self._is_origin_allowed(origin):
             # Preflight request
-            # FIX H-18: Use direct iteration instead of dict() to handle duplicate headers
             raw_headers = scope.get('headers', [])
             requested_method = b''
             requested_headers = b''
@@ -464,9 +450,7 @@ class CORSMiddleware:
         return resp
 
 
-# ---------------------------------------------------------------------------
 # GZipMiddleware
-# ---------------------------------------------------------------------------
 
 
 class GZipMiddleware:
@@ -501,7 +485,6 @@ class GZipMiddleware:
             await self.app(scope, receive, send)
             return
         # Check if client accepts gzip
-        # FIX H-18 (also here): iterate headers directly instead of dict()
         accept_enc = ''
         for h_name, h_value in scope.get('headers', []):
             if h_name == b'accept-encoding':
@@ -602,9 +585,7 @@ class GZipMiddleware:
                 await send({'type': 'http.response.body', 'body': full_body})
 
 
-# ---------------------------------------------------------------------------
 # TrustedHostMiddleware
-# ---------------------------------------------------------------------------
 
 
 class TrustedHostMiddleware:
@@ -663,9 +644,7 @@ class TrustedHostMiddleware:
         return False
 
 
-# ---------------------------------------------------------------------------
 # HTTPSRedirectMiddleware
-# ---------------------------------------------------------------------------
 
 
 class HTTPSRedirectMiddleware:
@@ -681,9 +660,7 @@ class HTTPSRedirectMiddleware:
         self.app = app
 
 
-# ---------------------------------------------------------------------------
 # WSGIMiddleware
-# ---------------------------------------------------------------------------
 
 
 class WSGIMiddleware:

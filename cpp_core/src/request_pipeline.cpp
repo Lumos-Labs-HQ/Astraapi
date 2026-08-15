@@ -1,42 +1,39 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #include "asgi_constants.hpp"
 #include "compat.hpp"
 #include "json_parser.hpp"
 #include "pyref.hpp"
+
+#include <Python.h>
+
 #include <cstring>
 #include <string>
 #include <vector>
 
 // Forward declarations from utils.cpp
-extern PyObject* py_parse_query_string(PyObject* self, PyObject* args);
-extern PyObject* py_parse_headers_to_dict(PyObject* self, PyObject* args);
+extern PyObject *py_parse_query_string(PyObject *self, PyObject *args);
+extern PyObject *py_parse_headers_to_dict(PyObject *self, PyObject *args);
 
-// ══════════════════════════════════════════════════════════════════════════════
 // process_request(query_string, raw_headers, body, convert_underscores)
 // → PyDict with query_params, headers, cookies, is_json, json_body
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {
-        "query_string", "raw_headers", "body", "convert_underscores", nullptr
-    };
+PyObject *py_process_request(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static const char *kwlist[] = {"query_string", "raw_headers", "body", "convert_underscores", nullptr};
 
-    const char* query_string = "";
+    const char *query_string = "";
     Py_ssize_t query_len = 0;
-    PyObject* raw_headers = nullptr;
-    PyObject* body = Py_None;
+    PyObject *raw_headers = nullptr;
+    PyObject *body = Py_None;
     int convert_underscores = 1;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s#O|Op", (char**)kwlist,
-            &query_string, &query_len, &raw_headers, &body, &convert_underscores)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s#O|Op", (char **)kwlist, &query_string, &query_len, &raw_headers,
+            &body, &convert_underscores)) {
         return nullptr;
     }
 
     PyRef result(PyDict_New());
     if (!result) return nullptr;
 
-    // ── Parse query string ───────────────────────────────────────────────
     {
         PyRef qs_args(Py_BuildValue("(s#)", query_string, query_len));
         PyRef qp(py_parse_query_string(self, qs_args.get()));
@@ -44,7 +41,6 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
         PyDict_SetItemString(result.get(), "query_params", qp.get());
     }
 
-    // ── Parse headers ────────────────────────────────────────────────────
     PyRef headers_dict(PyDict_New());
     PyRef cookies_dict(PyDict_New());
     if (!headers_dict || !cookies_dict) return nullptr;
@@ -54,9 +50,9 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
     if (LIKELY(raw_headers && PyList_Check(raw_headers))) {
         Py_ssize_t nheaders = PyList_GET_SIZE(raw_headers);
         for (Py_ssize_t i = 0; i < nheaders; i++) {
-            PyObject* item = PyList_GET_ITEM(raw_headers, i);
-            PyObject* name_obj;
-            PyObject* value_obj;
+            PyObject *item = PyList_GET_ITEM(raw_headers, i);
+            PyObject *name_obj;
+            PyObject *value_obj;
 
             if (PyTuple_Check(item) && PyTuple_GET_SIZE(item) >= 2) {
                 name_obj = PyTuple_GET_ITEM(item, 0);
@@ -64,18 +60,25 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
             } else if (PyList_Check(item) && PyList_GET_SIZE(item) >= 2) {
                 name_obj = PyList_GET_ITEM(item, 0);
                 value_obj = PyList_GET_ITEM(item, 1);
-            } else continue;
+            } else
+                continue;
 
-            char* name_data;
+            char *name_data;
             Py_ssize_t name_len;
-            char* val_data;
+            char *val_data;
             Py_ssize_t val_len;
-            if (PyBytes_AsStringAndSize(name_obj, &name_data, &name_len) < 0) { PyErr_Clear(); continue; }
-            if (PyBytes_AsStringAndSize(value_obj, &val_data, &val_len) < 0) { PyErr_Clear(); continue; }
+            if (PyBytes_AsStringAndSize(name_obj, &name_data, &name_len) < 0) {
+                PyErr_Clear();
+                continue;
+            }
+            if (PyBytes_AsStringAndSize(value_obj, &val_data, &val_len) < 0) {
+                PyErr_Clear();
+                continue;
+            }
 
             // Normalize header name in-place (stack buffer for typical sizes)
             char stack_buf[256];
-            char* norm_buf = (name_len < 256) ? stack_buf : new char[name_len];
+            char *norm_buf = (name_len < 256) ? stack_buf : new char[name_len];
             for (Py_ssize_t j = 0; j < name_len; j++) {
                 char c = name_data[j];
                 if (c >= 'A' && c <= 'Z') c += 32;
@@ -90,18 +93,18 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
 
             // Cookie parsing — zero-alloc: build PyUnicode directly from raw positions
             if (name_len == 6 && memcmp(name_data, "cookie", 6) == 0) {
-                const char* cp = val_data;
-                const char* cend = val_data + val_len;
+                const char *cp = val_data;
+                const char *cend = val_data + val_len;
                 while (cp < cend) {
                     while (cp < cend && (*cp == ' ' || *cp == ';')) cp++;
-                    const char* ck_s = cp;
+                    const char *ck_s = cp;
                     while (cp < cend && *cp != '=') cp++;
                     if (cp >= cend) break;
-                    const char* ck_e = cp;
+                    const char *ck_e = cp;
                     cp++;
-                    const char* cv_s = cp;
+                    const char *cv_s = cp;
                     while (cp < cend && *cp != ';') cp++;
-                    const char* cv_e = cp;
+                    const char *cv_e = cp;
                     PyRef ckey(PyUnicode_FromStringAndSize(ck_s, ck_e - ck_s));
                     PyRef cval(PyUnicode_FromStringAndSize(cv_s, cv_e - cv_s));
                     if (ckey && cval) PyDict_SetItem(cookies_dict.get(), ckey.get(), cval.get());
@@ -112,15 +115,16 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
             if (name_len == 12 && memcmp(name_data, "content-type", 12) == 0) {
                 for (Py_ssize_t j = 0; j < val_len - 3; j++) {
                     char c0 = val_data[j];
-                    char c1 = val_data[j+1];
-                    char c2 = val_data[j+2];
-                    char c3 = val_data[j+3];
+                    char c1 = val_data[j + 1];
+                    char c2 = val_data[j + 2];
+                    char c3 = val_data[j + 3];
                     if (c0 >= 'A' && c0 <= 'Z') c0 += 32;
                     if (c1 >= 'A' && c1 <= 'Z') c1 += 32;
                     if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
                     if (c3 >= 'A' && c3 <= 'Z') c3 += 32;
                     if (c0 == 'j' && c1 == 's' && c2 == 'o' && c3 == 'n') {
-                        is_json = true; break;
+                        is_json = true;
+                        break;
                     }
                 }
             }
@@ -131,10 +135,9 @@ PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs) {
     PyDict_SetItemString(result.get(), "cookies", cookies_dict.get());
     PyDict_SetItemString(result.get(), "is_json", is_json ? Py_True : Py_False);
 
-    // ── Parse JSON body (yyjson — zero Python calls) ──────────────────────
-    PyObject* json_body = Py_None;
+    PyObject *json_body = Py_None;
     if (is_json && body != Py_None && PyBytes_Check(body)) {
-        char* body_data = nullptr;
+        char *body_data = nullptr;
         Py_ssize_t body_len = 0;
         if (PyBytes_AsStringAndSize(body, &body_data, &body_len) == 0 && body_len > 0) {
             PyRef parsed(yyjson_parse_to_pyobject(body_data, static_cast<size_t>(body_len)));

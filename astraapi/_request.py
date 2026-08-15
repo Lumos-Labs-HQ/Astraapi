@@ -13,7 +13,6 @@ from urllib.parse import unquote, urlencode, urlparse
 
 from astraapi._types import Receive, Scope, Send
 
-# Optional C++ accelerated parsers
 try:
     from astraapi._core_bridge import (
         parse_cookie_header as _core_parse_cookies,
@@ -26,9 +25,7 @@ except Exception:
     _CORE_AVAILABLE = False
 
 
-# ---------------------------------------------------------------------------
 # Lightweight data structures
-# ---------------------------------------------------------------------------
 
 
 class _Address:
@@ -170,7 +167,6 @@ class Headers:
             for name_bytes, value_bytes in self._raw:
                 name = name_bytes.decode("latin-1").lower() if isinstance(name_bytes, bytes) else name_bytes.lower()
                 value = value_bytes.decode("latin-1") if isinstance(value_bytes, bytes) else value_bytes
-                # FIX M-29: Join duplicate header values with ", " per RFC 9110 §5.3
                 # This preserves all values instead of silently dropping earlier ones.
                 # Note: Set-Cookie is an exception (should use getlist()), but the
                 # dict representation must still be valid for all other combinable headers.
@@ -345,9 +341,7 @@ class State:
         return NotImplemented
 
 
-# ---------------------------------------------------------------------------
 # Pure-Python fallback query string parser
-# ---------------------------------------------------------------------------
 
 def _parse_qs_python(qs: str) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
@@ -366,9 +360,7 @@ def _parse_qs_python(qs: str) -> dict[str, list[str]]:
     return result
 
 
-# ---------------------------------------------------------------------------
 # HTTPConnection — base class for Request and WebSocket
-# ---------------------------------------------------------------------------
 
 class HTTPConnection:
     """
@@ -515,9 +507,7 @@ def _parse_cookies_python(cookie_header: str) -> dict[str, str]:
     return cookies
 
 
-# ---------------------------------------------------------------------------
 # Request
-# ---------------------------------------------------------------------------
 
 class Request(HTTPConnection):
     """

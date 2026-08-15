@@ -55,7 +55,6 @@ class AppBase:
     def routes(self, value: list) -> None:
         self.router.routes = value
 
-    # -- Route registration --------------------------------------------------
 
     def add_route(
         self,
@@ -89,7 +88,6 @@ class AppBase:
         """Mount a sub-application at the given path."""
         self.router.mount(path, app=app, name=name)
 
-    # -- Middleware registration ----------------------------------------------
 
     def add_middleware(
         self,
@@ -103,7 +101,6 @@ class AppBase:
         else:
             self.user_middleware.insert(0, Middleware(middleware_class, **kwargs))
 
-    # -- Exception handler registration --------------------------------------
 
     def add_exception_handler(
         self,
@@ -114,7 +111,6 @@ class AppBase:
         HTTP status code."""
         self.exception_handlers[exc_class_or_status] = handler
 
-    # -- Event handler convenience (legacy) ----------------------------------
 
     def on_event(self, event_type: str) -> Callable:
         """Decorator to register startup/shutdown event handlers."""
@@ -124,7 +120,6 @@ class AppBase:
         """Register a startup/shutdown event handler."""
         self.router.add_event_handler(event_type, func)
 
-    # -- ASGI interface -------------------------------------------------------
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         """ASGI interface — delegates to the router for Starlette TestClient compat."""
@@ -133,13 +128,11 @@ class AppBase:
             scope["astraapi_middleware_astack"] = AsyncExitStack()
         await self.router(scope, receive, send)
 
-    # -- URL generation ------------------------------------------------------
 
     def url_path_for(self, name: str, /, **path_params: Any) -> Any:
         """Generate a URL path for the named route."""
         return self.router.url_path_for(name, **path_params)
 
-    # -- Route / WebSocket decorators ----------------------------------------
 
     def route(
         self,

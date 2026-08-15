@@ -1,15 +1,16 @@
 #include "router.hpp"
+
 #include "compat.hpp"
+
 #include <algorithm>
 #include <cstring>
 
-// ── Hono.js-inspired radix trie router ──────────────────────────────────────
 // Phase A: Static routes → O(1) hash map (transparent string_view lookup)
 // Phase B: Parametric routes → radix trie with first-byte dispatch
 // Supports: /static, /{param}, /{param:path}
 // Zero-allocation matching: string_view into request buffer + trie nodes
 
-bool Router::insert(const std::string& pattern, int index) {
+bool Router::insert(const std::string &pattern, int index) {
     // Phase A: Routes with no parameters go into O(1) hash map
     if (pattern.find('{') == std::string::npos) {
         static_routes_[pattern] = index;
@@ -19,7 +20,7 @@ bool Router::insert(const std::string& pattern, int index) {
     return insert_recursive(root_, pattern, index, 0);
 }
 
-bool Router::insert_recursive(Node& node, const std::string& path, int index, size_t pos) {
+bool Router::insert_recursive(Node &node, const std::string &path, int index, size_t pos) {
     if (pos >= path.size()) {
         node.route_index = index;
         return true;
@@ -47,13 +48,13 @@ bool Router::insert_recursive(Node& node, const std::string& path, int index, si
 
         // Find existing param child via indexed lookup
         if (!is_catch_all && node.param_child >= 0) {
-            auto& child = node.children[node.param_child];
+            auto &child = node.children[node.param_child];
             if (child.param_name == param_name) {
                 return insert_recursive(child, path, index, close + 1);
             }
         }
         if (is_catch_all && node.catch_all_child >= 0) {
-            auto& child = node.children[node.catch_all_child];
+            auto &child = node.children[node.catch_all_child];
             if (child.param_name == param_name) {
                 return insert_recursive(child, path, index, close + 1);
             }
@@ -89,7 +90,7 @@ bool Router::insert_recursive(Node& node, const std::string& path, int index, si
     if (fb < 128) {
         int16_t idx = node.dispatch[fb];
         if (idx >= 0) {
-            auto& child = node.children[idx];
+            auto &child = node.children[idx];
             if (child.param_name.empty() && !child.prefix.empty()) {
                 // Full prefix match — recurse into child
                 if (new_seg.size() >= child.prefix.size() &&
@@ -100,8 +101,7 @@ bool Router::insert_recursive(Node& node, const std::string& path, int index, si
                 // Partial match — split the node (radix trie prefix splitting)
                 size_t common_len = 0;
                 size_t max_common = std::min(child.prefix.size(), new_seg.size());
-                while (common_len < max_common &&
-                       child.prefix[common_len] == new_seg[common_len]) {
+                while (common_len < max_common && child.prefix[common_len] == new_seg[common_len]) {
                     common_len++;
                 }
 
@@ -150,7 +150,7 @@ bool Router::insert_recursive(Node& node, const std::string& path, int index, si
     return insert_recursive(node.children.back(), path, index, end);
 }
 
-std::optional<MatchParams> Router::at(const char* path, size_t len) const {
+std::optional<MatchParams> Router::at(const char *path, size_t len) const {
     // Phase A: Try static hash map first — O(1), zero allocation (transparent lookup)
     std::string_view path_sv(path, len);
     auto it = static_routes_.find(path_sv);
@@ -168,17 +168,14 @@ std::optional<MatchParams> Router::at(const char* path, size_t len) const {
     return std::nullopt;
 }
 
-bool Router::match_recursive(
-    const Node& node, const char* path, size_t len,
-    size_t pos, MatchParams& result) const
-{
+bool Router::match_recursive(const Node &node, const char *path, size_t len, size_t pos, MatchParams &result) const {
     if (pos >= len) {
         if (node.route_index >= 0) {
             result.route_index = node.route_index;
             return true;
         }
         // Check children with empty prefix (terminal)
-        for (const auto& child : node.children) {
+        for (const auto &child : node.children) {
             if (child.prefix.empty() && child.route_index >= 0) {
                 result.route_index = child.route_index;
                 return true;
@@ -194,12 +191,11 @@ bool Router::match_recursive(
         int16_t idx = node.dispatch[fb];
         if (LIKELY(idx >= 0)) {
             tried_idx = idx;
-            const auto& child = node.children[idx];
+            const auto &child = node.children[idx];
             size_t plen = child.prefix.size();
-            if (child.param_name.empty() && plen > 0 &&
-                pos + plen <= len && memcmp(path + pos, child.prefix.c_str(), plen) == 0) {
-                if (match_recursive(child, path, len, pos + plen, result))
-                    return true;
+            if (child.param_name.empty() && plen > 0 && pos + plen <= len &&
+                memcmp(path + pos, child.prefix.c_str(), plen) == 0) {
+                if (match_recursive(child, path, len, pos + plen, result)) return true;
             }
         }
     }
@@ -209,12 +205,11 @@ bool Router::match_recursive(
     if (UNLIKELY(node.has_dispatch_collision)) {
         for (int16_t ci = 0; ci < (int16_t)node.children.size(); ci++) {
             if (ci == tried_idx) continue;
-            const auto& child = node.children[ci];
+            const auto &child = node.children[ci];
             if (child.param_name.empty() && !child.prefix.empty()) {
                 size_t plen = child.prefix.size();
                 if (pos + plen <= len && memcmp(path + pos, child.prefix.c_str(), plen) == 0) {
-                    if (match_recursive(child, path, len, pos + plen, result))
-                        return true;
+                    if (match_recursive(child, path, len, pos + plen, result)) return true;
                 }
             }
         }
@@ -222,25 +217,22 @@ bool Router::match_recursive(
 
     // 2) Param child — consume /{value}
     if (node.param_child >= 0 && path[pos] == '/') {
-        const auto& child = node.children[node.param_child];
+        const auto &child = node.children[node.param_child];
         size_t s = pos + 1, e = s;
         while (e < len && path[e] != '/') e++;
         if (e > s) {
             int prev_count = result.param_count;
-            result.add(std::string_view(child.param_name),
-                       std::string_view(path + s, e - s));
-            if (match_recursive(child, path, len, e, result))
-                return true;
-            result.param_count = prev_count;  // backtrack
+            result.add(std::string_view(child.param_name), std::string_view(path + s, e - s));
+            if (match_recursive(child, path, len, e, result)) return true;
+            result.param_count = prev_count; // backtrack
         }
     }
 
     // 3) Catch-all child — consume rest
     if (node.catch_all_child >= 0 && path[pos] == '/') {
-        const auto& child = node.children[node.catch_all_child];
+        const auto &child = node.children[node.catch_all_child];
         size_t s = pos + 1;
-        result.add(std::string_view(child.param_name),
-                   std::string_view(path + s, len - s));
+        result.add(std::string_view(child.param_name), std::string_view(path + s, len - s));
         result.route_index = child.route_index;
         return child.route_index >= 0;
     }

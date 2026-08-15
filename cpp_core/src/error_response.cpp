@@ -1,16 +1,15 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
-#include "json_writer.hpp"
 #include "buffer_pool.hpp"
+#include "json_writer.hpp"
 #include "pyref.hpp"
 
-// ══════════════════════════════════════════════════════════════════════════════
+#include <Python.h>
+
 // serialize_error_response(errors: PyList) → PyBytes
 //
 // Produces: {"detail": [error_dicts...]} as JSON bytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_serialize_error_response(PyObject* self, PyObject* arg) {
+PyObject *py_serialize_error_response(PyObject *self, PyObject *arg) {
     if (!PyList_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected list of errors");
         return nullptr;
@@ -27,13 +26,11 @@ PyObject* py_serialize_error_response(PyObject* self, PyObject* arg) {
     return serialize_to_json_pybytes(wrapper.get());
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // serialize_error_list(errors: PyList) → PyBytes
 //
 // Produces: [error_dicts...] as JSON bytes (no wrapper)
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_serialize_error_list(PyObject* self, PyObject* arg) {
+PyObject *py_serialize_error_list(PyObject *self, PyObject *arg) {
     if (!PyList_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected list of errors");
         return nullptr;

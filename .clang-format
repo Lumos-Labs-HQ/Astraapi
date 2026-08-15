@@ -1,0 +1,25 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+BinPackParameters: true
+BinPackArguments: true
+BreakBeforeBraces: Attach
+NamespaceIndentation: None
+SortIncludes: CaseInsensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"(app|http_parser|json_writer|json_parser|json_encoder|router|ws_|streaming_|buffer_pool|param_extractor|middleware_engine|asgi_constants|platform|compat|pyref|percent_decode)'
+    Priority: 1
+  - Regex: '^<python'
+    Priority: 2
+  - Regex: '^<'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4
+AlignAfterOpenBracket: DontAlign
+PenaltyBreakBeforeFirstCallParameter: 10000
+PenaltyReturnTypeOnItsOwnLine: 10000
+PenaltyBreakOpenParenthesis: 10000

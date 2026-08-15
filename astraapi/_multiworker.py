@@ -299,7 +299,6 @@ def _run_fork_supervisor(
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    # ── SO_REUSEPORT mode (Linux 3.9+): each worker binds its own socket ──
     # The kernel distributes connections directly — no master accept thread,
     # no IPC, no lock contention. Falls back to master-accept if unavailable.
     use_reuseport = _HAS_REUSEPORT
@@ -323,13 +322,11 @@ def _run_fork_supervisor(
     worker_lock = threading.Lock()
 
     if not use_reuseport:
-        # ── Create Unix domain socketpairs (one per worker) ──
         for _ in range(workers):
             p, c = _socket.socketpair(_socket.AF_UNIX, _socket.SOCK_STREAM)
             parent_socks.append(p)
             child_socks.append(c)
 
-    # ── Fork workers ──
     for worker_id in range(workers):
         pid = os.fork()
         if pid == 0:
@@ -377,7 +374,6 @@ def _run_fork_supervisor(
         for s in child_socks:
             s.close()
 
-        # ── Start centralized accept thread ──
         accept_thread = threading.Thread(
             target=_master_accept_loop,
             args=(listen_sock, parent_socks, worker_lock),
@@ -385,7 +381,6 @@ def _run_fork_supervisor(
         )
         accept_thread.start()
 
-    # ── Supervisor loop: monitor children, restart on crash ──
     while not _shutdown and children:
         try:
             pid, status = os.waitpid(-1, os.WNOHANG)
@@ -483,11 +478,9 @@ def _run_fork_supervisor(
                     worker_started_at[worker_id] = time.monotonic()
                     print(f"  Worker {worker_id} restarted (pid {new_pid})")
         else:
-            # FIX M-06: Use 1.0s sleep instead of 0.1s busy-spin when all workers alive.
             # Signal interrupts will break out of sleep early via EINTR.
             time.sleep(1.0)
 
-    # ── Shutdown ──
     print("\nShutting down workers...")
     # Close listen socket to stop accept thread
     try:
@@ -588,7 +581,6 @@ def _run_subprocess_supervisor(
             print(f"  Worker {worker_id} restarted (pid {proc.pid})")
 
         if not _shutdown:
-            # FIX M-06: Use 1.0s sleep instead of 0.1s busy-spin
             time.sleep(1.0)
 
     # Shutdown

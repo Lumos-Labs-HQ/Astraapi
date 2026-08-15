@@ -7,12 +7,46 @@ vars:
   FAST_PORT: 8002
   DURATION: 10s
   CONNS: 64
+  BUILD_DIR: cpp_core/build
+  CPP_SRC:
+    sh: find cpp_core/src cpp_core/include -name '*.cpp' -o -name '*.hpp' | tr '\n' ' '
 
 tasks:
   build:
     desc: Build C++ core extension
     cmds:
       - bash scripts/build_core.sh
+
+  fmt:
+    desc: Format all C++ source files with clang-format
+    cmds:
+      - clang-format -i {{.CPP_SRC}}
+      - echo "[task] Formatted all C++ files"
+
+  fmt:check:
+    desc: Check C++ formatting without modifying files
+    cmds:
+      - clang-format --dry-run --Werror {{.CPP_SRC}}
+
+  lint:
+    desc: Run clang-tidy linting on C++ core
+    cmds:
+      - task: build
+      - clang-tidy {{.CPP_SRC}} -p {{.BUILD_DIR}} --fix --fix-errors
+      - echo "[task] Lint complete"
+
+  lint:check:
+    desc: Run clang-tidy without fixing
+    cmds:
+      - task: build
+      - clang-tidy {{.CPP_SRC}} -p {{.BUILD_DIR}}
+
+  fix:
+    desc: Format + lint fix all C++ files
+    cmds:
+      - task: fmt
+      - task: lint
+      - echo "[task] All fixes applied"
 
   test:
     desc: Run full test suite
@@ -36,16 +70,22 @@ tasks:
       - pkill -f "fastapi_server:app" || true
 
   bench-astra:
-    desc: benchmark AstraAPI (all workloads)
+    desc: Benchmark AstraAPI (all workloads)
     cmds:
       - cd bench && {{.GO}} run . -target astra -d {{.DURATION}} -c {{.CONNS}}
 
   bench-fast:
-    desc: benchmark FastAPI (all workloads)
+    desc: Benchmark FastAPI (all workloads)
     cmds:
       - cd bench && {{.GO}} run . -target fast -d {{.DURATION}} -c {{.CONNS}}
 
   bench:
-    desc: benchmark both AstraAPI and FastAPI (comparison)
+    desc: Benchmark both AstraAPI and FastAPI (comparison)
     cmds:
       - cd bench && {{.GO}} run . -target both -d {{.DURATION}} -c {{.CONNS}}
+
+  clean:
+    desc: Remove C++ build artifacts
+    cmds:
+      - rm -rf {{.BUILD_DIR}}
+      - echo "[task] Cleaned"

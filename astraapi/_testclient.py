@@ -32,7 +32,6 @@ class WebSocketTestSession:
         self._error: BaseException | None = None
         self._server_closed: bool = False
         self._client_closed: bool = False
-        # Queue for messages received by _run thread
         import queue
         self._recv_queue: queue.Queue = queue.Queue()
 
@@ -57,7 +56,6 @@ class WebSocketTestSession:
                         proto = getattr(self._error, "protocol", None)
                         code = getattr(proto, "close_code", 1006) if proto else 1006
                         reason = ""
-                    # Check if a server exception caused the close
                     try:
                         from astraapi._cpp_server import _pop_server_exception
                         from astraapi.exceptions import HTTPException, RequestValidationError
@@ -91,7 +89,6 @@ class WebSocketTestSession:
             return
         try:
             self._ws = _ws_client.connect(self._url, compression=None)
-            # Peek: detect immediate server close before signaling ready
             try:
                 msg = self._ws.recv(timeout=5.0)
                 self._recv_queue.put(msg)
@@ -102,7 +99,6 @@ class WebSocketTestSession:
                 self._ready.set()
                 return
             self._ready.set()
-            # Continuously recv until closed
             while not self._closed.is_set():
                 try:
                     msg = self._ws.recv(timeout=2.5)
@@ -189,7 +185,6 @@ class WebSocketTestSession:
         self._close_sync()
 
 
-# ── Per-app shared server registry ───────────────────────────────────────────
 # Maps id(app) -> _SharedServer. All TestClient instances for the same app
 # share one server thread. A cap of _MAX_LIVE_SERVERS prevents thread
 # exhaustion when hundreds of test modules each create a unique app.
@@ -276,7 +271,6 @@ class TestClient:
         # 'User-Agent: testclient' pass even without explicit headers.
         self._init_base_url = base_url
         _default_headers = {"user-agent": "testclient"}
-        # Extract host from base_url for Host header
         try:
             import urllib.parse as _up
             _parsed = _up.urlparse(base_url)
@@ -303,7 +297,6 @@ class TestClient:
         """Start the server on first use — shared per app instance."""
         with self._lock:
             if self._client is not None:
-                # Recreate httpx client if closed
                 try:
                     import httpx
                     if getattr(self._client, '_state', None) is not None and self._client._state.name == 'CLOSED':
@@ -369,7 +362,6 @@ class TestClient:
                             raise RuntimeError("C++ test server failed to start within 10s")
                         if self._server_error is not None:
                             err = self._server_error
-                            # Re-raise original exception type if possible
                             if isinstance(err, (ValueError, TypeError)):
                                 raise err
                             raise RuntimeError(f"Server startup failed: {err}")
@@ -392,7 +384,6 @@ class TestClient:
         from astraapi._cpp_server import _create_server, _set_raise_server_exceptions
         _set_raise_server_exceptions(self._raise_server_exceptions)
         _lifespan_cm = None
-        # Clear any stale lifespan state from previous test
         try:
             from astraapi._cpp_server import _set_lifespan_state
             _set_lifespan_state({})
@@ -412,7 +403,6 @@ class TestClient:
                     elif isinstance(_ls_state, dict):
                         for _k, _v in _ls_state.items():
                             setattr(_app_state, _k, _v)
-                # Also store in module-level for request scope injection
                 try:
                     from astraapi._cpp_server import _set_lifespan_state
                     _set_lifespan_state(_ls_state)
@@ -427,14 +417,12 @@ class TestClient:
         await server.wait_closed()
         if _lifespan_cm is not None:
             await _lifespan_cm.__aexit__(None, None, None)
-        # Clear lifespan state after server stops
         try:
             from astraapi._cpp_server import _set_lifespan_state
             _set_lifespan_state({})
         except Exception:
             pass
 
-    # -- HTTP methods (all lazy-start) ---------------------------------------
 
     def _check_exc(self) -> None:
         """Re-raise any server exception captured during the last request."""
@@ -442,7 +430,6 @@ class TestClient:
         from astraapi.exceptions import ResponseValidationError
         exc = _pop_server_exception()  # always pop to prevent cross-test pollution
         if exc is not None:
-            # Always re-raise ResponseValidationError (programming error, not server error)
             if isinstance(exc, ResponseValidationError) or self._raise_server_exceptions:
                 raise exc
 
@@ -552,7 +539,6 @@ class TestClient:
         return WebSocketTestSession(ws_url, _explicit_close_flag=self._ws_close_flag,
                                     _active_count=self._ws_active)
 
-    # -- Lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
         """Close the httpx client and release the shared server reference."""
@@ -581,11 +567,9 @@ class TestClient:
 
     def __exit__(self, *args: Any) -> None:
         self.close()
-        # When used as context manager, actually stop the server so lifespan shutdown runs
         shared = self._shared_server
         _app_id = getattr(self.app, '_app_instance_id', id(self.app))
         if shared is None:
-            # Already cleared by close() — look up by app id
             with _app_servers_lock:
                 shared = _app_servers.pop(_app_id, None)
         else:

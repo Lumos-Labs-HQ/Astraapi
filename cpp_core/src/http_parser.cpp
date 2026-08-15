@@ -1,4 +1,5 @@
 #include "http_parser.hpp"
+
 #include "compat.hpp"
 
 extern "C" {
@@ -6,19 +7,19 @@ extern "C" {
 }
 
 #include <cstring>
-#include <mutex>  // FIX: thread-safe ensure_settings
+#include <mutex>
 
 struct ParserContext {
-    ParsedHttpRequest* out;
-    const char* current_header_name;
+    ParsedHttpRequest *out;
+    const char *current_header_name;
     size_t current_header_name_len;
     bool headers_done;
     bool message_done;
 };
 
-static int on_url(llhttp_t* parser, const char* at, size_t length) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
-    auto* out = ctx->out;
+static int on_url(llhttp_t *parser, const char *at, size_t length) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
+    auto *out = ctx->out;
 
     if (out->full_uri.data == nullptr) {
         out->full_uri = StringView(at, length);
@@ -29,20 +30,15 @@ static int on_url(llhttp_t* parser, const char* at, size_t length) {
     return 0;
 }
 
-static int on_url_complete(llhttp_t* parser) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
-    auto* out = ctx->out;
+static int on_url_complete(llhttp_t *parser) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
+    auto *out = ctx->out;
 
-    const char* q = static_cast<const char*>(
-        memchr(out->full_uri.data, '?', out->full_uri.len)
-    );
+    const char *q = static_cast<const char *>(memchr(out->full_uri.data, '?', out->full_uri.len));
 
     if (q) {
         out->path = StringView(out->full_uri.data, q - out->full_uri.data);
-        out->query_string = StringView(
-            q + 1,
-            out->full_uri.data + out->full_uri.len - q - 1
-        );
+        out->query_string = StringView(q + 1, out->full_uri.data + out->full_uri.len - q - 1);
     } else {
         out->path = out->full_uri;
     }
@@ -50,9 +46,9 @@ static int on_url_complete(llhttp_t* parser) {
     return 0;
 }
 
-static int on_method(llhttp_t* parser, const char* at, size_t length) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
-    auto* out = ctx->out;
+static int on_method(llhttp_t *parser, const char *at, size_t length) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
+    auto *out = ctx->out;
 
     if (out->method.data == nullptr) {
         out->method = StringView(at, length);
@@ -63,45 +59,40 @@ static int on_method(llhttp_t* parser, const char* at, size_t length) {
     return 0;
 }
 
-static int on_header_field(llhttp_t* parser, const char* at, size_t length) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
+static int on_header_field(llhttp_t *parser, const char *at, size_t length) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
 
     if (!ctx->current_header_name) {
         ctx->current_header_name = at;
         ctx->current_header_name_len = length;
     } else {
-        ctx->current_header_name_len =
-            static_cast<size_t>(at + length - ctx->current_header_name);
+        ctx->current_header_name_len = static_cast<size_t>(at + length - ctx->current_header_name);
     }
 
     return 0;
 }
 
-static int on_header_value(llhttp_t* parser, const char* at, size_t length) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
-    auto* out = ctx->out;
+static int on_header_value(llhttp_t *parser, const char *at, size_t length) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
+    auto *out = ctx->out;
 
     if (out->header_count < MAX_HEADERS && ctx->current_header_name) {
-        auto& hdr = out->headers[out->header_count];
+        auto &hdr = out->headers[out->header_count];
 
         if (hdr.value.data == nullptr) {
-            hdr.name = StringView(
-                ctx->current_header_name,
-                ctx->current_header_name_len
-            );
+            hdr.name = StringView(ctx->current_header_name, ctx->current_header_name_len);
             hdr.value = StringView(at, length);
         } else {
-            hdr.value.len =
-                static_cast<size_t>(at + length - hdr.value.data);
+            hdr.value.len = static_cast<size_t>(at + length - hdr.value.data);
         }
     }
 
     return 0;
 }
 
-static int on_header_value_complete(llhttp_t* parser) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
-    auto* out = ctx->out;
+static int on_header_value_complete(llhttp_t *parser) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
+    auto *out = ctx->out;
 
     if (out->header_count < MAX_HEADERS) {
         out->header_count++;
@@ -113,9 +104,9 @@ static int on_header_value_complete(llhttp_t* parser) {
     return 0;
 }
 
-static int on_headers_complete(llhttp_t* parser) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
-    auto* out = ctx->out;
+static int on_headers_complete(llhttp_t *parser) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
+    auto *out = ctx->out;
 
     out->keep_alive = llhttp_should_keep_alive(parser);
     out->upgrade = parser->upgrade != 0;
@@ -131,7 +122,7 @@ static int on_headers_complete(llhttp_t* parser) {
     if (m == HTTP_GET || m == HTTP_HEAD || m == HTTP_OPTIONS) {
         out->no_body = true;
         out->is_head = (m == HTTP_HEAD);
-        out->chunked = false;  // suppress chunked reassembly path
+        out->chunked = false; // suppress chunked reassembly path
 
         // Save declared body size before F_SKIPBODY clears state.
         // UINT64_MAX = no Content-Length header present.
@@ -155,9 +146,9 @@ static int on_headers_complete(llhttp_t* parser) {
     return 0;
 }
 
-static int on_body(llhttp_t* parser, const char* at, size_t length) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
-    auto* out = ctx->out;
+static int on_body(llhttp_t *parser, const char *at, size_t length) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
+    auto *out = ctx->out;
 
     // GET/HEAD/OPTIONS non-chunked: F_SKIPBODY was set — on_body is never
     // called by llhttp. This branch handles GET with chunked TE (rare):
@@ -170,16 +161,15 @@ static int on_body(llhttp_t* parser, const char* at, size_t length) {
         if (out->body.data == nullptr) {
             out->body = StringView(at, length);
         } else {
-            out->body.len =
-                static_cast<size_t>(at + length - out->body.data);
+            out->body.len = static_cast<size_t>(at + length - out->body.data);
         }
     }
 
     return 0;
 }
 
-static int on_message_complete(llhttp_t* parser) {
-    auto* ctx = static_cast<ParserContext*>(parser->data);
+static int on_message_complete(llhttp_t *parser) {
+    auto *ctx = static_cast<ParserContext *>(parser->data);
 
     ctx->message_done = true;
 
@@ -205,15 +195,9 @@ static void _do_init_settings() {
     settings.on_message_complete = on_message_complete;
 }
 
-static void ensure_settings() {
-    std::call_once(settings_init_flag, _do_init_settings);
-}
+static void ensure_settings() { std::call_once(settings_init_flag, _do_init_settings); }
 
-int parse_http_request(
-    const char* data,
-    size_t len,
-    ParsedHttpRequest* out
-) {
+int parse_http_request(const char *data, size_t len, ParsedHttpRequest *out) {
     ensure_settings();
 
     *out = {};
@@ -236,7 +220,7 @@ int parse_http_request(
     llhttp_errno_t err = llhttp_execute(&parser, data, len);
 
     if (err == HPE_PAUSED || err == HPE_PAUSED_UPGRADE) {
-        const char* pos = llhttp_get_error_pos(&parser);
+        const char *pos = llhttp_get_error_pos(&parser);
         size_t header_end = pos ? static_cast<size_t>(pos - data) : len;
 
         if (out->no_body) {
@@ -266,14 +250,9 @@ int parse_http_request(
             out->total_consumed = header_end;
 
             // Chunked body reassembly for POST/PUT/PATCH etc.
-            if (out->chunked &&
-                out->chunked_body_ptr &&
-                !out->chunked_body_ptr->empty()) {
+            if (out->chunked && out->chunked_body_ptr && !out->chunked_body_ptr->empty()) {
 
-                out->body = StringView(
-                    out->chunked_body_ptr->data(),
-                    out->chunked_body_ptr->size()
-                );
+                out->body = StringView(out->chunked_body_ptr->data(), out->chunked_body_ptr->size());
             }
         }
 

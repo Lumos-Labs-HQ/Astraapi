@@ -1,9 +1,11 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
-#include "asgi_constants.hpp"
 #include "app.hpp"
+#include "asgi_constants.hpp"
 #include "json_writer.hpp"
 #include "pyref.hpp"
+
+#include <Python.h>
+
 #include <cstring>
 #include <vector>
 
@@ -11,113 +13,106 @@
 #define HAS_LIBDEFLATE 0
 #endif
 
-// ══════════════════════════════════════════════════════════════════════════════
-// Forward declarations for module-level functions (implemented in other files)
-// ══════════════════════════════════════════════════════════════════════════════
-
 // app.cpp
 extern void init_status_line_cache();
 extern void cleanup_cached_refs();
-extern PyObject* py_init_cached_refs(PyObject* self, PyObject* args);
-extern PyObject* py_build_response_from_parts(PyObject* self, PyObject* args);
-extern PyObject* py_build_chunked_frame(PyObject* self, PyObject* arg);
-extern PyObject* py_http_buf_create(PyObject* self, PyObject* args);
-extern PyObject* py_http_buf_append(PyObject* self, PyObject* args);
-extern PyObject* py_http_buf_get_view(PyObject* self, PyObject* capsule);
-extern PyObject* py_http_buf_consume(PyObject* self, PyObject* args);
-extern PyObject* py_http_buf_clear(PyObject* self, PyObject* capsule);
-extern PyObject* py_http_buf_len(PyObject* self, PyObject* capsule);
-extern PyObject* py_http_buf_get_write_buf(PyObject* self, PyObject* args);
-extern PyObject* py_http_buf_commit_write(PyObject* self, PyObject* args);
+extern PyObject *py_init_cached_refs(PyObject *self, PyObject *args);
+extern PyObject *py_build_response_from_parts(PyObject *self, PyObject *args);
+extern PyObject *py_build_chunked_frame(PyObject *self, PyObject *arg);
+extern PyObject *py_http_buf_create(PyObject *self, PyObject *args);
+extern PyObject *py_http_buf_append(PyObject *self, PyObject *args);
+extern PyObject *py_http_buf_get_view(PyObject *self, PyObject *capsule);
+extern PyObject *py_http_buf_consume(PyObject *self, PyObject *args);
+extern PyObject *py_http_buf_clear(PyObject *self, PyObject *capsule);
+extern PyObject *py_http_buf_len(PyObject *self, PyObject *capsule);
+extern PyObject *py_http_buf_get_write_buf(PyObject *self, PyObject *args);
+extern PyObject *py_http_buf_commit_write(PyObject *self, PyObject *args);
 
 // buffer_pool.cpp
-extern PyObject* py_prewarm_buffer_pool(PyObject* self, PyObject* args);
-extern PyObject* py_set_buffer_pool_max(PyObject* self, PyObject* args);
+extern PyObject *py_prewarm_buffer_pool(PyObject *self, PyObject *args);
+extern PyObject *py_set_buffer_pool_max(PyObject *self, PyObject *args);
 
 // ws_ring_buffer.cpp
 extern void init_ws_opcode_cache();
 
 // security.cpp
-extern PyObject* py_extract_bearer_token(PyObject* self, PyObject* arg);
-extern PyObject* py_extract_basic_credentials(PyObject* self, PyObject* arg);
-extern PyObject* py_get_authorization_scheme_param(PyObject* self, PyObject* arg);
+extern PyObject *py_extract_bearer_token(PyObject *self, PyObject *arg);
+extern PyObject *py_extract_basic_credentials(PyObject *self, PyObject *arg);
+extern PyObject *py_get_authorization_scheme_param(PyObject *self, PyObject *arg);
 
 // websocket_handler.cpp
-extern PyObject* py_ws_parse_json(PyObject* self, PyObject* arg);
-extern PyObject* py_ws_serialize_json(PyObject* self, PyObject* arg);
-extern PyObject* py_ws_batch_parse(PyObject* self, PyObject* arg);
-extern PyObject* py_ws_build_json_frame(PyObject* self, PyObject* args);
+extern PyObject *py_ws_parse_json(PyObject *self, PyObject *arg);
+extern PyObject *py_ws_serialize_json(PyObject *self, PyObject *arg);
+extern PyObject *py_ws_batch_parse(PyObject *self, PyObject *arg);
+extern PyObject *py_ws_build_json_frame(PyObject *self, PyObject *args);
 
 // ws_frame_parser.cpp
-extern void ws_unmask(uint8_t* payload, size_t len, const uint8_t mask[4]);
-extern PyObject* py_ws_echo_frames(PyObject* self, PyObject* arg);
-extern PyObject* py_ws_build_frame_bytes(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
-extern PyObject* py_ws_build_ping_frame(PyObject* self, PyObject* arg);
-extern PyObject* py_ws_build_close_frame_bytes(PyObject* self, PyObject* arg);
-extern PyObject* py_ws_build_frames_batch(PyObject* self, PyObject* arg);
+extern void ws_unmask(uint8_t *payload, size_t len, const uint8_t mask[4]);
+extern PyObject *py_ws_echo_frames(PyObject *self, PyObject *arg);
+extern PyObject *py_ws_build_frame_bytes(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
+extern PyObject *py_ws_build_ping_frame(PyObject *self, PyObject *arg);
+extern PyObject *py_ws_build_close_frame_bytes(PyObject *self, PyObject *arg);
+extern PyObject *py_ws_build_frames_batch(PyObject *self, PyObject *arg);
 
 // ws_ring_buffer.cpp
-extern PyObject* py_ws_ring_buffer_create(PyObject* self, PyObject* args);
-extern PyObject* py_ws_ring_buffer_reset(PyObject* self, PyObject* args);
-extern PyObject* py_ws_echo_direct(PyObject* self, PyObject* args);
-extern PyObject* py_ws_echo_direct_fd(PyObject* self, PyObject* args);
-extern PyObject* py_ws_echo_direct_fd_v2(PyObject* self, PyObject* args);
-extern PyObject* py_ws_flush_pending(PyObject* self, PyObject* args);
-extern PyObject* py_ws_handle_direct(PyObject* self, PyObject* args);
-extern PyObject* py_ws_handle_json_direct(PyObject* self, PyObject* args);
-extern PyObject* py_ws_get_metrics(PyObject* self, PyObject* capsule);
-extern PyObject* py_ws_update_send_metrics(PyObject* self, PyObject* args);
-extern PyObject* py_ws_handle_and_feed(PyObject* self, PyObject* const* args, Py_ssize_t nargs);
+extern PyObject *py_ws_ring_buffer_create(PyObject *self, PyObject *args);
+extern PyObject *py_ws_ring_buffer_reset(PyObject *self, PyObject *args);
+extern PyObject *py_ws_echo_direct(PyObject *self, PyObject *args);
+extern PyObject *py_ws_echo_direct_fd(PyObject *self, PyObject *args);
+extern PyObject *py_ws_echo_direct_fd_v2(PyObject *self, PyObject *args);
+extern PyObject *py_ws_flush_pending(PyObject *self, PyObject *args);
+extern PyObject *py_ws_handle_direct(PyObject *self, PyObject *args);
+extern PyObject *py_ws_handle_json_direct(PyObject *self, PyObject *args);
+extern PyObject *py_ws_get_metrics(PyObject *self, PyObject *capsule);
+extern PyObject *py_ws_update_send_metrics(PyObject *self, PyObject *args);
+extern PyObject *py_ws_handle_and_feed(PyObject *self, PyObject *const *args, Py_ssize_t nargs);
 
 // openapi_gen.cpp
-extern PyObject* py_openapi_dict_to_json_bytes(PyObject* self, PyObject* arg);
+extern PyObject *py_openapi_dict_to_json_bytes(PyObject *self, PyObject *arg);
 
 // params.cpp (v0.1 compat — implemented in utils.cpp)
-extern PyObject* py_parse_query_string(PyObject* self, PyObject* args);
-extern PyObject* py_parse_scope_headers(PyObject* self, PyObject* args);
-extern PyObject* py_parse_cookie_header(PyObject* self, PyObject* arg);
+extern PyObject *py_parse_query_string(PyObject *self, PyObject *args);
+extern PyObject *py_parse_scope_headers(PyObject *self, PyObject *args);
+extern PyObject *py_parse_cookie_header(PyObject *self, PyObject *arg);
 
 // json_encoder.cpp
-extern PyObject* py_fast_jsonable_encode(PyObject* self, PyObject* arg);
+extern PyObject *py_fast_jsonable_encode(PyObject *self, PyObject *arg);
 extern void ensure_types_initialized();
 
 // dependency_resolver.cpp
-extern PyObject* py_compute_dependency_order(PyObject* self, PyObject* arg);
+extern PyObject *py_compute_dependency_order(PyObject *self, PyObject *arg);
 
-
-extern PyObject* py_encode_to_json_bytes(PyObject* self, PyObject* args, PyObject* kwargs);
+extern PyObject *py_encode_to_json_bytes(PyObject *self, PyObject *args, PyObject *kwargs);
 
 // request_pipeline.cpp
-extern PyObject* py_process_request(PyObject* self, PyObject* args, PyObject* kwargs);
+extern PyObject *py_process_request(PyObject *self, PyObject *args, PyObject *kwargs);
 
 // form_parser.cpp
-extern PyObject* py_parse_multipart_body(PyObject* self, PyObject* args);
-extern PyObject* py_parse_urlencoded_body(PyObject* self, PyObject* arg);
+extern PyObject *py_parse_multipart_body(PyObject *self, PyObject *args);
+extern PyObject *py_parse_urlencoded_body(PyObject *self, PyObject *arg);
 
 // scalar_coerce (utils.cpp)
-extern PyObject* py_batch_coerce_scalars(PyObject* self, PyObject* args);
+extern PyObject *py_batch_coerce_scalars(PyObject *self, PyObject *args);
 
 // error_response.cpp
-extern PyObject* py_serialize_error_response(PyObject* self, PyObject* arg);
-extern PyObject* py_serialize_error_list(PyObject* self, PyObject* arg);
+extern PyObject *py_serialize_error_response(PyObject *self, PyObject *arg);
+extern PyObject *py_serialize_error_list(PyObject *self, PyObject *arg);
 
 // streaming_multipart.cpp
-extern PyObject* py_create_streaming_multipart_parser(PyObject* self, PyObject* args);
-extern PyObject* py_feed_streaming_multipart(PyObject* self, PyObject* args);
-extern PyObject* py_get_streaming_multipart_form_data(PyObject* self, PyObject* arg);
+extern PyObject *py_create_streaming_multipart_parser(PyObject *self, PyObject *args);
+extern PyObject *py_feed_streaming_multipart(PyObject *self, PyObject *args);
+extern PyObject *py_get_streaming_multipart_form_data(PyObject *self, PyObject *arg);
 
 // param_extractor.cpp
-extern PyObject* py_batch_extract_params_inline(PyObject* self, PyObject* args, PyObject* kwargs);
+extern PyObject *py_batch_extract_params_inline(PyObject *self, PyObject *args, PyObject *kwargs);
 
-// ══════════════════════════════════════════════════════════════════════════════
 // WebSocket unmask — Python-callable wrapper for ws_frame_parser.cpp
-// ══════════════════════════════════════════════════════════════════════════════
 
-static PyObject* py_ws_unmask(PyObject* /*self*/, PyObject* args) {
+static PyObject *py_ws_unmask(PyObject * /*self*/, PyObject *args) {
     // ws_unmask(payload: bytearray, mask: bytes) -> None
     // Unmasks payload in-place using 8-byte-at-a-time XOR
     Py_buffer payload_buf;
-    const char* mask_data;
+    const char *mask_data;
     Py_ssize_t mask_len;
 
     if (!PyArg_ParseTuple(args, "y*y#", &payload_buf, &mask_data, &mask_len)) {
@@ -131,17 +126,14 @@ static PyObject* py_ws_unmask(PyObject* /*self*/, PyObject* args) {
     }
 
     if (!payload_buf.readonly && payload_buf.buf && payload_buf.len > 0) {
-        ws_unmask((uint8_t*)payload_buf.buf, (size_t)payload_buf.len,
-                  (const uint8_t*)mask_data);
+        ws_unmask((uint8_t *)payload_buf.buf, (size_t)payload_buf.len, (const uint8_t *)mask_data);
     }
 
     PyBuffer_Release(&payload_buf);
     Py_RETURN_NONE;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // Module method table
-// ══════════════════════════════════════════════════════════════════════════════
 
 static PyMethodDef module_methods[] = {
     // v2.0: Security
@@ -155,7 +147,7 @@ static PyMethodDef module_methods[] = {
     {"ws_batch_parse", (PyCFunction)py_ws_batch_parse, METH_O, nullptr},
     {"ws_unmask", (PyCFunction)py_ws_unmask, METH_VARARGS, nullptr},
     {"ws_echo_frames", (PyCFunction)py_ws_echo_frames, METH_O, nullptr},
-    {"ws_build_frame_bytes", (PyCFunction)(void*)py_ws_build_frame_bytes, METH_FASTCALL, nullptr},
+    {"ws_build_frame_bytes", (PyCFunction)(void *)py_ws_build_frame_bytes, METH_FASTCALL, nullptr},
     {"ws_build_ping_frame", (PyCFunction)py_ws_build_ping_frame, METH_O, nullptr},
     {"ws_build_close_frame_bytes", (PyCFunction)py_ws_build_close_frame_bytes, METH_O, nullptr},
     {"ws_build_frames_batch", (PyCFunction)py_ws_build_frames_batch, METH_O, nullptr},
@@ -172,7 +164,7 @@ static PyMethodDef module_methods[] = {
     {"ws_handle_json_direct", (PyCFunction)py_ws_handle_json_direct, METH_VARARGS, nullptr},
     {"ws_get_metrics", (PyCFunction)py_ws_get_metrics, METH_O, nullptr},
     {"ws_update_send_metrics", (PyCFunction)py_ws_update_send_metrics, METH_VARARGS, nullptr},
-    {"ws_handle_and_feed", (PyCFunction)(void*)py_ws_handle_and_feed, METH_FASTCALL, nullptr},
+    {"ws_handle_and_feed", (PyCFunction)(void *)py_ws_handle_and_feed, METH_FASTCALL, nullptr},
 
     // v2.0: OpenAPI
     {"openapi_dict_to_json_bytes", (PyCFunction)py_openapi_dict_to_json_bytes, METH_O, nullptr},
@@ -228,17 +220,14 @@ static PyMethodDef module_methods[] = {
     {"http_buf_get_write_buf", (PyCFunction)py_http_buf_get_write_buf, METH_VARARGS, nullptr},
     {"http_buf_commit_write", (PyCFunction)py_http_buf_commit_write, METH_VARARGS, nullptr},
 
-    {nullptr, nullptr, 0, nullptr}
-};
+    {nullptr, nullptr, 0, nullptr}};
 
-// ══════════════════════════════════════════════════════════════════════════════
 // Module cleanup — release all cached static refs at interpreter shutdown
-// ══════════════════════════════════════════════════════════════════════════════
 
 // Extern cleanup functions from other translation units
 extern void cleanup_param_registry();
 
-static void module_free(void* /*module*/) {
+static void module_free(void * /*module*/) {
     // Clean up app.cpp cached refs (imports, interned strings)
     cleanup_cached_refs();
 
@@ -252,25 +241,22 @@ static void module_free(void* /*module*/) {
     cleanup_param_registry();
 }
 
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Module definition
-// ══════════════════════════════════════════════════════════════════════════════
 
 static struct PyModuleDef module_def = {
     PyModuleDef_HEAD_INIT,
-    "_astraapi_core",           // C++ core module
+    "_astraapi_core", // C++ core module
     "AstraAPI C++ Core — Direct CPython C API (zero overhead)",
     -1,
     module_methods,
-    nullptr,                   // m_slots
-    nullptr,                   // m_traverse
-    nullptr,                   // m_clear
-    (freefunc)module_free,     // m_free — clean up statics on shutdown
+    nullptr,               // m_slots
+    nullptr,               // m_traverse
+    nullptr,               // m_clear
+    (freefunc)module_free, // m_free — clean up statics on shutdown
 };
 
 PyMODINIT_FUNC PyInit__astraapi_core(void) {
-    PyObject* m = PyModule_Create(&module_def);
+    PyObject *m = PyModule_Create(&module_def);
     if (!m) return nullptr;
 
     // Initialize pre-interned ASGI strings
@@ -304,4 +290,3 @@ PyMODINIT_FUNC PyInit__astraapi_core(void) {
 
     return m;
 }
-

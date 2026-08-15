@@ -31,7 +31,6 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> Respon
 async def request_validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
-    # Core fast-path: serialize error dicts directly to JSON bytes in one
     # call, skipping jsonable_encoder() + JSONResponse.render() overhead.
     errors = [{k: v for k, v in e.items() if k != "url"} for e in exc.errors()]
     body_bytes = serialize_error_response(errors)
@@ -45,7 +44,6 @@ async def request_validation_exception_handler(
 async def websocket_request_validation_exception_handler(
     websocket: WebSocket, exc: WebSocketRequestValidationError
 ) -> None:
-    # Core fast-path for WebSocket error serialization
     error_bytes = serialize_error_list(exc.errors())
     await websocket.close(
         code=WS_1008_POLICY_VIOLATION,

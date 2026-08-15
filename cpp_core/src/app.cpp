@@ -1,42 +1,38 @@
 #define NOMINMAX
 #define PY_SSIZE_T_CLEAN
+#include "app.hpp"
+
+#include "asgi_constants.hpp"
+#include "buffer_pool.hpp"
+#include "compat.hpp"
+#include "http_parser.hpp"
+#include "json_parser.hpp"
+#include "json_writer.hpp"
+#include "percent_decode.hpp"
+#include "platform.hpp"
+#include "pyref.hpp"
+#include "streaming_multipart.hpp"
+#include "ws_frame_parser.hpp"
+
 #include <Python.h>
 
-
-#include "compat.hpp"
-#include "app.hpp"
-#include "asgi_constants.hpp"
-#include "json_writer.hpp"
-#include "json_parser.hpp"
-#include "buffer_pool.hpp"
-#include "http_parser.hpp"
-#include "ws_frame_parser.hpp"
-#include "streaming_multipart.hpp"
-#include "percent_decode.hpp"
-#include "pyref.hpp"
-#include <cstring>
-#include "platform.hpp"
-#include <mutex>
-#include <new>
 #include <algorithm>
-#include <string_view>
+#include <array>
 #include <charconv>
 #include <chrono>
-#include <array>
+#include <cstring>
+#include <mutex>
+#include <new>
+#include <string_view>
 #include <zlib.h>
 
-// ── buf_append: resize+memcpy (5-15% faster than buf.insert iterator path) ──
-static inline void buf_append(std::vector<char>& buf, const char* s, size_t len) {
+static inline void buf_append(std::vector<char> &buf, const char *s, size_t len) {
     size_t old = buf.size();
     buf.resize(old + len);
     std::memcpy(buf.data() + old, s, len);
 }
-static inline void buf_append(std::vector<char>& buf, const std::string& s) {
-    buf_append(buf, s.data(), s.size());
-}
+static inline void buf_append(std::vector<char> &buf, const std::string &s) { buf_append(buf, s.data(), s.size()); }
 
-// ── Header normalization lookup table: lowercase + '-' → '_' in one table lookup ──
-// Eliminates 3 branches per character in the header normalization loop.
 static constexpr std::array<char, 256> make_header_norm_table() {
     std::array<char, 256> t{};
     for (int i = 0; i < 256; i++) t[i] = (char)i;
@@ -46,8 +42,7 @@ static constexpr std::array<char, 256> make_header_norm_table() {
 }
 static constexpr auto s_header_norm = make_header_norm_table();
 
-// ── Case-insensitive helpers (zero-allocation, for content-type/origin checks) ──
-static inline bool ci_starts_with(const char* s, size_t s_len, const char* prefix, size_t p_len) {
+static inline bool ci_starts_with(const char *s, size_t s_len, const char *prefix, size_t p_len) {
     if (s_len < p_len) return false;
     for (size_t i = 0; i < p_len; i++) {
         char c = s[i];
@@ -56,14 +51,17 @@ static inline bool ci_starts_with(const char* s, size_t s_len, const char* prefi
     }
     return true;
 }
-static inline bool ci_contains(const char* s, size_t s_len, const char* needle, size_t n_len) {
+static inline bool ci_contains(const char *s, size_t s_len, const char *needle, size_t n_len) {
     if (s_len < n_len) return false;
     for (size_t i = 0; i <= s_len - n_len; i++) {
         bool match = true;
         for (size_t j = 0; j < n_len; j++) {
             char c = s[i + j];
             if (c >= 'A' && c <= 'Z') c += 32;
-            if (c != needle[j]) { match = false; break; }
+            if (c != needle[j]) {
+                match = false;
+                break;
+            }
         }
         if (match) return true;
     }
@@ -77,103 +75,94 @@ static inline bool ci_contains(const char* s, size_t s_len, const char* needle, 
 #define HAS_BROTLI 0
 #endif
 
-// ── Module-level cached imports (consolidated, cleaned up at exit) ────────────
-static PyObject* s_http_exc_type = nullptr;         // starlette.exceptions.HTTPException
-static PyObject* s_astraapi_http_exc_type = nullptr;  // astraapi.exceptions.HTTPException
-static PyObject* s_validation_exc_type = nullptr;    // astraapi.exceptions.RequestValidationError
-static PyObject* s_resume_func = nullptr;            // astraapi._core_app._resume_coro
-static PyObject* s_request_body_to_args = nullptr;   // astraapi.dependencies.utils.request_body_to_args
-static PyObject* s_form_data_class = nullptr;         // astraapi._datastructures_impl.FormData
-static PyObject* s_upload_file_class = nullptr;       // astraapi._datastructures_impl.UploadFile
+static PyObject *s_http_exc_type = nullptr;          // starlette.exceptions.HTTPException
+static PyObject *s_astraapi_http_exc_type = nullptr; // astraapi.exceptions.HTTPException
+static PyObject *s_validation_exc_type = nullptr;    // astraapi.exceptions.RequestValidationError
+static PyObject *s_resume_func = nullptr;            // astraapi._core_app._resume_coro
+static PyObject *s_request_body_to_args = nullptr;   // astraapi.dependencies.utils.request_body_to_args
+static PyObject *s_form_data_class = nullptr;        // astraapi._datastructures_impl.FormData
+static PyObject *s_upload_file_class = nullptr;      // astraapi._datastructures_impl.UploadFile
 
-// Pre-interned strings for transport method calls (cleaned up at exit)
-static PyObject* g_str_write = nullptr;
-static PyObject* g_str_is_closing = nullptr;
+static PyObject *g_str_write = nullptr;
+static PyObject *g_str_is_closing = nullptr;
 
-// Pre-built cached error responses (allocated once at init, reused forever — zero alloc per 404/405/500)
-static PyObject* s_resp_404 = nullptr;   // HTTP/1.1 404 Not Found keep-alive
-static PyObject* s_resp_405 = nullptr;   // HTTP/1.1 405 Method Not Allowed keep-alive
-static PyObject* s_resp_500 = nullptr;   // HTTP/1.1 500 Internal Server Error keep-alive
+static PyObject *s_resp_404 = nullptr; // HTTP/1.1 404 Not Found keep-alive
+static PyObject *s_resp_405 = nullptr; // HTTP/1.1 405 Method Not Allowed keep-alive
+static PyObject *s_resp_500 = nullptr; // HTTP/1.1 500 Internal Server Error keep-alive
 
-// Promoted from function-local statics for eager initialization
-static PyObject* s_ensure_future = nullptr;          // asyncio.ensure_future
-static PyObject* s_kw_body_fields = nullptr;         // "body_fields" interned string
-static PyObject* s_kw_received_body = nullptr;       // "received_body" interned string
-static PyObject* s_kw_embed = nullptr;               // "embed_body_fields" interned string
-static PyObject* s_detail_key_global = nullptr;      // "detail" interned string
-static PyObject* s_loc_key_global = nullptr;          // "loc" interned string
-static PyObject* s_url_key_global = nullptr;          // "url" interned string
-static PyObject* s_body_str_global = nullptr;         // "body" interned string
-static PyObject* s_include_url_key = nullptr;         // "include_url" interned string
-// Cached return tuples (avoid per-request PyObject allocation)
-static PyObject* s_need_more_data = nullptr;         // (0, None) — returned on incomplete parse
+static PyObject *s_ensure_future = nullptr;     // asyncio.ensure_future
+static PyObject *s_kw_body_fields = nullptr;    // "body_fields" interned string
+static PyObject *s_kw_received_body = nullptr;  // "received_body" interned string
+static PyObject *s_kw_embed = nullptr;          // "embed_body_fields" interned string
+static PyObject *s_detail_key_global = nullptr; // "detail" interned string
+static PyObject *s_loc_key_global = nullptr;    // "loc" interned string
+static PyObject *s_url_key_global = nullptr;    // "url" interned string
+static PyObject *s_body_str_global = nullptr;   // "body" interned string
+static PyObject *s_include_url_key = nullptr;   // "include_url" interned string
+static PyObject *s_need_more_data = nullptr;    // (0, None) — returned on incomplete parse
 
-// DI/async path interned strings (promoted from lazy function-local statics)
-static PyObject* s_rh_key = nullptr;                 // "__raw_headers__"
-static PyObject* s_m_key = nullptr;                  // "__method__"
-static PyObject* s_p_key = nullptr;                  // "__path__"
-static PyObject* s_as_key = nullptr;                 // "__auth_scheme__"
-static PyObject* s_ac_key = nullptr;                 // "__auth_credentials__"
-static PyObject* s_validate_str = nullptr;           // "validate_python"
-static PyObject* s_fut_blocking = nullptr;           // "_asyncio_future_blocking"
-static PyObject* s_async_tag = nullptr;              // "async"
-static PyObject* s_stream_tag = nullptr;             // "stream"
-// Pre-interned attribute name strings for Response object detection
-static PyObject* s_attr_body_iterator = nullptr;     // "body_iterator"
-static PyObject* s_attr_path = nullptr;              // "path"
-static PyObject* s_attr_body = nullptr;              // "body"
-static PyObject* s_attr_status_code = nullptr;       // "status_code"
-static PyObject* s_attr_raw_headers = nullptr;       // "_raw_headers"
-static PyObject* s_attr_raw_headers2 = nullptr;      // "raw_headers"
-static PyObject* s_attr_background = nullptr;        // "background"
-static PyObject* s_attr_headers = nullptr;           // "headers"
+static PyObject *s_rh_key = nullptr;             // "__raw_headers__"
+static PyObject *s_m_key = nullptr;              // "__method__"
+static PyObject *s_p_key = nullptr;              // "__path__"
+static PyObject *s_as_key = nullptr;             // "__auth_scheme__"
+static PyObject *s_ac_key = nullptr;             // "__auth_credentials__"
+static PyObject *s_validate_str = nullptr;       // "validate_python"
+static PyObject *s_fut_blocking = nullptr;       // "_asyncio_future_blocking"
+static PyObject *s_async_tag = nullptr;          // "async"
+static PyObject *s_stream_tag = nullptr;         // "stream"
+static PyObject *s_attr_body_iterator = nullptr; // "body_iterator"
+static PyObject *s_attr_path = nullptr;          // "path"
+static PyObject *s_attr_body = nullptr;          // "body"
+static PyObject *s_attr_status_code = nullptr;   // "status_code"
+static PyObject *s_attr_raw_headers = nullptr;   // "_raw_headers"
+static PyObject *s_attr_raw_headers2 = nullptr;  // "raw_headers"
+static PyObject *s_attr_background = nullptr;    // "background"
+static PyObject *s_attr_headers = nullptr;       // "headers"
 
-// Promoted from function-local statics (eliminates per-call lazy-init branch)
-static PyObject* s_ct_type_key = nullptr;    // "type"
-static PyObject* s_ct_loc_key = nullptr;     // "loc"
-static PyObject* s_ct_msg_key = nullptr;     // "msg"
-static PyObject* s_ct_input_key = nullptr;   // "input"
-static PyObject* s_ct_mat_val = nullptr;     // "model_attributes_type"
-static PyObject* s_ct_mat_msg = nullptr;     // "Input should be a valid..."
-static PyObject* s_ct_body_str = nullptr;    // "body" (JSON error path)
-static PyObject* s_body_key = nullptr;       // "__body__"
-static PyObject* s_ct_key = nullptr;         // "__content_type__"
-static PyObject* s_body_key2 = nullptr;      // body key2
-static PyObject* s_ct_key2 = nullptr;        // content-type key2
-static PyObject* s_async_di_tag = nullptr;   // "async_di"
-static PyObject* s_deps_ran_key = nullptr;   // "__deps_ran__"
-static PyObject* s_bg_key = nullptr;         // "__bg_tasks__"
-static PyObject* s_serialize = nullptr;      // "serialize_python"
-static PyObject* s_mw_tag = nullptr;         // "mw"
-static PyObject* s_mdj = nullptr;            // "model_dump_json"
-static PyObject* s_by_alias_kw = nullptr;    // "by_alias"
-static PyObject* s_asdict = nullptr;         // "_asdict"
-static PyObject* s_is_dc = nullptr;          // dataclass check
-static PyObject* s_errors_str2 = nullptr;    // "errors"
-static PyObject* s_url_key = nullptr;        // "url"
-static PyObject* s_det_key = nullptr;        // "detail"
-static PyObject* s_kw_filename = nullptr;    // "filename"
-static PyObject* s_kw_file = nullptr;        // "file"
-static PyObject* s_kw_ct = nullptr;          // "content_type"
-static PyObject* s_mv_rve_cls = nullptr;     // RequestValidationError class
-static PyObject* s_mv_body_kw = nullptr;     // "body" kw for RVE
-static PyObject* s_rve_cls2 = nullptr;       // RequestValidationError class2
-static PyObject* s_rve_body_kw = nullptr;    // "body" kw for RVE2
+static PyObject *s_ct_type_key = nullptr;  // "type"
+static PyObject *s_ct_loc_key = nullptr;   // "loc"
+static PyObject *s_ct_msg_key = nullptr;   // "msg"
+static PyObject *s_ct_input_key = nullptr; // "input"
+static PyObject *s_ct_mat_val = nullptr;   // "model_attributes_type"
+static PyObject *s_ct_mat_msg = nullptr;   // "Input should be a valid..."
+static PyObject *s_ct_body_str = nullptr;  // "body" (JSON error path)
+static PyObject *s_body_key = nullptr;     // "__body__"
+static PyObject *s_ct_key = nullptr;       // "__content_type__"
+static PyObject *s_body_key2 = nullptr;    // body key2
+static PyObject *s_ct_key2 = nullptr;      // content-type key2
+static PyObject *s_async_di_tag = nullptr; // "async_di"
+static PyObject *s_deps_ran_key = nullptr; // "__deps_ran__"
+static PyObject *s_bg_key = nullptr;       // "__bg_tasks__"
+static PyObject *s_serialize = nullptr;    // "serialize_python"
+static PyObject *s_mw_tag = nullptr;       // "mw"
+static PyObject *s_mdj = nullptr;          // "model_dump_json"
+static PyObject *s_by_alias_kw = nullptr;  // "by_alias"
+static PyObject *s_asdict = nullptr;       // "_asdict"
+static PyObject *s_is_dc = nullptr;        // dataclass check
+static PyObject *s_errors_str2 = nullptr;  // "errors"
+static PyObject *s_url_key = nullptr;      // "url"
+static PyObject *s_det_key = nullptr;      // "detail"
+static PyObject *s_kw_filename = nullptr;  // "filename"
+static PyObject *s_kw_file = nullptr;      // "file"
+static PyObject *s_kw_ct = nullptr;        // "content_type"
+static PyObject *s_mv_rve_cls = nullptr;   // RequestValidationError class
+static PyObject *s_mv_body_kw = nullptr;   // "body" kw for RVE
+static PyObject *s_rve_cls2 = nullptr;     // RequestValidationError class2
+static PyObject *s_rve_body_kw = nullptr;  // "body" kw for RVE2
 
-// Cached HTTP method strings — only 7 possible values, avoids per-request allocation
-static PyObject* s_method_GET = nullptr;
-static PyObject* s_method_POST = nullptr;
-static PyObject* s_method_PUT = nullptr;
-static PyObject* s_method_DELETE = nullptr;
-static PyObject* s_method_PATCH = nullptr;
-static PyObject* s_method_HEAD = nullptr;
-static PyObject* s_method_OPTIONS = nullptr;
+static PyObject *s_method_GET = nullptr;
+static PyObject *s_method_POST = nullptr;
+static PyObject *s_method_PUT = nullptr;
+static PyObject *s_method_DELETE = nullptr;
+static PyObject *s_method_PATCH = nullptr;
+static PyObject *s_method_HEAD = nullptr;
+static PyObject *s_method_OPTIONS = nullptr;
 
 // Returns cached PyObject* (borrowed ref) for common methods, or creates a new one.
 // For cached methods: returns borrowed ref (caller must NOT Py_DECREF).
 // For unknown methods: returns new ref (caller must Py_DECREF).
 // Sets *is_cached to true if a cached ref was returned.
-static inline PyObject* get_cached_method(const char* data, size_t len, bool& is_cached) {
+static inline PyObject *get_cached_method(const char *data, size_t len, bool &is_cached) {
     is_cached = true;
     if (len == 3 && data[0] == 'G' && data[1] == 'E' && data[2] == 'T') return s_method_GET;
     if (len == 4 && data[0] == 'P' && data[1] == 'O' && data[2] == 'S' && data[3] == 'T') return s_method_POST;
@@ -186,24 +175,19 @@ static inline PyObject* get_cached_method(const char* data, size_t len, bool& is
     return PyUnicode_FromStringAndSize(data, (Py_ssize_t)len);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // Response cache — 8-way set associative for both dict and Response objects.
-// Eliminates global single-entry cache eviction when multiple routes are active.
-// Each slot holds: hash key + PyBytes HTTP response + metadata for correctness.
-// ═══════════════════════════════════════════════════════════════════════════════
 static constexpr int RESPONSE_CACHE_SLOTS = 8;
 
 struct ResponseCacheSlot {
     uintptr_t hash = 0;           // combined hash of response-identifying data
-    PyObject* response = nullptr; // owned reference to pre-built HTTP response bytes
+    PyObject *response = nullptr; // owned reference to pre-built HTTP response bytes
     uint64_t hits = 0;            // access counter
 };
 
-// Separate caches for dict responses and Response-object responses.
 static ResponseCacheSlot s_dict_cache[RESPONSE_CACHE_SLOTS];
 static ResponseCacheSlot s_response_cache[RESPONSE_CACHE_SLOTS];
 
-static inline uintptr_t fnv1a_hash_bytes(const char* data, size_t len) {
+static inline uintptr_t fnv1a_hash_bytes(const char *data, size_t len) {
     uintptr_t h = 14695981039346656037ull;
     for (size_t i = 0; i < len; i++) {
         h ^= (uint8_t)data[i];
@@ -212,20 +196,17 @@ static inline uintptr_t fnv1a_hash_bytes(const char* data, size_t len) {
     return h;
 }
 
-// Fast content-based hash for common JSON-serializable Python objects.
-// Safe across memory reuse (unlike pointer hashing) because it hashes values, not addresses.
 // Returns true if the object was hashable (supported type), false otherwise.
-static bool hash_json_object(PyObject* obj, uintptr_t& h);
+static bool hash_json_object(PyObject *obj, uintptr_t &h);
 
-static inline void hash_update(uintptr_t& h, uintptr_t val) {
+static inline void hash_update(uintptr_t &h, uintptr_t val) {
     h ^= val;
     h *= 1099511628211ull;
 }
 
-// Fast content-based hash for common JSON-serializable Python objects.
 // Uses PyObject_Hash for primitives (strings/ints/floats/bytes have cached hashes in CPython)
 // and recurses into dicts/lists/tuples. Returns false for unsupported types.
-static bool hash_json_object(PyObject* obj, uintptr_t& h) {
+static bool hash_json_object(PyObject *obj, uintptr_t &h) {
     if (obj == Py_None) {
         hash_update(h, 0x0DEFACED);
         return true;
@@ -241,15 +222,18 @@ static bool hash_json_object(PyObject* obj, uintptr_t& h) {
     // Primitives: PyObject_Hash is O(1) because CPython caches hash values
     if (PyUnicode_Check(obj) || PyLong_Check(obj) || PyFloat_Check(obj) || PyBytes_Check(obj)) {
         Py_hash_t hv = PyObject_Hash(obj);
-        if (hv == -1 && PyErr_Occurred()) { PyErr_Clear(); hv = (Py_hash_t)(uintptr_t)obj; }
+        if (hv == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            hv = (Py_hash_t)(uintptr_t)obj;
+        }
         hash_update(h, (uintptr_t)hv);
         return true;
     }
     if (PyDict_Check(obj)) {
         Py_ssize_t size = PyDict_GET_SIZE(obj);
         hash_update(h, (uintptr_t)size);
-        PyObject* k;
-        PyObject* v;
+        PyObject *k;
+        PyObject *v;
         Py_ssize_t pos = 0;
         while (PyDict_Next(obj, &pos, &k, &v)) {
             if (!hash_json_object(k, h)) return false;
@@ -279,28 +263,24 @@ static bool hash_json_object(PyObject* obj, uintptr_t& h) {
 
 // Hash a Python dict by content (not pointers). Returns 0 if dict contains unsupported types
 // or is too large (hashing cost exceeds cache benefit for dicts > 50 keys).
-static inline uintptr_t hash_dict_content(PyObject* dict) {
+static inline uintptr_t hash_dict_content(PyObject *dict) {
     Py_ssize_t size = PyDict_GET_SIZE(dict);
-    if (size > 50) return 0;  // skip: hashing cost > cache savings for large dicts
+    if (size > 50) return 0; // skip: hashing cost > cache savings for large dicts
     uintptr_t h = 14695981039346656037ull;
     if (!hash_json_object(dict, h)) return 0;
     return h;
 }
 
-// Combined cache key including response metadata
-static inline uintptr_t make_cache_key(uintptr_t content_hash, bool keep_alive, bool is_head,
-                                        int status_code, bool has_cors) {
-    return content_hash
-         ^ (uintptr_t)keep_alive
-         ^ ((uintptr_t)is_head << 1)
-         ^ ((uintptr_t)status_code << 2)
-         ^ ((uintptr_t)has_cors << 3);
+static inline uintptr_t make_cache_key(uintptr_t content_hash, bool keep_alive, bool is_head, int status_code,
+    bool has_cors) {
+    return content_hash ^ (uintptr_t)keep_alive ^ ((uintptr_t)is_head << 1) ^ ((uintptr_t)status_code << 2) ^
+           ((uintptr_t)has_cors << 3);
 }
 
 // Look up a slot in the cache. Returns the response PyObject on hit, nullptr on miss.
-static inline PyObject* cache_lookup(ResponseCacheSlot* cache, uintptr_t key) {
+static inline PyObject *cache_lookup(ResponseCacheSlot *cache, uintptr_t key) {
     int slot = (int)(key % RESPONSE_CACHE_SLOTS);
-    ResponseCacheSlot& cs = cache[slot];
+    ResponseCacheSlot &cs = cache[slot];
     if (cs.hash == key && cs.response != nullptr) {
         cs.hits++;
         return cs.response;
@@ -309,9 +289,9 @@ static inline PyObject* cache_lookup(ResponseCacheSlot* cache, uintptr_t key) {
 }
 
 // Store a response in the cache. Replaces existing entry in the slot.
-static inline void cache_store(ResponseCacheSlot* cache, uintptr_t key, PyObject* response) {
+static inline void cache_store(ResponseCacheSlot *cache, uintptr_t key, PyObject *response) {
     int slot = (int)(key % RESPONSE_CACHE_SLOTS);
-    ResponseCacheSlot& cs = cache[slot];
+    ResponseCacheSlot &cs = cache[slot];
     if (cs.response) {
         Py_DECREF(cs.response);
     }
@@ -360,97 +340,129 @@ void cleanup_cached_refs() {
     Py_CLEAR(s_method_PATCH);
     Py_CLEAR(s_method_HEAD);
     Py_CLEAR(s_method_OPTIONS);
-    Py_CLEAR(s_ct_type_key); Py_CLEAR(s_ct_loc_key); Py_CLEAR(s_ct_msg_key);
-    Py_CLEAR(s_ct_input_key); Py_CLEAR(s_ct_mat_val); Py_CLEAR(s_ct_mat_msg);
-    Py_CLEAR(s_ct_body_str); Py_CLEAR(s_body_key); Py_CLEAR(s_ct_key);
-    Py_CLEAR(s_body_key2); Py_CLEAR(s_ct_key2); Py_CLEAR(s_async_di_tag);
-    Py_CLEAR(s_deps_ran_key); Py_CLEAR(s_bg_key); Py_CLEAR(s_serialize);
-    Py_CLEAR(s_mw_tag); Py_CLEAR(s_mdj); Py_CLEAR(s_by_alias_kw);
-    Py_CLEAR(s_asdict); Py_CLEAR(s_is_dc); Py_CLEAR(s_errors_str2);
-    Py_CLEAR(s_url_key); Py_CLEAR(s_det_key); Py_CLEAR(s_kw_filename);
-    Py_CLEAR(s_kw_file); Py_CLEAR(s_kw_ct); Py_CLEAR(s_mv_rve_cls);
-    Py_CLEAR(s_mv_body_kw); Py_CLEAR(s_rve_cls2); Py_CLEAR(s_rve_body_kw);
+    Py_CLEAR(s_ct_type_key);
+    Py_CLEAR(s_ct_loc_key);
+    Py_CLEAR(s_ct_msg_key);
+    Py_CLEAR(s_ct_input_key);
+    Py_CLEAR(s_ct_mat_val);
+    Py_CLEAR(s_ct_mat_msg);
+    Py_CLEAR(s_ct_body_str);
+    Py_CLEAR(s_body_key);
+    Py_CLEAR(s_ct_key);
+    Py_CLEAR(s_body_key2);
+    Py_CLEAR(s_ct_key2);
+    Py_CLEAR(s_async_di_tag);
+    Py_CLEAR(s_deps_ran_key);
+    Py_CLEAR(s_bg_key);
+    Py_CLEAR(s_serialize);
+    Py_CLEAR(s_mw_tag);
+    Py_CLEAR(s_mdj);
+    Py_CLEAR(s_by_alias_kw);
+    Py_CLEAR(s_asdict);
+    Py_CLEAR(s_is_dc);
+    Py_CLEAR(s_errors_str2);
+    Py_CLEAR(s_url_key);
+    Py_CLEAR(s_det_key);
+    Py_CLEAR(s_kw_filename);
+    Py_CLEAR(s_kw_file);
+    Py_CLEAR(s_kw_ct);
+    Py_CLEAR(s_mv_rve_cls);
+    Py_CLEAR(s_mv_body_kw);
+    Py_CLEAR(s_rve_cls2);
+    Py_CLEAR(s_rve_body_kw);
     // Clear response caches
     for (int i = 0; i < RESPONSE_CACHE_SLOTS; i++) {
-        if (s_dict_cache[i].response) { Py_DECREF(s_dict_cache[i].response); s_dict_cache[i].response = nullptr; }
-        if (s_response_cache[i].response) { Py_DECREF(s_response_cache[i].response); s_response_cache[i].response = nullptr; }
+        if (s_dict_cache[i].response) {
+            Py_DECREF(s_dict_cache[i].response);
+            s_dict_cache[i].response = nullptr;
+        }
+        if (s_response_cache[i].response) {
+            Py_DECREF(s_response_cache[i].response);
+            s_response_cache[i].response = nullptr;
+        }
     }
 }
 
-// ── Eager initialization — called at server startup to eliminate first-request overhead ──
-PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
+PyObject *py_init_cached_refs(PyObject * /*self*/, PyObject * /*args*/) {
     // Pre-intern transport method strings
     if (!g_str_write) g_str_write = PyUnicode_InternFromString("write");
     if (!g_str_is_closing) g_str_is_closing = PyUnicode_InternFromString("is_closing");
 
     // Pre-build cached error responses (zero alloc per 404/405/500 on hot path)
     if (!s_resp_404) {
-        static const char R404[] =
-            "HTTP/1.1 404 Not Found\r\n"
-            "content-type: application/json\r\n"
-            "content-length: 22\r\n"
-            "connection: keep-alive\r\n\r\n"
-            "{\"detail\":\"Not Found\"}";
+        static const char R404[] = "HTTP/1.1 404 Not Found\r\n"
+                                   "content-type: application/json\r\n"
+                                   "content-length: 22\r\n"
+                                   "connection: keep-alive\r\n\r\n"
+                                   "{\"detail\":\"Not Found\"}";
         s_resp_404 = PyBytes_FromStringAndSize(R404, sizeof(R404) - 1);
     }
     if (!s_resp_405) {
-        static const char R405[] =
-            "HTTP/1.1 405 Method Not Allowed\r\n"
-            "content-type: application/json\r\n"
-            "content-length: 31\r\n"
-            "connection: keep-alive\r\n\r\n"
-            "{\"detail\":\"Method Not Allowed\"}";
+        static const char R405[] = "HTTP/1.1 405 Method Not Allowed\r\n"
+                                   "content-type: application/json\r\n"
+                                   "content-length: 31\r\n"
+                                   "connection: keep-alive\r\n\r\n"
+                                   "{\"detail\":\"Method Not Allowed\"}";
         s_resp_405 = PyBytes_FromStringAndSize(R405, sizeof(R405) - 1);
     }
     if (!s_resp_500) {
-        static const char R500[] =
-            "HTTP/1.1 500 Internal Server Error\r\n"
-            "content-type: application/json\r\n"
-            "content-length: 35\r\n"
-            "connection: keep-alive\r\n\r\n"
-            "{\"detail\":\"Internal Server Error\"}";
+        static const char R500[] = "HTTP/1.1 500 Internal Server Error\r\n"
+                                   "content-type: application/json\r\n"
+                                   "content-length: 35\r\n"
+                                   "connection: keep-alive\r\n\r\n"
+                                   "{\"detail\":\"Internal Server Error\"}";
         s_resp_500 = PyBytes_FromStringAndSize(R500, sizeof(R500) - 1);
     }
 
     // Pre-import exception types (avoids 3-8ms lazy import on first error)
     if (!s_http_exc_type) {
         PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-        if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-        else PyErr_Clear();
+        if (mod)
+            s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else
+            PyErr_Clear();
     }
     if (!s_astraapi_http_exc_type) {
         PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
-        if (mod) s_astraapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-        else PyErr_Clear();
+        if (mod)
+            s_astraapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else
+            PyErr_Clear();
     }
     if (!s_validation_exc_type) {
         PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
-        if (mod) s_validation_exc_type = PyObject_GetAttrString(mod.get(), "RequestValidationError");
-        else PyErr_Clear();
+        if (mod)
+            s_validation_exc_type = PyObject_GetAttrString(mod.get(), "RequestValidationError");
+        else
+            PyErr_Clear();
     }
 
     // Pre-import request_body_to_args (avoids 3-8ms lazy import on first body request)
     if (!s_request_body_to_args) {
         PyRef mod(PyImport_ImportModule("astraapi.dependencies.utils"));
-        if (mod) s_request_body_to_args = PyObject_GetAttrString(mod.get(), "request_body_to_args");
-        else PyErr_Clear();
+        if (mod)
+            s_request_body_to_args = PyObject_GetAttrString(mod.get(), "request_body_to_args");
+        else
+            PyErr_Clear();
     }
     // Pre-import FormData + UploadFile classes
     if (!s_form_data_class || !s_upload_file_class) {
         PyRef mod(PyImport_ImportModule("astraapi._datastructures_impl"));
         if (mod) {
-            if (!s_form_data_class)
-                s_form_data_class = PyObject_GetAttrString(mod.get(), "FormData");
-            if (!s_upload_file_class)
-                s_upload_file_class = PyObject_GetAttrString(mod.get(), "UploadFile");
-        } else { PyErr_Clear(); }
+            if (!s_form_data_class) s_form_data_class = PyObject_GetAttrString(mod.get(), "FormData");
+            if (!s_upload_file_class) s_upload_file_class = PyObject_GetAttrString(mod.get(), "UploadFile");
+        } else {
+            PyErr_Clear();
+        }
     }
 
     // Pre-import asyncio.ensure_future (avoids 2-4ms lazy import on first background task)
     if (!s_ensure_future) {
         PyRef mod(PyImport_ImportModule("asyncio"));
-        if (mod) s_ensure_future = PyObject_GetAttrString(mod.get(), "ensure_future");
-        else PyErr_Clear();
+        if (mod)
+            s_ensure_future = PyObject_GetAttrString(mod.get(), "ensure_future");
+        else
+            PyErr_Clear();
     }
 
     // Pre-intern body parsing keyword strings
@@ -494,9 +506,8 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     if (!s_method_HEAD) s_method_HEAD = PyUnicode_InternFromString("HEAD");
     if (!s_method_OPTIONS) s_method_OPTIONS = PyUnicode_InternFromString("OPTIONS");
 
-    // Cached return tuples
     if (!s_need_more_data) {
-        PyObject* zero = PyLong_FromLong(0);
+        PyObject *zero = PyLong_FromLong(0);
         if (zero) {
             s_need_more_data = PyTuple_Pack(2, zero, Py_None);
             Py_DECREF(zero);
@@ -509,7 +520,9 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     if (!s_ct_msg_key) s_ct_msg_key = PyUnicode_InternFromString("msg");
     if (!s_ct_input_key) s_ct_input_key = PyUnicode_InternFromString("input");
     if (!s_ct_mat_val) s_ct_mat_val = PyUnicode_InternFromString("model_attributes_type");
-    if (!s_ct_mat_msg) s_ct_mat_msg = PyUnicode_InternFromString("Input should be a valid dictionary or object to extract fields from");
+    if (!s_ct_mat_msg)
+        s_ct_mat_msg =
+            PyUnicode_InternFromString("Input should be a valid dictionary or object to extract fields from");
     if (!s_ct_body_str) s_ct_body_str = PyUnicode_InternFromString("body");
     if (!s_async_di_tag) s_async_di_tag = PyUnicode_InternFromString("async_di");
     if (!s_deps_ran_key) s_deps_ran_key = PyUnicode_InternFromString("__deps_ran__");
@@ -530,29 +543,31 @@ PyObject* py_init_cached_refs(PyObject* /*self*/, PyObject* /*args*/) {
     Py_RETURN_NONE;
 }
 
-// ── HTTPException type check helper ──────────────────────────────────────────
 // Checks both starlette.exceptions.HTTPException and astraapi.exceptions.HTTPException
 // since they are separate class hierarchies.
-static bool is_http_exception(PyObject* exc_type) {
+static bool is_http_exception(PyObject *exc_type) {
     if (!exc_type) return false;
     // Only check astraapi.exceptions.HTTPException — starlette check removed (perf).
     // AstraAPI's HTTPException IS the canonical exception; starlette.exceptions.HTTPException
     // is only used by starlette internals which are not on the hot path.
     if (!s_astraapi_http_exc_type) {
         PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
-        if (mod) s_astraapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-        else PyErr_Clear();
+        if (mod)
+            s_astraapi_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else
+            PyErr_Clear();
     }
     if (s_astraapi_http_exc_type) {
         int r = PyObject_IsSubclass(exc_type, s_astraapi_http_exc_type);
         if (r < 0) PyErr_Clear();
         if (r == 1) return true;
     }
-    // Fallback: check starlette.exceptions.HTTPException for compatibility
     if (!s_http_exc_type) {
         PyRef mod(PyImport_ImportModule("starlette.exceptions"));
-        if (mod) s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
-        else PyErr_Clear();
+        if (mod)
+            s_http_exc_type = PyObject_GetAttrString(mod.get(), "HTTPException");
+        else
+            PyErr_Clear();
     }
     if (s_http_exc_type) {
         int r = PyObject_IsSubclass(exc_type, s_http_exc_type);
@@ -562,12 +577,14 @@ static bool is_http_exception(PyObject* exc_type) {
     return false;
 }
 
-static bool is_validation_exception(PyObject* exc_type) {
+static bool is_validation_exception(PyObject *exc_type) {
     if (!exc_type) return false;
     if (!s_validation_exc_type) {
         PyRef mod(PyImport_ImportModule("astraapi.exceptions"));
-        if (mod) s_validation_exc_type = PyObject_GetAttrString(mod.get(), "RequestValidationError");
-        else PyErr_Clear();
+        if (mod)
+            s_validation_exc_type = PyObject_GetAttrString(mod.get(), "RequestValidationError");
+        else
+            PyErr_Clear();
     }
     if (!s_validation_exc_type) return false;
     int r = PyObject_IsSubclass(exc_type, s_validation_exc_type);
@@ -575,12 +592,10 @@ static bool is_validation_exception(PyObject* exc_type) {
     return r == 1;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // InlineResult — ALL PyObject* fields, accessed via PyMemberDef (T_OBJECT_EX)
 // Zero function call overhead for attribute access (CPython reads struct offset)
-// ═══════════════════════════════════════════════════════════════════════════════
 
-static void InlineResult_dealloc(InlineResultObject* self) {
+static void InlineResult_dealloc(InlineResultObject *self) {
     Py_XDECREF(self->status_code_obj);
     Py_XDECREF(self->has_body_params);
     Py_XDECREF(self->embed_body_fields);
@@ -588,7 +603,7 @@ static void InlineResult_dealloc(InlineResultObject* self) {
     Py_XDECREF(self->json_body);
     Py_XDECREF(self->endpoint);
     Py_XDECREF(self->body_params);
-    Py_TYPE(self)->tp_free((PyObject*)self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 // PyMemberDef: T_OBJECT_EX = direct struct offset read, READONLY = no setter
@@ -600,63 +615,52 @@ static PyMemberDef InlineResult_members[] = {
     {"kwargs", Py_T_OBJECT_EX, offsetof(InlineResultObject, kwargs), Py_READONLY, nullptr},
     {"json_body", Py_T_OBJECT_EX, offsetof(InlineResultObject, json_body), Py_READONLY, nullptr},
     {"endpoint", Py_T_OBJECT_EX, offsetof(InlineResultObject, endpoint), Py_READONLY, nullptr},
-    {"body_params", Py_T_OBJECT_EX, offsetof(InlineResultObject, body_params), Py_READONLY, nullptr},
-    {nullptr}
-};
+    {"body_params", Py_T_OBJECT_EX, offsetof(InlineResultObject, body_params), Py_READONLY, nullptr}, {nullptr}};
 
 PyTypeObject InlineResultType = {
-    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_astraapi_core.InlineResult",
+    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0).tp_name = "_astraapi_core.InlineResult",
     .tp_basicsize = sizeof(InlineResultObject),
     .tp_dealloc = (destructor)InlineResult_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
     .tp_members = InlineResult_members,
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// MatchResult
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static void MatchResult_dealloc(MatchResultObject* self) {
+static void MatchResult_dealloc(MatchResultObject *self) {
     self->path_params.~vector();
-    Py_TYPE(self)->tp_free((PyObject*)self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-static PyObject* MatchResult_get_route_index(MatchResultObject* self, void*) {
+static PyObject *MatchResult_get_route_index(MatchResultObject *self, void *) {
     return PyLong_FromSsize_t(self->route_index);
 }
-static PyObject* MatchResult_get_route_id(MatchResultObject* self, void*) {
+static PyObject *MatchResult_get_route_id(MatchResultObject *self, void *) {
     return PyLong_FromUnsignedLongLong(self->route_id);
 }
-static PyObject* MatchResult_get_status_code(MatchResultObject* self, void*) {
+static PyObject *MatchResult_get_status_code(MatchResultObject *self, void *) {
     return PyLong_FromLong(self->status_code);
 }
-static PyObject* MatchResult_get_is_coroutine(MatchResultObject* self, void*) {
+static PyObject *MatchResult_get_is_coroutine(MatchResultObject *self, void *) {
     return PyBool_FromLong(self->is_coroutine);
 }
-static PyObject* MatchResult_get_has_body(MatchResultObject* self, void*) {
-    return PyBool_FromLong(self->has_body);
-}
-static PyObject* MatchResult_get_is_form(MatchResultObject* self, void*) {
-    return PyBool_FromLong(self->is_form);
-}
-static PyObject* MatchResult_get_has_response_model(MatchResultObject* self, void*) {
+static PyObject *MatchResult_get_has_body(MatchResultObject *self, void *) { return PyBool_FromLong(self->has_body); }
+static PyObject *MatchResult_get_is_form(MatchResultObject *self, void *) { return PyBool_FromLong(self->is_form); }
+static PyObject *MatchResult_get_has_response_model(MatchResultObject *self, void *) {
     return PyBool_FromLong(self->has_response_model);
 }
-static PyObject* MatchResult_get_exclude_unset(MatchResultObject* self, void*) {
+static PyObject *MatchResult_get_exclude_unset(MatchResultObject *self, void *) {
     return PyBool_FromLong(self->exclude_unset);
 }
-static PyObject* MatchResult_get_exclude_defaults(MatchResultObject* self, void*) {
+static PyObject *MatchResult_get_exclude_defaults(MatchResultObject *self, void *) {
     return PyBool_FromLong(self->exclude_defaults);
 }
-static PyObject* MatchResult_get_exclude_none(MatchResultObject* self, void*) {
+static PyObject *MatchResult_get_exclude_none(MatchResultObject *self, void *) {
     return PyBool_FromLong(self->exclude_none);
 }
 
-static PyObject* MatchResult_get_path_params(MatchResultObject* self, PyObject*) {
-    PyObject* dict = PyDict_New();
+static PyObject *MatchResult_get_path_params(MatchResultObject *self, PyObject *) {
+    PyObject *dict = PyDict_New();
     if (!dict) return nullptr;
-    for (const auto& [k, v] : self->path_params) {
+    for (const auto &[k, v] : self->path_params) {
         PyRef key(PyUnicode_FromStringAndSize(k.c_str(), k.size()));
         PyRef val(PyUnicode_FromStringAndSize(v.c_str(), v.size()));
         if (!key || !val || PyDict_SetItem(dict, key.get(), val.get()) < 0) {
@@ -677,18 +681,13 @@ static PyGetSetDef MatchResult_getset[] = {
     {"has_response_model", (getter)MatchResult_get_has_response_model, nullptr, nullptr, nullptr},
     {"exclude_unset", (getter)MatchResult_get_exclude_unset, nullptr, nullptr, nullptr},
     {"exclude_defaults", (getter)MatchResult_get_exclude_defaults, nullptr, nullptr, nullptr},
-    {"exclude_none", (getter)MatchResult_get_exclude_none, nullptr, nullptr, nullptr},
-    {nullptr}
-};
+    {"exclude_none", (getter)MatchResult_get_exclude_none, nullptr, nullptr, nullptr}, {nullptr}};
 
 static PyMethodDef MatchResult_methods[] = {
-    {"get_path_params", (PyCFunction)MatchResult_get_path_params, METH_NOARGS, nullptr},
-    {nullptr}
-};
+    {"get_path_params", (PyCFunction)MatchResult_get_path_params, METH_NOARGS, nullptr}, {nullptr}};
 
 PyTypeObject MatchResultType = {
-    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_astraapi_core.MatchResult",
+    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0).tp_name = "_astraapi_core.MatchResult",
     .tp_basicsize = sizeof(MatchResultObject),
     .tp_dealloc = (destructor)MatchResult_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
@@ -696,21 +695,17 @@ PyTypeObject MatchResultType = {
     .tp_getset = MatchResult_getset,
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// ResponseData
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static void ResponseData_dealloc(ResponseDataObject* self) {
+static void ResponseData_dealloc(ResponseDataObject *self) {
     self->headers.~vector();
     self->body.~vector();
-    Py_TYPE(self)->tp_free((PyObject*)self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-static PyObject* ResponseData_get_status(ResponseDataObject* self, void*) {
+static PyObject *ResponseData_get_status(ResponseDataObject *self, void *) {
     return PyLong_FromLong(self->status_code);
 }
 
-static PyObject* ResponseData_start_message(ResponseDataObject* self, PyObject*) {
+static PyObject *ResponseData_start_message(ResponseDataObject *self, PyObject *) {
     PyRef msg(PyDict_New());
     if (!msg) return nullptr;
 
@@ -722,14 +717,16 @@ static PyObject* ResponseData_start_message(ResponseDataObject* self, PyObject*)
     if (!headers_list) return nullptr;
 
     for (size_t i = 0; i < self->headers.size(); i++) {
-        const auto& [name, value] = self->headers[i];
+        const auto &[name, value] = self->headers[i];
         PyRef pair(PyList_New(2));
         if (!pair) return nullptr;
-        PyObject* name_bytes = PyBytes_FromStringAndSize(
-            (const char*)name.data(), (Py_ssize_t)name.size());
-        PyObject* val_bytes = PyBytes_FromStringAndSize(
-            (const char*)value.data(), (Py_ssize_t)value.size());
-        if (!name_bytes || !val_bytes) { Py_XDECREF(name_bytes); Py_XDECREF(val_bytes); return nullptr; }
+        PyObject *name_bytes = PyBytes_FromStringAndSize((const char *)name.data(), (Py_ssize_t)name.size());
+        PyObject *val_bytes = PyBytes_FromStringAndSize((const char *)value.data(), (Py_ssize_t)value.size());
+        if (!name_bytes || !val_bytes) {
+            Py_XDECREF(name_bytes);
+            Py_XDECREF(val_bytes);
+            return nullptr;
+        }
         PyList_SET_ITEM(pair.get(), 0, name_bytes);
         PyList_SET_ITEM(pair.get(), 1, val_bytes);
         PyList_SET_ITEM(headers_list.get(), (Py_ssize_t)i, pair.release());
@@ -740,39 +737,32 @@ static PyObject* ResponseData_start_message(ResponseDataObject* self, PyObject*)
     return msg.release();
 }
 
-static PyObject* ResponseData_body_message(ResponseDataObject* self, PyObject*) {
+static PyObject *ResponseData_body_message(ResponseDataObject *self, PyObject *) {
     PyRef msg(PyDict_New());
     if (!msg) return nullptr;
 
     if (PyDict_SetItem(msg.get(), g_str_type, g_str_http_response_body) < 0) return nullptr;
-    PyRef body_bytes(PyBytes_FromStringAndSize(
-        (const char*)self->body.data(), (Py_ssize_t)self->body.size()));
+    PyRef body_bytes(PyBytes_FromStringAndSize((const char *)self->body.data(), (Py_ssize_t)self->body.size()));
     if (!body_bytes) return nullptr;
     if (PyDict_SetItem(msg.get(), g_str_body, body_bytes.get()) < 0) return nullptr;
 
     return msg.release();
 }
 
-static PyObject* ResponseData_get_body(ResponseDataObject* self, PyObject*) {
-    return PyBytes_FromStringAndSize(
-        (const char*)self->body.data(), (Py_ssize_t)self->body.size());
+static PyObject *ResponseData_get_body(ResponseDataObject *self, PyObject *) {
+    return PyBytes_FromStringAndSize((const char *)self->body.data(), (Py_ssize_t)self->body.size());
 }
 
 static PyGetSetDef ResponseData_getset[] = {
-    {"status", (getter)ResponseData_get_status, nullptr, nullptr, nullptr},
-    {nullptr}
-};
+    {"status", (getter)ResponseData_get_status, nullptr, nullptr, nullptr}, {nullptr}};
 
 static PyMethodDef ResponseData_methods[] = {
     {"start_message", (PyCFunction)ResponseData_start_message, METH_NOARGS, nullptr},
     {"body_message", (PyCFunction)ResponseData_body_message, METH_NOARGS, nullptr},
-    {"get_body", (PyCFunction)ResponseData_get_body, METH_NOARGS, nullptr},
-    {nullptr}
-};
+    {"get_body", (PyCFunction)ResponseData_get_body, METH_NOARGS, nullptr}, {nullptr}};
 
 PyTypeObject ResponseDataType = {
-    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_astraapi_core.ResponseData",
+    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0).tp_name = "_astraapi_core.ResponseData",
     .tp_basicsize = sizeof(ResponseDataObject),
     .tp_dealloc = (destructor)ResponseData_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
@@ -780,22 +770,18 @@ PyTypeObject ResponseDataType = {
     .tp_getset = ResponseData_getset,
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CoreApp
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
-    CoreAppObject* self = (CoreAppObject*)type->tp_alloc(type, 0);
+static PyObject *CoreApp_new(PyTypeObject *type, PyObject *, PyObject *) {
+    CoreAppObject *self = (CoreAppObject *)type->tp_alloc(type, 0);
     if (self) {
         new (&self->router) Router();
         new (&self->routes) std::vector<RouteInfo>();
-        self->routes.reserve(64);  // pre-allocate to avoid reallocation invalidating string_view keys
+        self->routes.reserve(64); // pre-allocate to avoid reallocation invalidating string_view keys
         new (&self->route_paths) std::vector<std::string>();
         self->route_paths.reserve(64);
         new (&self->routes_mutex) std::shared_mutex();
         new (&self->cors_config) AtomicSharedPtr<CorsConfig>();
         new (&self->trusted_host_config) AtomicSharedPtr<TrustedHostConfig>();
-        new (&self->exception_handlers) std::unordered_map<uint16_t, PyObject*>();
+        new (&self->exception_handlers) std::unordered_map<uint16_t, PyObject *>();
         self->route_counter.store(0);
         self->counters.total_requests = 0;
         self->counters.active_requests = 0;
@@ -823,12 +809,12 @@ static PyObject* CoreApp_new(PyTypeObject* type, PyObject*, PyObject*) {
         new (&self->current_client_ip) std::string();
         self->post_response_hook = nullptr;
     }
-    return (PyObject*)self;
+    return (PyObject *)self;
 }
 
-static void CoreApp_dealloc(CoreAppObject* self) {
+static void CoreApp_dealloc(CoreAppObject *self) {
     // Release Python refs in routes
-    for (auto& route : self->routes) {
+    for (auto &route : self->routes) {
         Py_XDECREF(route.endpoint);
         Py_XDECREF(route.response_model_field);
         Py_XDECREF(route.response_class);
@@ -842,8 +828,8 @@ static void CoreApp_dealloc(CoreAppObject* self) {
             Py_XDECREF(route.fast_spec->model_validate);
             Py_XDECREF(route.fast_spec->py_body_param_name);
             // Release pre-interned py_field_name + default_value refs
-            auto release_specs = [](std::vector<FieldSpec>& specs) {
-                for (auto& fs : specs) {
+            auto release_specs = [](std::vector<FieldSpec> &specs) {
+                for (auto &fs : specs) {
                     Py_XDECREF(fs.py_field_name);
                     Py_XDECREF(fs.default_value);
                 }
@@ -854,7 +840,7 @@ static void CoreApp_dealloc(CoreAppObject* self) {
             release_specs(route.fast_spec->cookie_specs);
         }
     }
-    for (auto& [_, handler] : self->exception_handlers) {
+    for (auto &[_, handler] : self->exception_handlers) {
         Py_XDECREF(handler);
     }
     self->router.~Router();
@@ -883,31 +869,31 @@ static void CoreApp_dealloc(CoreAppObject* self) {
         self->rate_limit_shards[i].mutex.~mutex();
     }
     self->current_client_ip.~basic_string();
-    Py_TYPE(self)->tp_free((PyObject*)self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-// ── Forward declarations ─────────────────────────────────────────────────────
-static const char* status_reason(int code);
+static const char *status_reason(int code);
 
-// Forward declarations for pre-cached status lines (defined after status_reason)
-struct CachedStatusLine { const char* data; size_t len; };
-struct CachedJsonPrefix { const char* data; size_t len; };
+struct CachedStatusLine {
+    const char *data;
+    size_t len;
+};
+struct CachedJsonPrefix {
+    const char *data;
+    size_t len;
+};
 static CachedStatusLine s_status_lines[600];
 static CachedJsonPrefix s_json_prefixes[600];
 
-// ── CoreApp methods ─────────────────────────────────────────────────────────
-
 // Build a complete HTTP response for text/html or application/json content
-static PyObject* build_static_response(
-    int status_code, const char* content_type, const char* body, size_t body_len)
-{
+static PyObject *build_static_response(int status_code, const char *content_type, const char *body, size_t body_len) {
     auto buf = acquire_buffer();
     buf.reserve(256 + body_len);
 
     // Use pre-cached status line if available
     if (status_code >= 0 && status_code < 600 && s_status_lines[status_code].data) {
-        const auto& sl = s_status_lines[status_code];
-        buf_append(buf, sl.data, sl.len - 2);  // exclude \r\n (added with ct_pre below)
+        const auto &sl = s_status_lines[status_code];
+        buf_append(buf, sl.data, sl.len - 2); // exclude \r\n (added with ct_pre below)
     } else {
         static const char prefix[] = "HTTP/1.1 ";
         buf_append(buf, prefix, sizeof(prefix) - 1);
@@ -915,19 +901,19 @@ static PyObject* build_static_response(
         int sn = fast_i64_to_buf(sc_buf, status_code);
         buf_append(buf, sc_buf, sn);
         buf.push_back(' ');
-        const char* reason = status_reason(status_code);
+        const char *reason = status_reason(status_code);
         size_t rlen = strlen(reason);
         buf_append(buf, reason, rlen);
     }
 
     // Content-Type header
-    const char* ct_pre = "\r\ncontent-type: ";
+    const char *ct_pre = "\r\ncontent-type: ";
     buf_append(buf, ct_pre, 16);
     size_t ct_len = strlen(content_type);
     buf_append(buf, content_type, ct_len);
 
     // Content-Length header
-    const char* cl_pre = "\r\ncontent-length: ";
+    const char *cl_pre = "\r\ncontent-length: ";
     buf_append(buf, cl_pre, 18);
     char cl_buf[20];
     int cl_n = fast_i64_to_buf(cl_buf, (long long)body_len);
@@ -940,12 +926,11 @@ static PyObject* build_static_response(
     // Body
     buf_append(buf, body, body_len);
 
-    PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
     return result;
 }
 
-// Swagger UI HTML template
 static const char SWAGGER_UI_HTML[] = R"(<!DOCTYPE html>
 <html>
 <head>
@@ -976,7 +961,6 @@ window.ui = ui
 </body>
 </html>)";
 
-// ReDoc HTML template
 static const char REDOC_HTML[] = R"(<!DOCTYPE html>
 <html>
 <head>
@@ -991,7 +975,6 @@ static const char REDOC_HTML[] = R"(<!DOCTYPE html>
 </body>
 </html>)";
 
-// OAuth2 redirect HTML (from Swagger UI oauth2-redirect.html)
 static const char OAUTH2_REDIRECT_HTML[] = R"oauth2(<!doctype html>
 <html lang="en-US">
 <body onload="run()">
@@ -1058,7 +1041,7 @@ static const char OAUTH2_REDIRECT_HTML[] = R"oauth2(<!doctype html>
     }
 </script>)oauth2";
 
-static PyObject* CoreApp_set_urls(CoreAppObject* self, PyObject* args) {
+static PyObject *CoreApp_set_urls(CoreAppObject *self, PyObject *args) {
     // set_urls(openapi_url, docs_url, redoc_url, oauth2_redirect_url)
     const char *openapi_url = nullptr, *docs_url = nullptr, *redoc_url = nullptr, *oauth2_url = nullptr;
     if (!PyArg_ParseTuple(args, "zzzz", &openapi_url, &docs_url, &redoc_url, &oauth2_url)) return nullptr;
@@ -1069,7 +1052,7 @@ static PyObject* CoreApp_set_urls(CoreAppObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_set_openapi_schema(CoreAppObject *self, PyObject *arg) {
     // arg = OpenAPI schema as JSON string (Python str)
     if (!PyUnicode_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected str (JSON schema)");
@@ -1077,13 +1060,12 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
     }
 
     Py_ssize_t json_len;
-    const char* json_data = PyUnicode_AsUTF8AndSize(arg, &json_len);
+    const char *json_data = PyUnicode_AsUTF8AndSize(arg, &json_len);
     if (!json_data) return nullptr;
 
     // Build cached /openapi.json response
     Py_XDECREF(self->openapi_json_resp);
-    self->openapi_json_resp = build_static_response(
-        200, "application/json", json_data, (size_t)json_len);
+    self->openapi_json_resp = build_static_response(200, "application/json", json_data, (size_t)json_len);
     // Store content for middleware
     Py_XDECREF(self->openapi_json_content);
     self->openapi_json_content = PyUnicode_FromStringAndSize(json_data, json_len);
@@ -1091,23 +1073,22 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
     // Build Swagger UI HTML with substituted title, openapi_url, and oauth2_redirect_url
     {
         const std::string title = "AstraAPI - Swagger UI";
-        const std::string& openapi_url = self->openapi_url;
-        const std::string& oauth2_url = self->oauth2_redirect_url;
+        const std::string &openapi_url = self->openapi_url;
+        const std::string &oauth2_url = self->oauth2_redirect_url;
         // SWAGGER_UI_HTML has 4 %s placeholders: title, openapi_url, extra_params, oauth2_redirect_url
-        const std::string& extra_params = self->swagger_ui_extra_params;
+        const std::string &extra_params = self->swagger_ui_extra_params;
         std::string html;
         html.reserve(4096);
-        int written = snprintf(nullptr, 0, SWAGGER_UI_HTML,
-            title.c_str(), openapi_url.c_str(), extra_params.c_str(), oauth2_url.c_str());
+        int written = snprintf(nullptr, 0, SWAGGER_UI_HTML, title.c_str(), openapi_url.c_str(), extra_params.c_str(),
+            oauth2_url.c_str());
         if (written > 0) {
             html.resize((size_t)written + 1);
-            snprintf(html.data(), html.size(), SWAGGER_UI_HTML,
-                title.c_str(), openapi_url.c_str(), extra_params.c_str(), oauth2_url.c_str());
+            snprintf(html.data(), html.size(), SWAGGER_UI_HTML, title.c_str(), openapi_url.c_str(),
+                extra_params.c_str(), oauth2_url.c_str());
             html.resize((size_t)written);
         }
         Py_XDECREF(self->docs_html_resp);
-        self->docs_html_resp = build_static_response(
-            200, "text/html; charset=utf-8", html.c_str(), html.size());
+        self->docs_html_resp = build_static_response(200, "text/html; charset=utf-8", html.c_str(), html.size());
         Py_XDECREF(self->docs_html_content);
         self->docs_html_content = PyUnicode_FromStringAndSize(html.c_str(), (Py_ssize_t)html.size());
     }
@@ -1115,7 +1096,7 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
     // Build ReDoc HTML with substituted title and openapi_url
     {
         const std::string title = "AstraAPI - ReDoc";
-        const std::string& openapi_url = self->openapi_url;
+        const std::string &openapi_url = self->openapi_url;
         // REDOC_HTML has 2 %s placeholders: title, openapi_url
         std::string html;
         int written = snprintf(nullptr, 0, REDOC_HTML, title.c_str(), openapi_url.c_str());
@@ -1125,44 +1106,45 @@ static PyObject* CoreApp_set_openapi_schema(CoreAppObject* self, PyObject* arg) 
             html.resize((size_t)written);
         }
         Py_XDECREF(self->redoc_html_resp);
-        self->redoc_html_resp = build_static_response(
-            200, "text/html; charset=utf-8", html.c_str(), html.size());
+        self->redoc_html_resp = build_static_response(200, "text/html; charset=utf-8", html.c_str(), html.size());
         Py_XDECREF(self->redoc_html_content);
         self->redoc_html_content = PyUnicode_FromStringAndSize(html.c_str(), (Py_ssize_t)html.size());
     }
 
     // Build cached /docs/oauth2-redirect response
     Py_XDECREF(self->oauth2_redirect_html_resp);
-    self->oauth2_redirect_html_resp = build_static_response(
-        200, "text/html; charset=utf-8",
-        OAUTH2_REDIRECT_HTML, sizeof(OAUTH2_REDIRECT_HTML) - 1);
+    self->oauth2_redirect_html_resp =
+        build_static_response(200, "text/html; charset=utf-8", OAUTH2_REDIRECT_HTML, sizeof(OAUTH2_REDIRECT_HTML) - 1);
     Py_XDECREF(self->oauth2_redirect_html_content);
-    self->oauth2_redirect_html_content = PyUnicode_FromStringAndSize(
-        OAUTH2_REDIRECT_HTML, (Py_ssize_t)(sizeof(OAUTH2_REDIRECT_HTML) - 1));
+    self->oauth2_redirect_html_content =
+        PyUnicode_FromStringAndSize(OAUTH2_REDIRECT_HTML, (Py_ssize_t)(sizeof(OAUTH2_REDIRECT_HTML) - 1));
 
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_set_swagger_ui_parameters(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_set_swagger_ui_parameters(CoreAppObject *self, PyObject *arg) {
     // arg = JSON string of extra SwaggerUIBundle parameters
-    if (!PyUnicode_Check(arg)) { PyErr_SetString(PyExc_TypeError, "expected str"); return nullptr; }
-    const char* params = PyUnicode_AsUTF8(arg);
+    if (!PyUnicode_Check(arg)) {
+        PyErr_SetString(PyExc_TypeError, "expected str");
+        return nullptr;
+    }
+    const char *params = PyUnicode_AsUTF8(arg);
     if (!params) return nullptr;
     self->swagger_ui_extra_params = params;
     // Rebuild docs HTML if already built
     if (self->docs_html_resp) {
         const std::string title = "AstraAPI - Swagger UI";
-        const std::string& openapi_url = self->openapi_url;
-        const std::string& oauth2_url = self->oauth2_redirect_url;
-        const std::string& extra_params = self->swagger_ui_extra_params;
+        const std::string &openapi_url = self->openapi_url;
+        const std::string &oauth2_url = self->oauth2_redirect_url;
+        const std::string &extra_params = self->swagger_ui_extra_params;
         std::string html;
         html.reserve(4096);
-        int written = snprintf(nullptr, 0, SWAGGER_UI_HTML,
-            title.c_str(), openapi_url.c_str(), extra_params.c_str(), oauth2_url.c_str());
+        int written = snprintf(nullptr, 0, SWAGGER_UI_HTML, title.c_str(), openapi_url.c_str(), extra_params.c_str(),
+            oauth2_url.c_str());
         if (written > 0) {
             html.resize((size_t)written + 1);
-            snprintf(html.data(), html.size(), SWAGGER_UI_HTML,
-                title.c_str(), openapi_url.c_str(), extra_params.c_str(), oauth2_url.c_str());
+            snprintf(html.data(), html.size(), SWAGGER_UI_HTML, title.c_str(), openapi_url.c_str(),
+                extra_params.c_str(), oauth2_url.c_str());
             html.resize((size_t)written);
         }
         Py_XDECREF(self->docs_html_resp);
@@ -1173,28 +1155,28 @@ static PyObject* CoreApp_set_swagger_ui_parameters(CoreAppObject* self, PyObject
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_next_route_id(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_next_route_id(CoreAppObject *self, PyObject *) {
     uint64_t id = self->route_counter.fetch_add(1, std::memory_order_relaxed);
     return PyLong_FromUnsignedLongLong(id);
 }
 
-static PyObject* CoreApp_record_request_start(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_record_request_start(CoreAppObject *self, PyObject *) {
     ++self->counters.total_requests;
     ++self->counters.active_requests;
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_record_request_end(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_record_request_end(CoreAppObject *self, PyObject *) {
     --self->counters.active_requests;
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_record_error(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_record_error(CoreAppObject *self, PyObject *) {
     ++self->counters.total_errors;
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_route_count(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_route_count(CoreAppObject *self, PyObject *) {
     // F-6: After freeze_routes(), routes are read-only — skip the lock.
     if (!self->routes_frozen.load(std::memory_order_acquire)) {
         std::shared_lock lock(self->routes_mutex);
@@ -1203,22 +1185,22 @@ static PyObject* CoreApp_route_count(CoreAppObject* self, PyObject*) {
     return PyLong_FromSsize_t((Py_ssize_t)self->routes.size());
 }
 
-static PyObject* CoreApp_freeze_routes(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_freeze_routes(CoreAppObject *self, PyObject *) {
     self->routes_frozen.store(true, std::memory_order_release);
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_begin_registration(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_begin_registration(CoreAppObject *self, PyObject *) {
     self->registering.store(true, std::memory_order_release);
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_end_registration(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_end_registration(CoreAppObject *self, PyObject *) {
     self->registering.store(false, std::memory_order_release);
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_get_metrics(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_get_metrics(CoreAppObject *self, PyObject *) {
     PyRef dict(PyDict_New());
     if (!dict) return nullptr;
     PyRef tr(PyLong_FromUnsignedLongLong(self->counters.total_requests));
@@ -1236,11 +1218,12 @@ static PyObject* CoreApp_get_metrics(CoreAppObject* self, PyObject*) {
     if (PyDict_SetItemString(dict.get(), "total_requests", tr.get()) < 0 ||
         PyDict_SetItemString(dict.get(), "active_requests", ar.get()) < 0 ||
         PyDict_SetItemString(dict.get(), "total_errors", te.get()) < 0 ||
-        PyDict_SetItemString(dict.get(), "route_count", rco.get()) < 0) return nullptr;
+        PyDict_SetItemString(dict.get(), "route_count", rco.get()) < 0)
+        return nullptr;
     return dict.release();
 }
 
-static PyObject* CoreApp_get_routes(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_get_routes(CoreAppObject *self, PyObject *) {
     // F-6: Skip lock when routes are frozen (startup is done)
     const bool frozen = self->routes_frozen.load(std::memory_order_acquire);
     std::optional<std::shared_lock<std::shared_mutex>> lock;
@@ -1248,87 +1231,76 @@ static PyObject* CoreApp_get_routes(CoreAppObject* self, PyObject*) {
     PyRef list(PyList_New((Py_ssize_t)self->route_paths.size()));
     if (!list) return nullptr;
     for (size_t i = 0; i < self->route_paths.size(); i++) {
-        PyObject* s = PyUnicode_FromStringAndSize(
-            self->route_paths[i].c_str(), (Py_ssize_t)self->route_paths[i].size());
+        PyObject *s =
+            PyUnicode_FromStringAndSize(self->route_paths[i].c_str(), (Py_ssize_t)self->route_paths[i].size());
         if (!s) return nullptr;
         PyList_SET_ITEM(list.get(), (Py_ssize_t)i, s);
     }
     return list.release();
 }
 
-// ── Method string → bitmask helpers ─────────────────────────────────────────
 // Convert HTTP method string to MethodBit bitmask. Returns 0 for unrecognized.
 // Expects uppercase input (as sent over HTTP per RFC 7230 §3.1.1).
 
-static inline uint8_t method_str_to_bit(const char* method, size_t len) {
+static inline uint8_t method_str_to_bit(const char *method, size_t len) {
     switch (len) {
-        case 3:
-            if (memcmp(method, "GET", 3) == 0) return METHOD_GET;
-            if (memcmp(method, "PUT", 3) == 0) return METHOD_PUT;
-            break;
-        case 4:
-            if (memcmp(method, "POST", 4) == 0) return METHOD_POST;
-            if (memcmp(method, "HEAD", 4) == 0) return METHOD_HEAD;
-            break;
-        case 5:
-            if (memcmp(method, "PATCH", 5) == 0) return METHOD_PATCH;
-            if (memcmp(method, "TRACE", 5) == 0) return METHOD_TRACE;
-            break;
-        case 6:
-            if (memcmp(method, "DELETE", 6) == 0) return METHOD_DELETE;
-            break;
-        case 7:
-            if (memcmp(method, "OPTIONS", 7) == 0) return METHOD_OPTIONS;
-            break;
+    case 3:
+        if (memcmp(method, "GET", 3) == 0) return METHOD_GET;
+        if (memcmp(method, "PUT", 3) == 0) return METHOD_PUT;
+        break;
+    case 4:
+        if (memcmp(method, "POST", 4) == 0) return METHOD_POST;
+        if (memcmp(method, "HEAD", 4) == 0) return METHOD_HEAD;
+        break;
+    case 5:
+        if (memcmp(method, "PATCH", 5) == 0) return METHOD_PATCH;
+        if (memcmp(method, "TRACE", 5) == 0) return METHOD_TRACE;
+        break;
+    case 6:
+        if (memcmp(method, "DELETE", 6) == 0) return METHOD_DELETE;
+        break;
+    case 7:
+        if (memcmp(method, "OPTIONS", 7) == 0) return METHOD_OPTIONS;
+        break;
     }
     return 0;
 }
 
 // Case-insensitive variant for route registration (methods may arrive lowercase).
-static inline uint8_t method_str_to_bit_ci(const char* method, size_t len) {
+static inline uint8_t method_str_to_bit_ci(const char *method, size_t len) {
     if (len == 0 || len > 7) return 0;
     // Uppercase into stack buffer
     char upper[8];
     for (size_t i = 0; i < len; i++) {
-        upper[i] = (method[i] >= 'a' && method[i] <= 'z')
-            ? static_cast<char>(method[i] - 32) : method[i];
+        upper[i] = (method[i] >= 'a' && method[i] <= 'z') ? static_cast<char>(method[i] - 32) : method[i];
     }
     return method_str_to_bit(upper, len);
 }
 
-// ── add_route ───────────────────────────────────────────────────────────────
+static PyObject *CoreApp_add_route(CoreAppObject *self, PyObject *args, PyObject *kwargs) {
+    static const char *kwlist[] = {"path", "methods", "endpoint", "is_coroutine", "status_code", "response_model_field",
+        "response_class", "include", "exclude", "exclude_unset", "exclude_defaults", "exclude_none", "tags", "summary",
+        "description", "operation_id", "has_body", "is_form", "is_multi_method", nullptr};
 
-static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {
-        "path", "methods", "endpoint", "is_coroutine", "status_code",
-        "response_model_field", "response_class", "include", "exclude",
-        "exclude_unset", "exclude_defaults", "exclude_none",
-        "tags", "summary", "description", "operation_id",
-        "has_body", "is_form", "is_multi_method", nullptr
-    };
-
-    const char* path = nullptr;
-    PyObject* methods_list = nullptr;
-    PyObject* endpoint = nullptr;
+    const char *path = nullptr;
+    PyObject *methods_list = nullptr;
+    PyObject *endpoint = nullptr;
     int is_coroutine = 0;
     int status_code = 200;
-    PyObject* response_model_field = Py_None;
-    PyObject* response_class = Py_None;
-    PyObject* include = Py_None;
-    PyObject* exclude = Py_None;
+    PyObject *response_model_field = Py_None;
+    PyObject *response_class = Py_None;
+    PyObject *include = Py_None;
+    PyObject *exclude = Py_None;
     int exclude_unset = 0, exclude_defaults = 0, exclude_none = 0;
-    PyObject* tags_list = Py_None;
-    const char* summary = nullptr;
-    const char* description = nullptr;
-    const char* operation_id = nullptr;
+    PyObject *tags_list = Py_None;
+    const char *summary = nullptr;
+    const char *description = nullptr;
+    const char *operation_id = nullptr;
     int has_body = 0, is_form = 0, is_multi_method_arg = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-            "sOOp|HOOOOpppOzzzppp", (char**)kwlist,
-            &path, &methods_list, &endpoint, &is_coroutine,
-            &status_code, &response_model_field, &response_class,
-            &include, &exclude, &exclude_unset, &exclude_defaults, &exclude_none,
-            &tags_list, &summary, &description, &operation_id,
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "sOOp|HOOOOpppOzzzppp", (char **)kwlist, &path, &methods_list,
+            &endpoint, &is_coroutine, &status_code, &response_model_field, &response_class, &include, &exclude,
+            &exclude_unset, &exclude_defaults, &exclude_none, &tags_list, &summary, &description, &operation_id,
             &has_body, &is_form, &is_multi_method_arg)) {
         return nullptr;
     }
@@ -1338,8 +1310,8 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
 
     Py_ssize_t nmethod = PyList_Size(methods_list);
     for (Py_ssize_t i = 0; i < nmethod; i++) {
-        PyObject* m = PyList_GET_ITEM(methods_list, i);
-        const char* ms = PyUnicode_AsUTF8(m);
+        PyObject *m = PyList_GET_ITEM(methods_list, i);
+        const char *ms = PyUnicode_AsUTF8(m);
         if (!ms) return nullptr;
         route.methods.emplace_back(ms);
         // Build method bitmask for O(1) method checking (case-insensitive for registration)
@@ -1351,7 +1323,8 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
     route.is_coroutine = (bool)is_coroutine;
     route.status_code = (uint16_t)status_code;
 
-    route.response_model_field = (response_model_field != Py_None) ? (Py_INCREF(response_model_field), response_model_field) : nullptr;
+    route.response_model_field =
+        (response_model_field != Py_None) ? (Py_INCREF(response_model_field), response_model_field) : nullptr;
     route.response_class = (response_class != Py_None) ? (Py_INCREF(response_class), response_class) : nullptr;
     route.include = (include != Py_None) ? (Py_INCREF(include), include) : nullptr;
     route.exclude = (exclude != Py_None) ? (Py_INCREF(exclude), exclude) : nullptr;
@@ -1362,7 +1335,7 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
     if (tags_list != Py_None && PyList_Check(tags_list)) {
         Py_ssize_t ntags = PyList_Size(tags_list);
         for (Py_ssize_t i = 0; i < ntags; i++) {
-            const char* t = PyUnicode_AsUTF8(PyList_GET_ITEM(tags_list, i));
+            const char *t = PyUnicode_AsUTF8(PyList_GET_ITEM(tags_list, i));
             if (t) route.tags.emplace_back(t);
         }
     }
@@ -1377,24 +1350,27 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
     // Skip mutex during registration phase (protected by Python _global_sync_lock)
     {
         std::optional<std::unique_lock<std::shared_mutex>> lock;
-        if (!self->registering.load(std::memory_order_relaxed))
-            lock.emplace(self->routes_mutex);
+        if (!self->registering.load(std::memory_order_relaxed)) lock.emplace(self->routes_mutex);
         // Check if EXACT path already registered — scan route_paths for exact string match.
         // Must NOT use router.at() here: that does wildcard matching and would incorrectly
         // merge /openapi.json into /{param} routes.
         std::string_view path_sv(path);
         int existing_idx = -1;
         for (size_t i = 0; i < self->route_paths.size(); i++) {
-            if (self->route_paths[i] == path_sv) { existing_idx = (int)i; break; }
+            if (self->route_paths[i] == path_sv) {
+                existing_idx = (int)i;
+                break;
+            }
         }
         if (existing_idx >= 0) {
-            RouteInfo& er = self->routes[existing_idx];
+            RouteInfo &er = self->routes[existing_idx];
             er.method_mask |= route.method_mask;
             er.has_body = er.has_body || route.has_body;
             er.is_multi_method = true;
             if (er.fast_spec.has_value()) {
-                auto& fs = *er.fast_spec;
-                Py_XDECREF(fs.body_params); fs.body_params = nullptr;
+                auto &fs = *er.fast_spec;
+                Py_XDECREF(fs.body_params);
+                fs.body_params = nullptr;
                 fs.has_body_params = false;
                 fs.body_param_name = std::nullopt;
             }
@@ -1411,11 +1387,9 @@ static PyObject* CoreApp_add_route(CoreAppObject* self, PyObject* args, PyObject
     return PyLong_FromUnsignedLongLong(route.route_id);
 }
 
-// ── match_request ───────────────────────────────────────────────────────────
-
-static PyObject* CoreApp_match_request(CoreAppObject* self, PyObject* args) {
-    const char* method;
-    const char* path;
+static PyObject *CoreApp_match_request(CoreAppObject *self, PyObject *args) {
+    const char *method;
+    const char *path;
     if (!PyArg_ParseTuple(args, "ss", &method, &path)) return nullptr;
 
     // F-6: Skip lock when routes are frozen (post-startup normal path)
@@ -1429,14 +1403,16 @@ static PyObject* CoreApp_match_request(CoreAppObject* self, PyObject* args) {
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) Py_RETURN_NONE;
 
-    const auto& route = self->routes[idx];
+    const auto &route = self->routes[idx];
 
     if (route.method_mask) {
         uint8_t req_method = method_str_to_bit_ci(method, strlen(method));
-        if (!(route.method_mask & req_method)) { Py_RETURN_NONE; }
+        if (!(route.method_mask & req_method)) {
+            Py_RETURN_NONE;
+        }
     }
 
-    MatchResultObject* mr = PyObject_New(MatchResultObject, &MatchResultType);
+    MatchResultObject *mr = PyObject_New(MatchResultObject, &MatchResultType);
     if (!mr) return nullptr;
     mr->route_index = (Py_ssize_t)idx;
     mr->route_id = route.route_id;
@@ -1451,17 +1427,13 @@ static PyObject* CoreApp_match_request(CoreAppObject* self, PyObject* args) {
     new (&mr->path_params) std::vector<std::pair<std::string, std::string>>();
     mr->path_params.reserve(match->param_count);
     for (int i = 0; i < match->param_count; i++) {
-        mr->path_params.emplace_back(
-            std::string(match->params[i].name),
-            std::string(match->params[i].value));
+        mr->path_params.emplace_back(std::string(match->params[i].name), std::string(match->params[i].value));
     }
 
-    return (PyObject*)mr;
+    return (PyObject *)mr;
 }
 
-// ── get_endpoint ────────────────────────────────────────────────────────────
-
-static PyObject* CoreApp_get_endpoint(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_get_endpoint(CoreAppObject *self, PyObject *arg) {
     Py_ssize_t idx = PyLong_AsSsize_t(arg);
     if (idx < 0 && PyErr_Occurred()) return nullptr;
 
@@ -1474,14 +1446,12 @@ static PyObject* CoreApp_get_endpoint(CoreAppObject* self, PyObject* arg) {
         PyErr_SetString(PyExc_IndexError, "route index out of range");
         return nullptr;
     }
-    PyObject* ep = self->routes[idx].endpoint;
+    PyObject *ep = self->routes[idx].endpoint;
     Py_INCREF(ep);
     return ep;
 }
 
-// ── get_response_model_field ────────────────────────────────────────────────
-
-static PyObject* CoreApp_get_response_model_field(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_get_response_model_field(CoreAppObject *self, PyObject *arg) {
     Py_ssize_t idx = PyLong_AsSsize_t(arg);
     if (idx < 0 && PyErr_Occurred()) return nullptr;
 
@@ -1490,15 +1460,13 @@ static PyObject* CoreApp_get_response_model_field(CoreAppObject* self, PyObject*
     if (!frozen) lock.emplace(self->routes_mutex);
 
     if (idx < 0 || idx >= (Py_ssize_t)self->routes.size()) Py_RETURN_NONE;
-    PyObject* f = self->routes[idx].response_model_field;
+    PyObject *f = self->routes[idx].response_model_field;
     if (!f) Py_RETURN_NONE;
     Py_INCREF(f);
     return f;
 }
 
-// ── get_response_filters ────────────────────────────────────────────────────
-
-static PyObject* CoreApp_get_response_filters(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_get_response_filters(CoreAppObject *self, PyObject *arg) {
     Py_ssize_t idx = PyLong_AsSsize_t(arg);
     if (idx < 0 && PyErr_Occurred()) return nullptr;
 
@@ -1509,122 +1477,121 @@ static PyObject* CoreApp_get_response_filters(CoreAppObject* self, PyObject* arg
     if (idx < 0 || idx >= (Py_ssize_t)self->routes.size()) {
         return Py_BuildValue("(OO)", Py_None, Py_None);
     }
-    const auto& route = self->routes[idx];
-    PyObject* inc = route.include ? route.include : Py_None;
-    PyObject* exc = route.exclude ? route.exclude : Py_None;
+    const auto &route = self->routes[idx];
+    PyObject *inc = route.include ? route.include : Py_None;
+    PyObject *exc = route.exclude ? route.exclude : Py_None;
     return PyTuple_Pack(2, inc, exc);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HELPER: coerce string_view value to PyObject* based on ParamType
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static inline PyObject* coerce_param(std::string_view val, ParamType type_tag) {
+static inline PyObject *coerce_param(std::string_view val, ParamType type_tag) {
     switch (type_tag) {
-        case TYPE_INT: {
-            // Return original string so param_validator passes it to Pydantic.
-            // This ensures validation error 'input' field shows the raw string
-            // (e.g. "42") not the coerced int (42), matching standard AstraAPI.
-            // Pydantic coerces "42" -> 42 on success; on failure shows "42".
-            return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
+    case TYPE_INT: {
+        // Return original string so param_validator passes it to Pydantic.
+        // This ensures validation error 'input' field shows the raw string
+        // (e.g. "42") not the coerced int (42), matching standard AstraAPI.
+        return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
+    }
+    case TYPE_FLOAT: {
+        // Return original string so that param_validator passes the original
+        // string to Pydantic — ensuring validation error 'input' field shows
+        // the raw string value ('2') not the coerced float (2.0), matching
+        // standard AstraAPI behaviour.
+        return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
+    }
+    case TYPE_BOOL: {
+        // Only accept the standard boolean string representations.
+        // Any other string (e.g. 'foobar', '42') is returned as-is so that
+        // param_validator produces a proper 422 validation error.
+        if (val == "true" || val == "True" || val == "1" || val == "yes" || val == "Yes" || val == "on" ||
+            val == "On") {
+            Py_RETURN_TRUE;
         }
-        case TYPE_FLOAT: {
-            // Return original string so that param_validator passes the original
-            // string to Pydantic — ensuring validation error 'input' field shows
-            // the raw string value ('2') not the coerced float (2.0), matching
-            // standard AstraAPI behaviour.
-            return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
+        if (val == "false" || val == "False" || val == "0" || val == "no" || val == "No" || val == "off" ||
+            val == "Off") {
+            Py_RETURN_FALSE;
         }
-        case TYPE_BOOL: {
-            // Only accept the standard boolean string representations.
-            // Any other string (e.g. 'foobar', '42') is returned as-is so that
-            // param_validator produces a proper 422 validation error.
-            if (val == "true" || val == "True" || val == "1" ||
-                val == "yes"  || val == "Yes"  || val == "on" || val == "On") {
-                Py_RETURN_TRUE;
-            }
-            if (val == "false" || val == "False" || val == "0" ||
-                val == "no"    || val == "No"    || val == "off" || val == "Off") {
-                Py_RETURN_FALSE;
-            }
-            // Invalid bool string — return as-is for proper 422 from param_validator
-            return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
-        }
-        default:
-            return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
+        // Invalid bool string — return as-is for proper 422 from param_validator
+        return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
+    }
+    default:
+        return PyUnicode_FromStringAndSize(val.data(), (Py_ssize_t)val.size());
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HELPER: Log Python error to stderr before clearing (replaces silent PyErr_Clear)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static void log_and_clear_pyerr(const char* context) {
+static void log_and_clear_pyerr(const char *context) {
     if (!PyErr_Occurred()) return;
     PyObject *type, *value, *tb;
     PyErr_Fetch(&type, &value, &tb);
     PyErr_NormalizeException(&type, &value, &tb);
     PyRef val_str(value ? PyObject_Str(value) : nullptr);
-    const char* msg = val_str ? PyUnicode_AsUTF8(val_str.get()) : "<unknown>";
+    const char *msg = val_str ? PyUnicode_AsUTF8(val_str.get()) : "<unknown>";
     fprintf(stderr, "[astraapi-cpp] %s: %s\n", context, msg ? msg : "<unknown>");
-    Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(tb);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HELPER: Build 500 error tuple from pre-built constants
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static inline PyObject* build_500_tuple() {
+static inline PyObject *build_500_tuple() {
     // PyTuple_Pack INCREFs each item internally — no explicit INCREF needed
     return PyTuple_Pack(2, g_500_start, g_500_body);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HELPER: Fast (consumed, True) tuple — avoids PyTuple_Pack varargs overhead
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static inline PyObject* make_consumed_true(CoreAppObject* self, size_t consumed) {
+static inline PyObject *make_consumed_true(CoreAppObject *self, size_t consumed) {
     self->last_consumed = (Py_ssize_t)consumed;
     Py_RETURN_TRUE;
 }
 
-// HELPER: Fast (consumed, obj) tuple — obj ref is stolen. Also sets last_consumed for Python.
-static inline PyObject* make_consumed_obj(CoreAppObject* self, size_t consumed, PyObject* obj) {
+static inline PyObject *make_consumed_obj(CoreAppObject *self, size_t consumed, PyObject *obj) {
     self->last_consumed = (Py_ssize_t)consumed;
-    PyObject* c = PyLong_FromLongLong((long long)consumed);
-    if (!c) { Py_DECREF(obj); return nullptr; }
-    PyObject* t = PyTuple_New(2);
-    if (!t) { Py_DECREF(c); Py_DECREF(obj); return nullptr; }
+    PyObject *c = PyLong_FromLongLong((long long)consumed);
+    if (!c) {
+        Py_DECREF(obj);
+        return nullptr;
+    }
+    PyObject *t = PyTuple_New(2);
+    if (!t) {
+        Py_DECREF(c);
+        Py_DECREF(obj);
+        return nullptr;
+    }
     PyTuple_SET_ITEM(t, 0, c);
     PyTuple_SET_ITEM(t, 1, obj);
     return t;
 }
 
-// HELPER: Build "mw" tuple for static routes when HTTP middleware is active
-static inline PyObject* make_mw_tuple(CoreAppObject* self, const ParsedHttpRequest& req,
-                                       PyObject* content_obj, int status_code) {
-    static PyObject* s_mw_tag = nullptr;
+static inline PyObject *make_mw_tuple(CoreAppObject *self, const ParsedHttpRequest &req, PyObject *content_obj,
+    int status_code) {
+    static PyObject *s_mw_tag = nullptr;
     if (!s_mw_tag) s_mw_tag = PyUnicode_InternFromString("mw");
     Py_INCREF(s_mw_tag);
     Py_INCREF(content_obj);
-    PyObject* ka = req.keep_alive ? Py_True : Py_False; Py_INCREF(ka);
+    PyObject *ka = req.keep_alive ? Py_True : Py_False;
+    Py_INCREF(ka);
     PyRef hdrs_list(PyList_New(req.header_count));
     if (hdrs_list) {
         for (int i = 0; i < req.header_count; i++) {
-            const auto& hdr = req.headers[i];
+            const auto &hdr = req.headers[i];
             PyRef nb(PyBytes_FromStringAndSize(hdr.name.data, (Py_ssize_t)hdr.name.len));
             PyRef vb(PyBytes_FromStringAndSize(hdr.value.data, (Py_ssize_t)hdr.value.len));
-            if (nb && vb) { PyRef p(PyTuple_Pack(2, nb.get(), vb.get())); if (p) PyList_SET_ITEM(hdrs_list.get(), i, p.release()); else { Py_INCREF(Py_None); PyList_SET_ITEM(hdrs_list.get(), i, Py_None); } }
-            else { Py_INCREF(Py_None); PyList_SET_ITEM(hdrs_list.get(), i, Py_None); }
+            if (nb && vb) {
+                PyRef p(PyTuple_Pack(2, nb.get(), vb.get()));
+                if (p)
+                    PyList_SET_ITEM(hdrs_list.get(), i, p.release());
+                else {
+                    Py_INCREF(Py_None);
+                    PyList_SET_ITEM(hdrs_list.get(), i, Py_None);
+                }
+            } else {
+                Py_INCREF(Py_None);
+                PyList_SET_ITEM(hdrs_list.get(), i, Py_None);
+            }
         }
     }
     bool mc = false;
-    PyObject* method_str = get_cached_method(req.method.data, req.method.len, mc);
+    PyObject *method_str = get_cached_method(req.method.data, req.method.len, mc);
     PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
     PyRef mw_info(PyTuple_Pack(7, s_mw_tag, content_obj, get_cached_status(status_code), ka,
-        hdrs_list ? hdrs_list.get() : Py_None,
-        method_str ? method_str : Py_None,
-        path_str ? path_str.get() : Py_None));
+        hdrs_list ? hdrs_list.get() : Py_None, method_str ? method_str : Py_None, path_str ? path_str.get() : Py_None));
     if (!mc && method_str) Py_DECREF(method_str);
     Py_DECREF(ka);
     Py_DECREF(content_obj);
@@ -1635,11 +1602,7 @@ static inline PyObject* make_mw_tuple(CoreAppObject* self, const ParsedHttpReque
     return nullptr;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HELPER: Build error response tuple for HTTPException
-// ═══════════════════════════════════════════════════════════════════════════════
-
-static inline PyObject* build_error_response(PyObject* detail, int status_code) {
+static inline PyObject *build_error_response(PyObject *detail, int status_code) {
     PyRef content(PyDict_New());
     if (!content) return build_500_tuple();
 
@@ -1671,7 +1634,7 @@ static inline PyObject* build_error_response(PyObject* detail, int status_code) 
     if (!cl_pair) return build_500_tuple();
     Py_INCREF(g_bytes_content_length);
     PyList_SET_ITEM(cl_pair.get(), 0, g_bytes_content_length);
-    PyObject* cl_val = PyBytes_FromStringAndSize(len_buf, len_n);
+    PyObject *cl_val = PyBytes_FromStringAndSize(len_buf, len_n);
     if (!cl_val) return build_500_tuple();
     PyList_SET_ITEM(cl_pair.get(), 1, cl_val);
     PyList_SET_ITEM(headers_list.get(), 1, cl_pair.release());
@@ -1686,44 +1649,35 @@ static inline PyObject* build_error_response(PyObject* detail, int status_code) 
     return PyTuple_Pack(2, start.get(), body_msg.get());
 }
 
-// ── register_fast_spec ──────────────────────────────────────────────────────
-
-static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {
-        "route_index", "body_param_name", "field_specs_list",
-        "body_params", "embed_body_fields", "dependant", "dep_solver", "param_validator",
-        "dep_inject_mask", nullptr
-    };
+static PyObject *CoreApp_register_fast_spec(CoreAppObject *self, PyObject *args, PyObject *kwargs) {
+    static const char *kwlist[] = {"route_index", "body_param_name", "field_specs_list", "body_params",
+        "embed_body_fields", "dependant", "dep_solver", "param_validator", "dep_inject_mask", nullptr};
 
     Py_ssize_t route_index;
-    const char* body_param_name = nullptr;
-    PyObject* field_specs_list = Py_None;
-    PyObject* body_params_obj = Py_None;
+    const char *body_param_name = nullptr;
+    PyObject *field_specs_list = Py_None;
+    PyObject *body_params_obj = Py_None;
     int embed_body_fields = 0;
-    PyObject* dependant_obj = Py_None;
-    PyObject* dep_solver_obj = Py_None;
-    PyObject* param_validator_obj = Py_None;
+    PyObject *dependant_obj = Py_None;
+    PyObject *dep_solver_obj = Py_None;
+    PyObject *param_validator_obj = Py_None;
     int dep_inject_mask = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-            "n|zOOpOOOi", (char**)kwlist,
-            &route_index, &body_param_name, &field_specs_list,
-            &body_params_obj, &embed_body_fields,
-            &dependant_obj, &dep_solver_obj, &param_validator_obj,
-            &dep_inject_mask)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "n|zOOpOOOi", (char **)kwlist, &route_index, &body_param_name,
+            &field_specs_list, &body_params_obj, &embed_body_fields, &dependant_obj, &dep_solver_obj,
+            &param_validator_obj, &dep_inject_mask)) {
         return nullptr;
     }
 
     std::optional<std::unique_lock<std::shared_mutex>> lock_check;
-    if (!self->registering.load(std::memory_order_relaxed))
-        lock_check.emplace(self->routes_mutex);
+    if (!self->registering.load(std::memory_order_relaxed)) lock_check.emplace(self->routes_mutex);
     if (route_index < 0 || route_index >= (Py_ssize_t)self->routes.size()) {
         PyErr_SetString(PyExc_IndexError, "route index out of range");
         return nullptr;
     }
-    lock_check.reset();  // Release lock before Python calls to avoid EDEADLK
+    lock_check.reset(); // Release lock before Python calls to avoid EDEADLK
 
-    auto& route = self->routes[route_index];
+    auto &route = self->routes[route_index];
     FastRouteSpec spec;
 
     spec.body_param_name = body_param_name ? std::optional<std::string>(body_param_name) : std::nullopt;
@@ -1740,35 +1694,35 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
     if (field_specs_list != Py_None && PyList_Check(field_specs_list)) {
         Py_ssize_t nspecs = PyList_GET_SIZE(field_specs_list);
         for (Py_ssize_t i = 0; i < nspecs; i++) {
-            PyObject* spec_dict = PyList_GET_ITEM(field_specs_list, i);
+            PyObject *spec_dict = PyList_GET_ITEM(field_specs_list, i);
             if (!PyDict_Check(spec_dict)) continue;
 
             FieldSpec fs;
-            PyObject* fn = PyDict_GetItemString(spec_dict, "field_name");
-            PyObject* al = PyDict_GetItemString(spec_dict, "alias");
-            PyObject* hlk = PyDict_GetItemString(spec_dict, "header_lookup_key");
-            PyObject* loc = PyDict_GetItemString(spec_dict, "location");
-            PyObject* tt = PyDict_GetItemString(spec_dict, "type_tag");
-            PyObject* req = PyDict_GetItemString(spec_dict, "required");
-            PyObject* def = PyDict_GetItemString(spec_dict, "default_value");
-            PyObject* cu = PyDict_GetItemString(spec_dict, "convert_underscores");
-            PyObject* isseq = PyDict_GetItemString(spec_dict, "is_sequence");
+            PyObject *fn = PyDict_GetItemString(spec_dict, "field_name");
+            PyObject *al = PyDict_GetItemString(spec_dict, "alias");
+            PyObject *hlk = PyDict_GetItemString(spec_dict, "header_lookup_key");
+            PyObject *loc = PyDict_GetItemString(spec_dict, "location");
+            PyObject *tt = PyDict_GetItemString(spec_dict, "type_tag");
+            PyObject *req = PyDict_GetItemString(spec_dict, "required");
+            PyObject *def = PyDict_GetItemString(spec_dict, "default_value");
+            PyObject *cu = PyDict_GetItemString(spec_dict, "convert_underscores");
+            PyObject *isseq = PyDict_GetItemString(spec_dict, "is_sequence");
 
             fs.field_name = (fn && PyUnicode_AsUTF8(fn)) ? PyUnicode_AsUTF8(fn) : "";
-            const char* _al = al ? PyUnicode_AsUTF8(al) : nullptr;
+            const char *_al = al ? PyUnicode_AsUTF8(al) : nullptr;
             fs.alias = _al ? _al : fs.field_name;
-            const char* _hlk = hlk ? PyUnicode_AsUTF8(hlk) : nullptr;
+            const char *_hlk = hlk ? PyUnicode_AsUTF8(hlk) : nullptr;
             fs.header_lookup_key = _hlk ? _hlk : "";
             fs.location = loc ? (ParamLocation)PyLong_AsLong(loc) : LOC_QUERY;
             fs.type_tag = tt ? (ParamType)PyLong_AsLong(tt) : TYPE_STR;
             fs.required = req ? PyObject_IsTrue(req) : false;
             fs.convert_underscores = cu ? PyObject_IsTrue(cu) : true;
             fs.is_sequence = isseq ? PyObject_IsTrue(isseq) : false;
-            PyObject* suo = PyDict_GetItemString(spec_dict, "seq_underscore_only");
+            PyObject *suo = PyDict_GetItemString(spec_dict, "seq_underscore_only");
             fs.seq_underscore_only = suo ? PyObject_IsTrue(suo) : false;
             if (def && def != Py_None) {
                 Py_INCREF(def);
-                fs.default_value = def;  // strong ref — DECREF'd in CoreApp_dealloc
+                fs.default_value = def; // strong ref — DECREF'd in CoreApp_dealloc
             } else {
                 fs.default_value = nullptr;
             }
@@ -1780,26 +1734,25 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
 
             // Split into location-specific vector
             switch (fs.location) {
-                case LOC_PATH:
-                    spec.path_specs.push_back(std::move(fs));
-                    break;
-                case LOC_QUERY:
-                    spec.has_query_params = true;
-                    spec.query_specs.push_back(std::move(fs));
-                    break;
-                case LOC_HEADER:
-                    spec.has_header_params = true;
-                    spec.header_specs.push_back(std::move(fs));
-                    break;
-                case LOC_COOKIE:
-                    spec.has_cookie_params = true;
-                    spec.cookie_specs.push_back(std::move(fs));
-                    break;
+            case LOC_PATH:
+                spec.path_specs.push_back(std::move(fs));
+                break;
+            case LOC_QUERY:
+                spec.has_query_params = true;
+                spec.query_specs.push_back(std::move(fs));
+                break;
+            case LOC_HEADER:
+                spec.has_header_params = true;
+                spec.header_specs.push_back(std::move(fs));
+                break;
+            case LOC_COOKIE:
+                spec.has_cookie_params = true;
+                spec.cookie_specs.push_back(std::move(fs));
+                break;
             }
         }
     }
 
-    // Pydantic model fast-path init
     spec.model_validate = nullptr;
     spec.body_is_plain_dict = false;
 
@@ -1811,20 +1764,20 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
         // Detect if body is a single Pydantic model → cache model_validate for direct call
         // Also detect plain dict body (no Pydantic, skip validation entirely)
         if (PyList_Check(body_params_obj) && PyList_GET_SIZE(body_params_obj) == 1) {
-            PyObject* field_info = PyList_GET_ITEM(body_params_obj, 0);  // borrowed
+            PyObject *field_info = PyList_GET_ITEM(body_params_obj, 0); // borrowed
             // field_info.field_info.annotation is the type
-            PyObject* fi_attr = PyObject_GetAttrString(field_info, "field_info");
+            PyObject *fi_attr = PyObject_GetAttrString(field_info, "field_info");
             if (fi_attr) {
-                PyObject* annotation = PyObject_GetAttrString(fi_attr, "annotation");
+                PyObject *annotation = PyObject_GetAttrString(fi_attr, "annotation");
                 if (annotation) {
                     // Check if annotation is dict (plain dict body)
-                    if (annotation == (PyObject*)&PyDict_Type) {
+                    if (annotation == (PyObject *)&PyDict_Type) {
                         spec.body_is_plain_dict = true;
                     } else {
                         // Check if annotation has model_validate (Pydantic BaseModel)
-                        PyObject* mv = PyObject_GetAttrString(annotation, "model_validate");
+                        PyObject *mv = PyObject_GetAttrString(annotation, "model_validate");
                         if (mv) {
-                            spec.model_validate = mv;  // strong ref
+                            spec.model_validate = mv; // strong ref
                         } else {
                             PyErr_Clear();
                         }
@@ -1833,7 +1786,7 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
                 }
                 Py_DECREF(fi_attr);
             }
-            PyErr_Clear();  // Clear any attribute errors
+            PyErr_Clear(); // Clear any attribute errors
         }
     } else {
         spec.body_params = nullptr;
@@ -1862,19 +1815,18 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
     }
 
     // Re-acquire lock to safely write fast_spec to routes vector
-    if (!self->registering.load(std::memory_order_relaxed))
-        lock_check.emplace(self->routes_mutex);
+    if (!self->registering.load(std::memory_order_relaxed)) lock_check.emplace(self->routes_mutex);
     route.fast_spec = std::move(spec);
 
     // Build O(1) lookup maps — keys are std::string (owned, survive reallocation)
-    auto& final_spec = *route.fast_spec;
+    auto &final_spec = *route.fast_spec;
     for (size_t i = 0; i < final_spec.path_specs.size(); i++) {
-        const auto& fs = final_spec.path_specs[i];
+        const auto &fs = final_spec.path_specs[i];
         // Key by alias (URL segment name), falling back to field_name
         final_spec.path_map[!fs.alias.empty() ? fs.alias : fs.field_name] = i;
     }
     for (size_t i = 0; i < final_spec.query_specs.size(); i++) {
-        const auto& fs = final_spec.query_specs[i];
+        const auto &fs = final_spec.query_specs[i];
         if (!fs.alias.empty() && fs.alias != fs.field_name) {
             final_spec.query_map[fs.alias] = i;
         } else {
@@ -1889,38 +1841,32 @@ static PyObject* CoreApp_register_fast_spec(CoreAppObject* self, PyObject* args,
     Py_RETURN_NONE;
 }
 
-// ── configure_cors ──────────────────────────────────────────────────────────
+static PyObject *CoreApp_configure_cors(CoreAppObject *self, PyObject *args, PyObject *kwargs) {
+    static const char *kwlist[] = {"allow_origins", "allow_origin_regex", "allow_methods", "allow_headers",
+        "allow_credentials", "expose_headers", "max_age", nullptr};
 
-static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {
-        "allow_origins", "allow_origin_regex", "allow_methods",
-        "allow_headers", "allow_credentials", "expose_headers", "max_age", nullptr
-    };
-
-    PyObject* origins = Py_None;
-    const char* origin_regex = nullptr;
-    PyObject* methods = Py_None;
-    PyObject* headers = Py_None;
+    PyObject *origins = Py_None;
+    const char *origin_regex = nullptr;
+    PyObject *methods = Py_None;
+    PyObject *headers = Py_None;
     int credentials = 0;
-    PyObject* expose = Py_None;
+    PyObject *expose = Py_None;
     long max_age = 600;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-            "|OzOOpOl", (char**)kwlist,
-            &origins, &origin_regex, &methods, &headers,
-            &credentials, &expose, &max_age)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|OzOOpOl", (char **)kwlist, &origins, &origin_regex, &methods,
+            &headers, &credentials, &expose, &max_age)) {
         return nullptr;
     }
 
     auto config = std::make_shared<CorsConfig>();
 
-    auto list_to_vec = [](PyObject* obj) -> std::vector<std::string> {
+    auto list_to_vec = [](PyObject *obj) -> std::vector<std::string> {
         std::vector<std::string> result;
         if (obj && obj != Py_None && PyList_Check(obj)) {
             Py_ssize_t n = PyList_GET_SIZE(obj);
             result.reserve(static_cast<size_t>(n));
             for (Py_ssize_t i = 0; i < n; i++) {
-                const char* s = PyUnicode_AsUTF8(PyList_GET_ITEM(obj, i));
+                const char *s = PyUnicode_AsUTF8(PyList_GET_ITEM(obj, i));
                 if (s) result.emplace_back(s);
             }
         }
@@ -1929,7 +1875,7 @@ static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyO
 
     config->allow_origins = list_to_vec(origins);
     // Build O(1) lookup set and wildcard flag from allow_origins
-    for (const auto& o : config->allow_origins) {
+    for (const auto &o : config->allow_origins) {
         if (o == "*") {
             config->allow_any_origin = true;
         }
@@ -1939,7 +1885,7 @@ static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyO
     if (config->allow_origin_regex.has_value()) {
         try {
             config->allow_origin_regex_compiled = std::regex(config->allow_origin_regex.value());
-        } catch (const std::regex_error&) {
+        } catch (const std::regex_error &) {
             PyErr_SetString(PyExc_ValueError, "Invalid CORS origin regex pattern");
             return nullptr;
         }
@@ -1954,14 +1900,12 @@ static PyObject* CoreApp_configure_cors(CoreAppObject* self, PyObject* args, PyO
 
     self->cors_config.store(config);
     self->cors_enabled = true;
-    self->cors_ptr_cached = config.get();  // Raw pointer for hot-path — no atomic load
+    self->cors_ptr_cached = config.get(); // Raw pointer for hot-path — no atomic load
 
     Py_RETURN_NONE;
 }
 
-// ── configure_trusted_hosts ─────────────────────────────────────────────────
-
-static PyObject* CoreApp_configure_trusted_hosts(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_configure_trusted_hosts(CoreAppObject *self, PyObject *arg) {
     if (!PyList_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected list of hosts");
         return nullptr;
@@ -1969,7 +1913,7 @@ static PyObject* CoreApp_configure_trusted_hosts(CoreAppObject* self, PyObject* 
     auto config = std::make_shared<TrustedHostConfig>();
     Py_ssize_t n = PyList_GET_SIZE(arg);
     for (Py_ssize_t i = 0; i < n; i++) {
-        const char* h = PyUnicode_AsUTF8(PyList_GET_ITEM(arg, i));
+        const char *h = PyUnicode_AsUTF8(PyList_GET_ITEM(arg, i));
         if (h) {
             config->allowed_hosts.emplace_back(h);
             if (std::string_view(h) == "*") {
@@ -1984,8 +1928,8 @@ static PyObject* CoreApp_configure_trusted_hosts(CoreAppObject* self, PyObject* 
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_check_trusted_host(CoreAppObject* self, PyObject* arg) {
-    const char* host = PyUnicode_AsUTF8(arg);
+static PyObject *CoreApp_check_trusted_host(CoreAppObject *self, PyObject *arg) {
+    const char *host = PyUnicode_AsUTF8(arg);
     if (!host) return nullptr;
 
     auto config = self->trusted_host_config.load();
@@ -1996,16 +1940,14 @@ static PyObject* CoreApp_check_trusted_host(CoreAppObject* self, PyObject* arg) 
     Py_RETURN_FALSE;
 }
 
-// ── get_route_info ──────────────────────────────────────────────────────────
-
-static PyObject* CoreApp_get_route_info(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_get_route_info(CoreAppObject *self, PyObject *arg) {
     Py_ssize_t idx = PyLong_AsSsize_t(arg);
     if (idx < 0 && PyErr_Occurred()) return nullptr;
 
     std::shared_lock lock(self->routes_mutex);
     if (idx < 0 || idx >= (Py_ssize_t)self->routes.size()) Py_RETURN_NONE;
 
-    const auto& route = self->routes[idx];
+    const auto &route = self->routes[idx];
     PyRef dict(PyDict_New());
     if (!dict) return nullptr;
 
@@ -2016,7 +1958,7 @@ static PyObject* CoreApp_get_route_info(CoreAppObject* self, PyObject* arg) {
     PyRef methods_list(PyList_New((Py_ssize_t)route.methods.size()));
     if (!methods_list) return nullptr;
     for (size_t i = 0; i < route.methods.size(); i++) {
-        PyObject* m = PyUnicode_FromString(route.methods[i].c_str());
+        PyObject *m = PyUnicode_FromString(route.methods[i].c_str());
         if (!m) return nullptr;
         PyList_SET_ITEM(methods_list.get(), (Py_ssize_t)i, m);
     }
@@ -2025,7 +1967,7 @@ static PyObject* CoreApp_get_route_info(CoreAppObject* self, PyObject* arg) {
     PyRef tags_list(PyList_New((Py_ssize_t)route.tags.size()));
     if (!tags_list) return nullptr;
     for (size_t i = 0; i < route.tags.size(); i++) {
-        PyObject* t = PyUnicode_FromString(route.tags[i].c_str());
+        PyObject *t = PyUnicode_FromString(route.tags[i].c_str());
         if (!t) return nullptr;
         PyList_SET_ITEM(tags_list.get(), (Py_ssize_t)i, t);
     }
@@ -2041,11 +1983,9 @@ static PyObject* CoreApp_get_route_info(CoreAppObject* self, PyObject* arg) {
     return dict.release();
 }
 
-// ── add_exception_handler ───────────────────────────────────────────────────
-
-static PyObject* CoreApp_add_exception_handler(CoreAppObject* self, PyObject* args) {
+static PyObject *CoreApp_add_exception_handler(CoreAppObject *self, PyObject *args) {
     int status_code;
-    PyObject* handler;
+    PyObject *handler;
     if (!PyArg_ParseTuple(args, "iO", &status_code, &handler)) return nullptr;
 
     Py_INCREF(handler);
@@ -2059,99 +1999,121 @@ static PyObject* CoreApp_add_exception_handler(CoreAppObject* self, PyObject* ar
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_set_type_exception_handlers(CoreAppObject* self, PyObject* args) {
-    PyObject* handlers_dict;
+static PyObject *CoreApp_set_type_exception_handlers(CoreAppObject *self, PyObject *args) {
+    PyObject *handlers_dict;
     if (!PyArg_ParseTuple(args, "O", &handlers_dict)) return nullptr;
-    if (!PyDict_Check(handlers_dict)) { PyErr_SetString(PyExc_TypeError, "expected dict"); return nullptr; }
+    if (!PyDict_Check(handlers_dict)) {
+        PyErr_SetString(PyExc_TypeError, "expected dict");
+        return nullptr;
+    }
     Py_XDECREF(self->type_exception_handlers);
     Py_INCREF(handlers_dict);
     self->type_exception_handlers = handlers_dict;
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_set_https_redirect(CoreAppObject* self, PyObject* args) {
+static PyObject *CoreApp_set_https_redirect(CoreAppObject *self, PyObject *args) {
     int val = 0;
     if (!PyArg_ParseTuple(args, "p", &val)) return nullptr;
     self->https_redirect_enabled = (bool)val;
     Py_RETURN_NONE;
 }
 
-static PyObject* CoreApp_set_has_http_middleware(CoreAppObject* self, PyObject* args) {
+static PyObject *CoreApp_set_has_http_middleware(CoreAppObject *self, PyObject *args) {
     int val;
     if (!PyArg_ParseTuple(args, "p", &val)) return nullptr;
     self->has_http_middleware = (bool)val;
     Py_RETURN_NONE;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // HTTP Response Builder — build raw HTTP/1.1 response as one byte buffer
-// ═══════════════════════════════════════════════════════════════════════════════
 
-static const char* status_reason(int code) {
+static const char *status_reason(int code) {
     switch (code) {
-        case 200: return "OK";
-        case 201: return "Created";
-        case 204: return "No Content";
-        case 301: return "Moved Permanently";
-        case 302: return "Found";
-        case 304: return "Not Modified";
-        case 307: return "Temporary Redirect";
-        case 308: return "Permanent Redirect";
-        case 400: return "Bad Request";
-        case 401: return "Unauthorized";
-        case 403: return "Forbidden";
-        case 404: return "Not Found";
-        case 405: return "Method Not Allowed";
-        case 422: return "Unprocessable Entity";
-        case 500: return "Internal Server Error";
-        default:  return "Unknown";
+    case 200:
+        return "OK";
+    case 201:
+        return "Created";
+    case 204:
+        return "No Content";
+    case 301:
+        return "Moved Permanently";
+    case 302:
+        return "Found";
+    case 304:
+        return "Not Modified";
+    case 307:
+        return "Temporary Redirect";
+    case 308:
+        return "Permanent Redirect";
+    case 400:
+        return "Bad Request";
+    case 401:
+        return "Unauthorized";
+    case 403:
+        return "Forbidden";
+    case 404:
+        return "Not Found";
+    case 405:
+        return "Method Not Allowed";
+    case 422:
+        return "Unprocessable Entity";
+    case 500:
+        return "Internal Server Error";
+    default:
+        return "Unknown";
     }
 }
 
-// ── Pre-cached status lines: "HTTP/1.1 XXX Reason\r\n" ──────────────────────
-// Eliminates status_reason() lookup + strlen() + per-byte copy on every response.
-// NOTE: CachedStatusLine, CachedJsonPrefix, s_status_lines, s_json_prefixes
-// are forward-declared near top of file (before build_static_response).
-
-// Storage backing for cached strings (static lifetime)
 static char s_status_storage[16384];
 static size_t s_status_storage_used = 0;
 static char s_json_prefix_storage[32768];
 static size_t s_json_prefix_used = 0;
 
 void init_status_line_cache() {
-    struct Entry { int code; const char* reason; };
+    struct Entry {
+        int code;
+        const char *reason;
+    };
     static const Entry entries[] = {
-        {200, "OK"}, {201, "Created"}, {204, "No Content"},
-        {301, "Moved Permanently"}, {302, "Found"}, {304, "Not Modified"},
-        {307, "Temporary Redirect"}, {308, "Permanent Redirect"},
-        {400, "Bad Request"}, {401, "Unauthorized"}, {403, "Forbidden"},
-        {404, "Not Found"}, {405, "Method Not Allowed"},
-        {413, "Payload Too Large"}, {422, "Unprocessable Entity"},
-        {500, "Internal Server Error"}, {502, "Bad Gateway"},
+        {200, "OK"},
+        {201, "Created"},
+        {204, "No Content"},
+        {301, "Moved Permanently"},
+        {302, "Found"},
+        {304, "Not Modified"},
+        {307, "Temporary Redirect"},
+        {308, "Permanent Redirect"},
+        {400, "Bad Request"},
+        {401, "Unauthorized"},
+        {403, "Forbidden"},
+        {404, "Not Found"},
+        {405, "Method Not Allowed"},
+        {413, "Payload Too Large"},
+        {422, "Unprocessable Entity"},
+        {500, "Internal Server Error"},
+        {502, "Bad Gateway"},
         {503, "Service Unavailable"},
     };
 
     memset(s_status_lines, 0, sizeof(s_status_lines));
     memset(s_json_prefixes, 0, sizeof(s_json_prefixes));
 
-    for (const auto& e : entries) {
+    for (const auto &e : entries) {
         if (e.code < 0 || e.code >= 600) continue;
 
         // Build "HTTP/1.1 XXX Reason\r\n"
-        char* p = s_status_storage + s_status_storage_used;
-        int n = snprintf(p, sizeof(s_status_storage) - s_status_storage_used,
-                         "HTTP/1.1 %d %s\r\n", e.code, e.reason);
+        char *p = s_status_storage + s_status_storage_used;
+        int n = snprintf(p, sizeof(s_status_storage) - s_status_storage_used, "HTTP/1.1 %d %s\r\n", e.code, e.reason);
         if (n > 0 && s_status_storage_used + (size_t)n < sizeof(s_status_storage)) {
             s_status_lines[e.code] = {p, (size_t)n};
             s_status_storage_used += (size_t)n + 1;
         }
 
         // Build "HTTP/1.1 XXX Reason\r\ncontent-type: application/json\r\ncontent-length: "
-        char* jp = s_json_prefix_storage + s_json_prefix_used;
+        char *jp = s_json_prefix_storage + s_json_prefix_used;
         int jn = snprintf(jp, sizeof(s_json_prefix_storage) - s_json_prefix_used,
-                          "HTTP/1.1 %d %s\r\ncontent-type: application/json\r\ncontent-length: ",
-                          e.code, e.reason);
+            "HTTP/1.1 %d %s\r\ncontent-type: application/json\r\ncontent-length: ", e.code, e.reason);
         if (jn > 0 && s_json_prefix_used + (size_t)jn < sizeof(s_json_prefix_storage)) {
             s_json_prefixes[e.code] = {jp, (size_t)jn};
             s_json_prefix_used += (size_t)jn + 1;
@@ -2159,10 +2121,7 @@ void init_status_line_cache() {
     }
 }
 
-// ── CORS helpers ──────────────────────────────────────────────────────────
-
-// Check if origin is allowed by CORS config. Returns true if allowed.
-static bool cors_origin_allowed(const CorsConfig* cors, const char* origin, size_t origin_len) {
+static bool cors_origin_allowed(const CorsConfig *cors, const char *origin, size_t origin_len) {
     if (!cors || !origin || origin_len == 0) return false;
     if (cors->allow_any_origin) return true;
     // Transparent hash: looks up string_view directly — zero heap allocation
@@ -2170,28 +2129,27 @@ static bool cors_origin_allowed(const CorsConfig* cors, const char* origin, size
     // Regex match (pre-compiled at configure time)
     if (cors->allow_origin_regex_compiled.has_value()) {
         try {
-            if (std::regex_match(origin, origin + origin_len, cors->allow_origin_regex_compiled.value()))
-                return true;
-        } catch (...) {}
+            if (std::regex_match(origin, origin + origin_len, cors->allow_origin_regex_compiled.value())) return true;
+        } catch (...) {
+        }
     }
     return false;
 }
 
-// Check for CRLF injection in origin strings (memchr = SIMD-accelerated on most platforms)
-static inline bool contains_crlf(const char* s, size_t len) {
+static inline bool contains_crlf(const char *s, size_t len) {
     return memchr(s, '\r', len) != nullptr || memchr(s, '\n', len) != nullptr;
 }
 
 // Build CORS headers string into a buffer. Returns number of bytes written.
-static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
-                                  const char* origin, size_t origin_len) {
+static size_t build_cors_headers(std::vector<char> &buf, const CorsConfig *cors, const char *origin,
+    size_t origin_len) {
     if (!cors || !origin || origin_len == 0) return 0;
     if (contains_crlf(origin, origin_len)) return 0;
     size_t start = buf.size();
 
     // Pre-reserve for typical CORS headers to avoid reallocations
     size_t estimate = 200 + origin_len;
-    for (const auto& h : cors->expose_headers) estimate += h.size() + 2;
+    for (const auto &h : cors->expose_headers) estimate += h.size() + 2;
     buf.reserve(buf.size() + estimate);
 
     // Access-Control-Allow-Origin
@@ -2215,8 +2173,11 @@ static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
         static const char ACEH[] = "\r\naccess-control-expose-headers: ";
         buf_append(buf, ACEH, sizeof(ACEH) - 1);
         for (size_t i = 0; i < cors->expose_headers.size(); i++) {
-            if (i > 0) { buf.push_back(','); buf.push_back(' '); }
-            const auto& h = cors->expose_headers[i];
+            if (i > 0) {
+                buf.push_back(',');
+                buf.push_back(' ');
+            }
+            const auto &h = cors->expose_headers[i];
             buf_append(buf, h.data(), h.size());
         }
     }
@@ -2232,17 +2193,15 @@ static size_t build_cors_headers(std::vector<char>& buf, const CorsConfig* cors,
 }
 
 // Build a full CORS preflight (OPTIONS) response
-static PyObject* build_cors_preflight_response(
-    const CorsConfig* cors, const char* origin, size_t origin_len, bool keep_alive,
-    const char* req_headers = nullptr, size_t req_headers_len = 0)
-{
+static PyObject *build_cors_preflight_response(const CorsConfig *cors, const char *origin, size_t origin_len,
+    bool keep_alive, const char *req_headers = nullptr, size_t req_headers_len = 0) {
     if (contains_crlf(origin, origin_len)) Py_RETURN_NONE;
 
     auto buf = acquire_buffer();
     // Pre-reserve for preflight response
     size_t estimate = 512;
-    for (const auto& m : cors->allow_methods) estimate += m.size() + 2;
-    for (const auto& h : cors->allow_headers) estimate += h.size() + 2;
+    for (const auto &m : cors->allow_methods) estimate += m.size() + 2;
+    for (const auto &h : cors->allow_headers) estimate += h.size() + 2;
     estimate += origin_len;
     buf.reserve(estimate);
 
@@ -2264,8 +2223,11 @@ static PyObject* build_cors_preflight_response(
         buf_append(buf, DEF_METHODS, sizeof(DEF_METHODS) - 1);
     } else {
         for (size_t i = 0; i < cors->allow_methods.size(); i++) {
-            if (i > 0) { buf.push_back(','); buf.push_back(' '); }
-            const auto& m = cors->allow_methods[i];
+            if (i > 0) {
+                buf.push_back(',');
+                buf.push_back(' ');
+            }
+            const auto &m = cors->allow_methods[i];
             buf_append(buf, m.data(), m.size());
         }
     }
@@ -2280,8 +2242,11 @@ static PyObject* build_cors_preflight_response(
             buf_append(buf, req_headers, req_headers_len);
         } else {
             for (size_t i = 0; i < cors->allow_headers.size(); i++) {
-                if (i > 0) { buf.push_back(','); buf.push_back(' '); }
-                const auto& h = cors->allow_headers[i];
+                if (i > 0) {
+                    buf.push_back(',');
+                    buf.push_back(' ');
+                }
+                const auto &h = cors->allow_headers[i];
                 buf_append(buf, h.data(), h.size());
             }
         }
@@ -2305,7 +2270,8 @@ static PyObject* build_cors_preflight_response(
     buf_append(buf, VARY, sizeof(VARY) - 1);
 
     // Content-Length: 2 (body "OK") + Connection
-    static const char CL2_KA[] = "\r\ncontent-length: 2\r\ncontent-type: text/plain\r\nconnection: keep-alive\r\n\r\nOK";
+    static const char CL2_KA[] =
+        "\r\ncontent-length: 2\r\ncontent-type: text/plain\r\nconnection: keep-alive\r\n\r\nOK";
     static const char CL2_CLOSE[] = "\r\ncontent-length: 2\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\nOK";
     if (keep_alive) {
         buf_append(buf, CL2_KA, sizeof(CL2_KA) - 1);
@@ -2313,15 +2279,13 @@ static PyObject* build_cors_preflight_response(
         buf_append(buf, CL2_CLOSE, sizeof(CL2_CLOSE) - 1);
     }
 
-    PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
     return result;
 }
 
-// ── Trusted host check ──────────────────────────────────────────────────────
-
-static bool check_trusted_host_inline(const TrustedHostConfig* th, const char* host, size_t host_len) {
-    if (!th) return true;  // No config = allow all
+static bool check_trusted_host_inline(const TrustedHostConfig *th, const char *host, size_t host_len) {
+    if (!th) return true; // No config = allow all
     if (th->allow_any_host) return true;
     std::string_view host_sv(host, host_len);
     // Strip port if present
@@ -2332,11 +2296,10 @@ static bool check_trusted_host_inline(const TrustedHostConfig* th, const char* h
     // Exact match
     if (th->allowed_hosts_set.count(host_sv) > 0) return true;
     // Wildcard match: check if any "*.suffix" entry matches
-    for (const auto& allowed : th->allowed_hosts) {
+    for (const auto &allowed : th->allowed_hosts) {
         if (allowed.size() > 2 && allowed[0] == '*' && allowed[1] == '.') {
             std::string_view suffix(allowed.c_str() + 1, allowed.size() - 1); // ".example.com"
-            if (host_sv.size() > suffix.size() &&
-                host_sv.substr(host_sv.size() - suffix.size()) == suffix) return true;
+            if (host_sv.size() > suffix.size() && host_sv.substr(host_sv.size() - suffix.size()) == suffix) return true;
             // Also allow bare domain (e.g. "example.com" matches "*.example.com")
             std::string_view bare(allowed.c_str() + 2, allowed.size() - 2); // "example.com"
             if (host_sv == bare) return true;
@@ -2345,21 +2308,18 @@ static bool check_trusted_host_inline(const TrustedHostConfig* th, const char* h
     return false;
 }
 
-// ── Inline compression (no Python overhead — raw zlib/brotli) ────────────────
 // Returns encoding name ("gzip" or "br") if compressed, nullptr if not.
 // Caller provides pre-allocated `out` vector; body is replaced only if compressed
 // is smaller than original.
 
-static const char* try_compress_inline(
-    const char* body, size_t body_len,
-    const char* ae, size_t ae_len,
-    std::vector<char>& out)
-{
+static const char *try_compress_inline(const char *body, size_t body_len, const char *ae, size_t ae_len,
+    std::vector<char> &out) {
     if (body_len < 500) return nullptr;
 
     // Quick scan for accepted encodings — SSO handles ≤22 bytes without heap alloc
     std::string ae_lower(ae, ae_len);
-    for (auto& c : ae_lower) if (c >= 'A' && c <= 'Z') c += 32;
+    for (auto &c : ae_lower)
+        if (c >= 'A' && c <= 'Z') c += 32;
     bool accept_br = false, accept_gzip = false;
 #if HAS_BROTLI
     accept_br = ae_lower.find("br") != std::string::npos;
@@ -2369,19 +2329,17 @@ static const char* try_compress_inline(
     if (!accept_br && !accept_gzip) return nullptr;
 
     // GIL release: compression only touches raw C data, no Python objects
-    const char* result = nullptr;
+    const char *result = nullptr;
 
     Py_BEGIN_ALLOW_THREADS
 
 #if HAS_BROTLI
-    if (accept_br) {
+        if (accept_br) {
         size_t output_size = BrotliEncoderMaxCompressedSize(body_len);
         if (output_size == 0) output_size = body_len + 1024;
         out.resize(output_size);
-        int ok = BrotliEncoderCompress(
-            4, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
-            body_len, (const uint8_t*)body,
-            &output_size, (uint8_t*)out.data());
+        int ok = BrotliEncoderCompress(4, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE, body_len, (const uint8_t *)body,
+            &output_size, (uint8_t *)out.data());
         if (ok && output_size < body_len) {
             out.resize(output_size);
             result = "br";
@@ -2396,9 +2354,9 @@ static const char* try_compress_inline(
         int ret = deflateInit2(&strm, gz_level, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
         if (ret == Z_OK) {
             out.resize(deflateBound(&strm, (uLong)body_len));
-            strm.next_in = (Bytef*)body;
+            strm.next_in = (Bytef *)body;
             strm.avail_in = (uInt)body_len;
-            strm.next_out = (Bytef*)out.data();
+            strm.next_out = (Bytef *)out.data();
             strm.avail_out = (uInt)out.size();
             ret = deflate(&strm, Z_FINISH);
             if (ret == Z_STREAM_END && strm.total_out < body_len) {
@@ -2413,62 +2371,59 @@ static const char* try_compress_inline(
 
     Py_END_ALLOW_THREADS
 
-    return result;
+        return result;
 }
 
-// ── Shared ultra-fast JSON response buffer builder ────────────────────────────
 // Used by both build_http_response_bytes and build_and_write_http_response.
-static inline void build_fast_json_response_buf(
-    std::vector<char>& buf, const CachedJsonPrefix& jp,
-    const char* body_data, size_t body_len, bool keep_alive, bool head_only = false)
-{
+static inline void build_fast_json_response_buf(std::vector<char> &buf, const CachedJsonPrefix &jp,
+    const char *body_data, size_t body_len, bool keep_alive, bool head_only = false) {
     char cl_buf[20];
-    int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);  // real size for Content-Length
+    int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len); // real size for Content-Length
     static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
     static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
-    const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
+    const char *suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
     size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
     // HEAD: exclude body bytes but keep Content-Length accurate (RFC 7231 §4.3.2)
     size_t total = jp.len + cl_len + suffix_len + (head_only ? 0 : body_len);
     buf.resize(total);
-    char* dst = buf.data();
-    memcpy(dst, jp.data, jp.len); dst += jp.len;
-    memcpy(dst, cl_buf, cl_len); dst += cl_len;
-    memcpy(dst, suffix, suffix_len); dst += suffix_len;
-    if (!head_only) { memcpy(dst, body_data, body_len); }
+    char *dst = buf.data();
+    memcpy(dst, jp.data, jp.len);
+    dst += jp.len;
+    memcpy(dst, cl_buf, cl_len);
+    dst += cl_len;
+    memcpy(dst, suffix, suffix_len);
+    dst += suffix_len;
+    if (!head_only) {
+        memcpy(dst, body_data, body_len);
+    }
 }
 
-// ── Response builder with optional CORS + compression headers ────────────────
-
-static PyObject* build_http_response_bytes(
-    int status_code, const char* body_data, size_t body_len, bool keep_alive,
-    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
-    const char* content_encoding = nullptr, bool head_only = false,
-    const char* extra_headers = nullptr, size_t extra_headers_len = 0)
-{
+static PyObject *build_http_response_bytes(int status_code, const char *body_data, size_t body_len, bool keep_alive,
+    const CorsConfig *cors = nullptr, const char *origin = nullptr, size_t origin_len = 0,
+    const char *content_encoding = nullptr, bool head_only = false, const char *extra_headers = nullptr,
+    size_t extra_headers_len = 0) {
     // RFC 7230: 204/304 must not include message body or content-length
     if (status_code == 204 || status_code == 304) {
         auto buf = acquire_buffer();
-        const char* reason = status_reason(status_code);
+        const char *reason = status_reason(status_code);
         buf_append(buf, "HTTP/1.1 ", 9);
-        char sc_buf[8]; int sn = fast_i64_to_buf(sc_buf, status_code);
-        buf_append(buf, sc_buf, sn); buf.push_back(' ');
+        char sc_buf[8];
+        int sn = fast_i64_to_buf(sc_buf, status_code);
+        buf_append(buf, sc_buf, sn);
+        buf.push_back(' ');
         buf_append(buf, reason, strlen(reason));
         if (cors && origin && origin_len > 0) build_cors_headers(buf, cors, origin, origin_len);
         if (extra_headers && extra_headers_len > 0) buf_append(buf, extra_headers, extra_headers_len);
         static const char CONN_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
         static const char CONN_CLOSE[] = "\r\nconnection: close\r\n\r\n";
-        buf_append(buf, keep_alive ? CONN_KA : CONN_CLOSE,
-                   keep_alive ? sizeof(CONN_KA)-1 : sizeof(CONN_CLOSE)-1);
-        PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+        buf_append(buf, keep_alive ? CONN_KA : CONN_CLOSE, keep_alive ? sizeof(CONN_KA) - 1 : sizeof(CONN_CLOSE) - 1);
+        PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
         release_buffer(std::move(buf));
         return result;
     }
-    // Pre-built header templates — single memcpy for common case
-    static const char HDR_200_JSON[] =
-        "HTTP/1.1 200 OK\r\n"
-        "content-type: application/json\r\n"
-        "content-length: ";
+    static const char HDR_200_JSON[] = "HTTP/1.1 200 OK\r\n"
+                                       "content-type: application/json\r\n"
+                                       "content-length: ";
     static const char CONN_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
     static const char CONN_CLOSE[] = "\r\nconnection: close\r\n\r\n";
 
@@ -2479,11 +2434,10 @@ static PyObject* build_http_response_bytes(
 
     // Ultra-fast path: any status code with cached JSON prefix, no CORS, no compression
     // Covers ~99% of API responses. Single resize + 4 memcpy — zero buf_append calls.
-    if (LIKELY(!cors && !content_encoding && !extra_headers &&
-        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
-        build_fast_json_response_buf(buf, s_json_prefixes[status_code],
-                                     body_data, body_len, keep_alive, head_only);
-        PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    if (LIKELY(!cors && !content_encoding && !extra_headers && status_code > 0 && status_code < 600 &&
+               s_json_prefixes[status_code].data)) {
+        build_fast_json_response_buf(buf, s_json_prefixes[status_code], body_data, body_len, keep_alive, head_only);
+        PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
         release_buffer(std::move(buf));
         return result;
     }
@@ -2495,7 +2449,7 @@ static PyObject* build_http_response_bytes(
         buf_append(buf, HDR_200_JSON, sizeof(HDR_200_JSON) - 1);
     } else if (status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data) {
         // Cached JSON prefix: "HTTP/1.1 XXX Reason\r\ncontent-type: application/json\r\ncontent-length: "
-        const auto& jp = s_json_prefixes[status_code];
+        const auto &jp = s_json_prefixes[status_code];
         buf_append(buf, jp.data, jp.len);
     } else {
         // Uncached status code — build dynamically
@@ -2505,7 +2459,7 @@ static PyObject* build_http_response_bytes(
         int sn = fast_i64_to_buf(sc_buf, status_code);
         buf_append(buf, sc_buf, sn);
         buf.push_back(' ');
-        const char* reason = status_reason(status_code);
+        const char *reason = status_reason(status_code);
         size_t rlen = strlen(reason);
         buf_append(buf, reason, rlen);
         static const char ct_hdr[] = "\r\ncontent-type: application/json\r\ncontent-length: ";
@@ -2548,34 +2502,47 @@ static PyObject* build_http_response_bytes(
     }
 
     // Body (skip for HEAD — Content-Length already set correctly above)
-    if (!head_only) { buf_append(buf, body_data, body_len); }
+    if (!head_only) {
+        buf_append(buf, body_data, body_len);
+    }
 
-    PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
     return result;
 }
 
 // Escape a C string for safe JSON embedding (handles " \ and control chars)
-static void json_escape_cstr(std::vector<char>& buf, const char* s, size_t len) {
+static void json_escape_cstr(std::vector<char> &buf, const char *s, size_t len) {
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)s[i];
-        if (c == '"') { buf.push_back('\\'); buf.push_back('"'); }
-        else if (c == '\\') { buf.push_back('\\'); buf.push_back('\\'); }
-        else if (c == '\n') { buf.push_back('\\'); buf.push_back('n'); }
-        else if (c == '\r') { buf.push_back('\\'); buf.push_back('r'); }
-        else if (c == '\t') { buf.push_back('\\'); buf.push_back('t'); }
-        else if (c < 0x20) {
+        if (c == '"') {
+            buf.push_back('\\');
+            buf.push_back('"');
+        } else if (c == '\\') {
+            buf.push_back('\\');
+            buf.push_back('\\');
+        } else if (c == '\n') {
+            buf.push_back('\\');
+            buf.push_back('n');
+        } else if (c == '\r') {
+            buf.push_back('\\');
+            buf.push_back('r');
+        } else if (c == '\t') {
+            buf.push_back('\\');
+            buf.push_back('t');
+        } else if (c < 0x20) {
             char esc[7];
             snprintf(esc, sizeof(esc), "\\u%04x", c);
             buf_append(buf, esc, 6);
+        } else {
+            buf.push_back((char)c);
         }
-        else { buf.push_back((char)c); }
     }
 }
 
-static PyObject* build_http_error_response(int status_code, const char* message, bool keep_alive,
-    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
-    const char* extra_headers = nullptr, size_t extra_headers_len = 0) {
+static PyObject *build_http_error_response(int status_code, const char *message, bool keep_alive,
+    const CorsConfig *cors = nullptr, const char *origin = nullptr, size_t origin_len = 0,
+    const char *extra_headers = nullptr, size_t extra_headers_len = 0) {
     // Build JSON error body: {"detail":"message"} with proper escaping
     auto body_buf = acquire_buffer();
     static constexpr char pre[] = "{\"detail\":\"";
@@ -2584,22 +2551,18 @@ static PyObject* build_http_error_response(int status_code, const char* message,
     static constexpr char post[] = "\"}";
     buf_append(body_buf, post, sizeof(post) - 1);
 
-    PyObject* result = build_http_response_bytes(
-        status_code, body_buf.data(), body_buf.size(), keep_alive, cors, origin, origin_len,
-        nullptr, false, extra_headers, extra_headers_len);
+    PyObject *result = build_http_response_bytes(status_code, body_buf.data(), body_buf.size(), keep_alive, cors,
+        origin, origin_len, nullptr, false, extra_headers, extra_headers_len);
     release_buffer(std::move(body_buf));
     return result;
 }
 
-// ── Extract HTTPException.headers dict into a raw header block string ─────
 // Returns a std::string of "name: value\r\nname2: value2" pairs.
 // Empty if exc_val has no headers or headers is None/empty.
-static std::string extract_http_exc_headers(PyObject* exc_val) {
+static std::string extract_http_exc_headers(PyObject *exc_val) {
     std::string result;
     if (!exc_val) return result;
-    PyRef hdrs(s_attr_headers
-        ? PyObject_GetAttr(exc_val, s_attr_headers)
-        : PyObject_GetAttrString(exc_val, "headers"));
+    PyRef hdrs(s_attr_headers ? PyObject_GetAttr(exc_val, s_attr_headers) : PyObject_GetAttrString(exc_val, "headers"));
     if (!hdrs || hdrs.get() == Py_None || !PyDict_Check(hdrs.get())) {
         PyErr_Clear();
         return result;
@@ -2608,9 +2571,12 @@ static std::string extract_http_exc_headers(PyObject* exc_val) {
     Py_ssize_t pos = 0;
     bool first = true;
     while (PyDict_Next(hdrs.get(), &pos, &key, &val)) {
-        const char* kstr = PyUnicode_AsUTF8(key);
-        const char* vstr = PyUnicode_AsUTF8(val);
-        if (!kstr || !vstr) { PyErr_Clear(); continue; }
+        const char *kstr = PyUnicode_AsUTF8(key);
+        const char *vstr = PyUnicode_AsUTF8(val);
+        if (!kstr || !vstr) {
+            PyErr_Clear();
+            continue;
+        }
         if (!first) result += "\r\n";
         result += kstr;
         result += ": ";
@@ -2620,8 +2586,7 @@ static std::string extract_http_exc_headers(PyObject* exc_val) {
     return result;
 }
 
-
-static int write_to_transport(PyObject* transport_or_write_fn, PyObject* data) {
+static int write_to_transport(PyObject *transport_or_write_fn, PyObject *data) {
     if (!transport_or_write_fn || transport_or_write_fn == Py_None) return -1;
 
     PyRef result;
@@ -2639,24 +2604,23 @@ static int write_to_transport(PyObject* transport_or_write_fn, PyObject* data) {
     return 0;
 }
 
-// ── Direct socket write — bypasses Python transport for small HTTP responses ──
 // Uses platform_socket_write() (send() on all platforms) to write directly to
 // the socket fd, avoiding transport.write() + PyBytes allocation overhead.
 // Falls back to transport.write() for large responses or on partial/failed write.
 // Matches existing WebSocket direct-fd pattern (ws_ring_buffer.cpp).
-static int write_response_direct(int fd, PyObject* transport, PyObject* data) {
+__attribute__((unused))
+static int write_response_direct(int fd, PyObject *transport, PyObject *data) {
     if (fd >= 0 && PyBytes_Check(data)) {
         Py_ssize_t len = PyBytes_GET_SIZE(data);
         if (len > 0 && len <= 16384) {
             ssize_t sent = platform_socket_write(fd, PyBytes_AS_STRING(data), (size_t)len);
             if (sent == len) {
                 // platform_rearm_quickack(fd);  // next pipelined/keep-alive request ACK'd immediately
-                return 0;  // Full write — bypassed Python entirely
+                return 0; // Full write — bypassed Python entirely
             }
             if (sent > 0) {
                 // Partial write: send remainder through Python transport
-                PyRef remainder(PyBytes_FromStringAndSize(
-                    PyBytes_AS_STRING(data) + sent, len - sent));
+                PyRef remainder(PyBytes_FromStringAndSize(PyBytes_AS_STRING(data) + sent, len - sent));
                 if (remainder) return write_to_transport(transport, remainder.get());
                 return -1;
             }
@@ -2666,26 +2630,21 @@ static int write_response_direct(int fd, PyObject* transport, PyObject* data) {
     return write_to_transport(transport, data);
 }
 
-// ── Build + write HTTP response — eliminates per-response PyBytes allocation ─
 // For the ultra-fast path (no CORS, no compression, cached prefix): builds
 // response directly in a pooled buffer and writes to socket fd, bypassing
 // PyBytes entirely. Falls back to build_http_response_bytes for other cases.
-static int build_and_write_http_response(
-    int sock_fd, PyObject* transport,
-    int status_code, const char* body_data, size_t body_len, bool keep_alive,
-    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
-    const char* content_encoding = nullptr, bool head_only = false)
-{
+static int build_and_write_http_response(int sock_fd, PyObject *transport, int status_code, const char *body_data,
+    size_t body_len, bool keep_alive, const CorsConfig *cors = nullptr, const char *origin = nullptr,
+    size_t origin_len = 0, const char *content_encoding = nullptr, bool head_only = false) {
     // Ultra-fast path: cached JSON prefix, no CORS, no compression
-    if (LIKELY(!cors && !content_encoding &&
-        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
+    if (LIKELY(!cors && !content_encoding && status_code > 0 && status_code < 600 &&
+               s_json_prefixes[status_code].data)) {
         auto buf = acquire_buffer();
         buf.reserve(256 + (head_only ? 0 : body_len));
-        build_fast_json_response_buf(buf, s_json_prefixes[status_code],
-                                     body_data, body_len, keep_alive, head_only);
+        build_fast_json_response_buf(buf, s_json_prefixes[status_code], body_data, body_len, keep_alive, head_only);
         // Always use transport.write() -- asyncio buffers writes more efficiently
         // than a raw send() syscall per request (measured: send() adds ~679ns overhead).
-        PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+        PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
         release_buffer(std::move(buf));
         if (!result) return -1;
         int rc = write_to_transport(transport, result);
@@ -2694,8 +2653,8 @@ static int build_and_write_http_response(
         return rc;
     }
     // Slow path: CORS, compression, or uncached status
-    PyObject* resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive,
-                                                cors, origin, origin_len, content_encoding, head_only);
+    PyObject *resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive, cors, origin, origin_len,
+        content_encoding, head_only);
     if (!resp) return -1;
     int rc = write_to_transport(transport, resp);
     Py_DECREF(resp);
@@ -2703,16 +2662,10 @@ static int build_and_write_http_response(
     return rc;
 }
 
-// ── Fused JSON serialize + HTTP response + scatter-gather write ──────────────
-// Eliminates serialize_to_json_pybytes PyBytes alloc + extra buffer cycle.
 // Single buffer pool alloc for JSON body, headers built on stack, writev to socket.
-static int serialize_json_and_write_response(
-    int sock_fd, PyObject* transport,
-    PyObject* json_obj, int status_code, bool keep_alive,
-    const char* accept_encoding = nullptr, size_t ae_len = 0,
-    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
-    bool head_only = false)
-{
+static int serialize_json_and_write_response(int sock_fd, PyObject *transport, PyObject *json_obj, int status_code,
+    bool keep_alive, const char *accept_encoding = nullptr, size_t ae_len = 0, const CorsConfig *cors = nullptr,
+    const char *origin = nullptr, size_t origin_len = 0, bool head_only = false) {
     // 1. Serialize JSON into buffer pool
     auto buf = acquire_buffer();
     if (UNLIKELY(write_json(json_obj, buf, 0) < 0)) {
@@ -2720,10 +2673,10 @@ static int serialize_json_and_write_response(
         return -1;
     }
     size_t body_len = buf.size();
-    const char* body_data = buf.data();
+    const char *body_data = buf.data();
 
     // 2. Optional compression
-    const char* encoding = nullptr;
+    const char *encoding = nullptr;
     std::vector<char> compressed;
     if (UNLIKELY(ae_len > 0 && body_len > 500)) {
         compressed = acquire_buffer();
@@ -2736,13 +2689,12 @@ static int serialize_json_and_write_response(
 
     // No-body status codes: 204, 304 must not have body or content-length
     if (status_code == 204 || status_code == 304) {
-        static const char NO_BODY_KA[]    = "HTTP/1.1 204 No Content\r\nconnection: keep-alive\r\n\r\n";
+        static const char NO_BODY_KA[] = "HTTP/1.1 204 No Content\r\nconnection: keep-alive\r\n\r\n";
         static const char NO_BODY_CLOSE[] = "HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n";
-        static const char NOT_MOD_KA[]    = "HTTP/1.1 304 Not Modified\r\nconnection: keep-alive\r\n\r\n";
+        static const char NOT_MOD_KA[] = "HTTP/1.1 304 Not Modified\r\nconnection: keep-alive\r\n\r\n";
         static const char NOT_MOD_CLOSE[] = "HTTP/1.1 304 Not Modified\r\nconnection: close\r\n\r\n";
-        const char* resp_str = (status_code == 204)
-            ? (keep_alive ? NO_BODY_KA : NO_BODY_CLOSE)
-            : (keep_alive ? NOT_MOD_KA : NOT_MOD_CLOSE);
+        const char *resp_str = (status_code == 204) ? (keep_alive ? NO_BODY_KA : NO_BODY_CLOSE)
+                                                    : (keep_alive ? NOT_MOD_KA : NOT_MOD_CLOSE);
         PyRef resp_bytes(PyBytes_FromString(resp_str));
         if (resp_bytes) write_to_transport(transport, resp_bytes.get());
         // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
@@ -2751,23 +2703,24 @@ static int serialize_json_and_write_response(
         return 0;
     }
     // 3. Ultra-fast path: no CORS, no compression, cached prefix
-    if (LIKELY(!cors && !encoding &&
-        status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data))
-    {
-        const auto& jp = s_json_prefixes[status_code];
+    if (LIKELY(!cors && !encoding && status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
+        const auto &jp = s_json_prefixes[status_code];
         char header_buf[256];
         char cl_buf[20];
         int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
         static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
         static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
-        const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
+        const char *suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
         size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
 
         // Build header on stack
-        char* h = header_buf;
-        memcpy(h, jp.data, jp.len); h += jp.len;
-        memcpy(h, cl_buf, cl_len); h += cl_len;
-        memcpy(h, suffix, suffix_len); h += suffix_len;
+        char *h = header_buf;
+        memcpy(h, jp.data, jp.len);
+        h += jp.len;
+        memcpy(h, cl_buf, cl_len);
+        h += cl_len;
+        memcpy(h, suffix, suffix_len);
+        h += suffix_len;
         size_t header_len = (size_t)(h - header_buf);
 
         // Always use transport.write() -- asyncio buffers writes more efficiently
@@ -2782,7 +2735,7 @@ static int serialize_json_and_write_response(
         }
         PyRef full(PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(header_len + body_len)));
         if (full) {
-            char* dst = PyBytes_AS_STRING(full.get());
+            char *dst = PyBytes_AS_STRING(full.get());
             memcpy(dst, header_buf, header_len);
             memcpy(dst + header_len, body_data, body_len);
             write_to_transport(transport, full.get());
@@ -2794,8 +2747,8 @@ static int serialize_json_and_write_response(
     }
 
     // Slow path: CORS or uncached status — use existing response builder
-    PyObject* resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive,
-                                                cors, origin, origin_len, encoding, head_only);
+    PyObject *resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive, cors, origin, origin_len,
+        encoding, head_only);
     release_buffer(std::move(buf));
     if (!compressed.empty()) release_buffer(std::move(compressed));
     if (!resp) return -1;
@@ -2804,16 +2757,11 @@ static int serialize_json_and_write_response(
     return rc;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // Build JSON response bytes (header + body) without writing to transport.
 // Returns a new PyBytes reference on success, nullptr on failure.
 // Used by the per-route response cache to capture complete responses.
-// ═══════════════════════════════════════════════════════════════════════════════
-static PyObject* build_json_response_bytes(
-    PyObject* json_obj, int status_code, bool keep_alive,
-    const CorsConfig* cors = nullptr, const char* origin = nullptr, size_t origin_len = 0,
-    bool head_only = false)
-{
+static PyObject *build_json_response_bytes(PyObject *json_obj, int status_code, bool keep_alive,
+    const CorsConfig *cors = nullptr, const char *origin = nullptr, size_t origin_len = 0, bool head_only = false) {
     // 1. Serialize JSON into buffer pool
     auto buf = acquire_buffer();
     if (UNLIKELY(write_json(json_obj, buf, 0) < 0)) {
@@ -2821,47 +2769,49 @@ static PyObject* build_json_response_bytes(
         return nullptr;
     }
     size_t body_len = buf.size();
-    const char* body_data = buf.data();
+    const char *body_data = buf.data();
 
     // No-body status codes
     if (status_code == 204 || status_code == 304) {
-        static const char NO_BODY_KA[]    = "HTTP/1.1 204 No Content\r\nconnection: keep-alive\r\n\r\n";
+        static const char NO_BODY_KA[] = "HTTP/1.1 204 No Content\r\nconnection: keep-alive\r\n\r\n";
         static const char NO_BODY_CLOSE[] = "HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n";
-        static const char NOT_MOD_KA[]    = "HTTP/1.1 304 Not Modified\r\nconnection: keep-alive\r\n\r\n";
+        static const char NOT_MOD_KA[] = "HTTP/1.1 304 Not Modified\r\nconnection: keep-alive\r\n\r\n";
         static const char NOT_MOD_CLOSE[] = "HTTP/1.1 304 Not Modified\r\nconnection: close\r\n\r\n";
-        const char* resp_str = (status_code == 204)
-            ? (keep_alive ? NO_BODY_KA : NO_BODY_CLOSE)
-            : (keep_alive ? NOT_MOD_KA : NOT_MOD_CLOSE);
-        PyObject* result = PyBytes_FromString(resp_str);
+        const char *resp_str = (status_code == 204) ? (keep_alive ? NO_BODY_KA : NO_BODY_CLOSE)
+                                                    : (keep_alive ? NOT_MOD_KA : NOT_MOD_CLOSE);
+        PyObject *result = PyBytes_FromString(resp_str);
         release_buffer(std::move(buf));
         return result;
     }
 
     // Fast path: cached JSON prefix, no CORS
     if (LIKELY(!cors && status_code > 0 && status_code < 600 && s_json_prefixes[status_code].data)) {
-        const auto& jp = s_json_prefixes[status_code];
+        const auto &jp = s_json_prefixes[status_code];
         char header_buf[256];
         char cl_buf[20];
         int cl_len = fast_i64_to_buf(cl_buf, (long long)body_len);
         static constexpr char SUFFIX_KA[] = "\r\nconnection: keep-alive\r\n\r\n";
         static constexpr char SUFFIX_CLOSE[] = "\r\nconnection: close\r\n\r\n";
-        const char* suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
+        const char *suffix = keep_alive ? SUFFIX_KA : SUFFIX_CLOSE;
         size_t suffix_len = keep_alive ? sizeof(SUFFIX_KA) - 1 : sizeof(SUFFIX_CLOSE) - 1;
 
-        char* h = header_buf;
-        memcpy(h, jp.data, jp.len); h += jp.len;
-        memcpy(h, cl_buf, cl_len); h += cl_len;
-        memcpy(h, suffix, suffix_len); h += suffix_len;
+        char *h = header_buf;
+        memcpy(h, jp.data, jp.len);
+        h += jp.len;
+        memcpy(h, cl_buf, cl_len);
+        h += cl_len;
+        memcpy(h, suffix, suffix_len);
+        h += suffix_len;
         size_t header_len = (size_t)(h - header_buf);
 
         if (UNLIKELY(head_only)) {
-            PyObject* result = PyBytes_FromStringAndSize(header_buf, (Py_ssize_t)header_len);
+            PyObject *result = PyBytes_FromStringAndSize(header_buf, (Py_ssize_t)header_len);
             release_buffer(std::move(buf));
             return result;
         }
-        PyObject* full = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(header_len + body_len));
+        PyObject *full = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)(header_len + body_len));
         if (full) {
-            char* dst = PyBytes_AS_STRING(full);
+            char *dst = PyBytes_AS_STRING(full);
             memcpy(dst, header_buf, header_len);
             memcpy(dst + header_len, body_data, body_len);
         }
@@ -2870,35 +2820,31 @@ static PyObject* build_json_response_bytes(
     }
 
     // Slow path: CORS or uncached status
-    PyObject* resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive,
-                                                cors, origin, origin_len, nullptr, head_only);
+    PyObject *resp = build_http_response_bytes(status_code, body_data, body_len, keep_alive, cors, origin, origin_len,
+        nullptr, head_only);
     release_buffer(std::move(buf));
     return resp;
 }
 
-// ── HttpConnectionBuffer — replaces Python bytearray + memmove ──────────────
 // Linear buffer with read/write offsets. Compact only when read_pos > 50% capacity.
-// Eliminates: Python memoryview creation, slice ops, O(N) memmove per request.
 
 class HttpConnectionBuffer {
-    static constexpr size_t INITIAL_CAPACITY = 1024;   // 1KB initial — grows on demand
-    static constexpr size_t MAX_CAPACITY = 16777216;  // 16MB (covers most file uploads)
+    static constexpr size_t INITIAL_CAPACITY = 1024; // 1KB initial — grows on demand
+    static constexpr size_t MAX_CAPACITY = 16777216; // 16MB (covers most file uploads)
 
-    uint8_t* buf_;
+    uint8_t *buf_;
     size_t capacity_;
     size_t read_pos_;
     size_t write_pos_;
 
-public:
+  public:
     HttpConnectionBuffer()
-        : buf_(static_cast<uint8_t*>(malloc(INITIAL_CAPACITY)))
-        , capacity_(INITIAL_CAPACITY)
-        , read_pos_(0)
-        , write_pos_(0) {}
+        : buf_(static_cast<uint8_t *>(malloc(INITIAL_CAPACITY))), capacity_(INITIAL_CAPACITY), read_pos_(0),
+          write_pos_(0) {}
 
     ~HttpConnectionBuffer() { free(buf_); }
 
-    bool append(const uint8_t* data, size_t len) {
+    bool append(const uint8_t *data, size_t len) {
         size_t used = write_pos_ - read_pos_;
         size_t needed = used + len;
         if (needed > MAX_CAPACITY) return false;
@@ -2915,7 +2861,7 @@ public:
             size_t new_cap = capacity_;
             while (new_cap < write_pos_ + len) new_cap *= 2;
             if (new_cap > MAX_CAPACITY) new_cap = MAX_CAPACITY;
-            uint8_t* nb = static_cast<uint8_t*>(realloc(buf_, new_cap));
+            uint8_t *nb = static_cast<uint8_t *>(realloc(buf_, new_cap));
             if (!nb) return false;
             buf_ = nb;
             capacity_ = new_cap;
@@ -2926,7 +2872,7 @@ public:
         return true;
     }
 
-    const uint8_t* data() const { return buf_ + read_pos_; }
+    const uint8_t *data() const { return buf_ + read_pos_; }
     size_t size() const { return write_pos_ - read_pos_; }
 
     void consume(size_t n) {
@@ -2944,7 +2890,7 @@ public:
         // Avoids a realloc syscall on every connection close for normal requests.
         // A 4KB high-water buffer stays allocated for reuse, saving allocator round-trips.
         if (capacity_ > INITIAL_CAPACITY * 4) {
-            uint8_t* nb = static_cast<uint8_t*>(realloc(buf_, INITIAL_CAPACITY));
+            uint8_t *nb = static_cast<uint8_t *>(realloc(buf_, INITIAL_CAPACITY));
             if (nb) {
                 buf_ = nb;
                 capacity_ = INITIAL_CAPACITY;
@@ -2952,7 +2898,6 @@ public:
         }
     }
 
-    // ── BufferedProtocol support: zero-copy receive ─────────────────────
     // ensure_writable() guarantees at least `n` bytes available for writing.
     // Returns false on allocation failure or overflow.
     bool ensure_writable(size_t n) {
@@ -2971,7 +2916,7 @@ public:
             size_t new_cap = capacity_;
             while (new_cap < write_pos_ + n) new_cap *= 2;
             if (new_cap > MAX_CAPACITY) new_cap = MAX_CAPACITY;
-            uint8_t* nb = static_cast<uint8_t*>(realloc(buf_, new_cap));
+            uint8_t *nb = static_cast<uint8_t *>(realloc(buf_, new_cap));
             if (!nb) return false;
             buf_ = nb;
             capacity_ = new_cap;
@@ -2979,43 +2924,40 @@ public:
         return true;
     }
 
-    uint8_t* write_ptr() { return buf_ + write_pos_; }
+    uint8_t *write_ptr() { return buf_ + write_pos_; }
     size_t writable_size() const { return capacity_ - write_pos_; }
 
-    void commit_write(size_t n) {
-        write_pos_ += n;
-    }
+    void commit_write(size_t n) { write_pos_ += n; }
 };
 
-static const char* HTTP_BUF_CAPSULE_NAME = "http_connection_buffer";
+static const char *HTTP_BUF_CAPSULE_NAME = "http_connection_buffer";
 
 namespace {
-void http_buf_destructor(PyObject* capsule) {
-    void* ptr = PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME);
-    if (ptr) delete static_cast<HttpConnectionBuffer*>(ptr);
+void http_buf_destructor(PyObject *capsule) {
+    void *ptr = PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME);
+    if (ptr) delete static_cast<HttpConnectionBuffer *>(ptr);
 }
-}
+} // namespace
 
-PyObject* py_http_buf_create(PyObject* /*self*/, PyObject* /*args*/) {
-    auto* buf = new HttpConnectionBuffer();
+PyObject *py_http_buf_create(PyObject * /*self*/, PyObject * /*args*/) {
+    auto *buf = new HttpConnectionBuffer();
     return PyCapsule_New(buf, HTTP_BUF_CAPSULE_NAME, http_buf_destructor);
 }
 
 // http_buf_append: Append data to buffer. Returns True on success, False on overflow.
-PyObject* py_http_buf_append(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
+PyObject *py_http_buf_append(PyObject * /*self*/, PyObject *args) {
+    PyObject *capsule;
     Py_buffer py_buf;
     if (!PyArg_ParseTuple(args, "Oy*", &capsule, &py_buf)) return nullptr;
 
-    auto* buf = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    auto *buf = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
     if (!buf) {
         PyBuffer_Release(&py_buf);
         PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
         return nullptr;
     }
 
-    bool ok = buf->append(static_cast<const uint8_t*>(py_buf.buf), py_buf.len);
+    bool ok = buf->append(static_cast<const uint8_t *>(py_buf.buf), py_buf.len);
     PyBuffer_Release(&py_buf);
 
     if (ok) Py_RETURN_TRUE;
@@ -3024,26 +2966,23 @@ PyObject* py_http_buf_append(PyObject* /*self*/, PyObject* args) {
 
 // http_buf_get_view: Return a memoryview into the readable portion of the buffer.
 // Zero-copy — the memoryview points directly into the C++ buffer.
-PyObject* py_http_buf_get_view(PyObject* /*self*/, PyObject* capsule) {
-    auto* buf = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+PyObject *py_http_buf_get_view(PyObject * /*self*/, PyObject *capsule) {
+    auto *buf = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
     if (!buf) {
         PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
         return nullptr;
     }
     if (buf->size() == 0) Py_RETURN_NONE;
-    return PyMemoryView_FromMemory(
-        (char*)buf->data(), (Py_ssize_t)buf->size(), PyBUF_READ);
+    return PyMemoryView_FromMemory((char *)buf->data(), (Py_ssize_t)buf->size(), PyBUF_READ);
 }
 
 // http_buf_consume: Advance read position by N bytes. O(1) — no memmove!
-PyObject* py_http_buf_consume(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
+PyObject *py_http_buf_consume(PyObject * /*self*/, PyObject *args) {
+    PyObject *capsule;
     Py_ssize_t n;
     if (!PyArg_ParseTuple(args, "On", &capsule, &n)) return nullptr;
 
-    auto* buf = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    auto *buf = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
     if (!buf) {
         PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
         return nullptr;
@@ -3053,9 +2992,8 @@ PyObject* py_http_buf_consume(PyObject* /*self*/, PyObject* args) {
 }
 
 // http_buf_clear: Reset buffer to empty state.
-PyObject* py_http_buf_clear(PyObject* /*self*/, PyObject* capsule) {
-    auto* buf = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+PyObject *py_http_buf_clear(PyObject * /*self*/, PyObject *capsule) {
+    auto *buf = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
     if (!buf) {
         PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
         return nullptr;
@@ -3065,9 +3003,8 @@ PyObject* py_http_buf_clear(PyObject* /*self*/, PyObject* capsule) {
 }
 
 // http_buf_len: Return readable byte count.
-PyObject* py_http_buf_len(PyObject* /*self*/, PyObject* capsule) {
-    auto* buf = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+PyObject *py_http_buf_len(PyObject * /*self*/, PyObject *capsule) {
+    auto *buf = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
     if (!buf) {
         PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
         return nullptr;
@@ -3078,38 +3015,35 @@ PyObject* py_http_buf_len(PyObject* /*self*/, PyObject* capsule) {
 // http_buf_get_write_buf: Return a writable memoryview into the buffer's unused space.
 // Used by BufferedProtocol.get_buffer() to let asyncio write directly into our buffer.
 // Args: capsule, sizehint (int)
-PyObject* py_http_buf_get_write_buf(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
+PyObject *py_http_buf_get_write_buf(PyObject * /*self*/, PyObject *args) {
+    PyObject *capsule;
     Py_ssize_t sizehint;
     if (!PyArg_ParseTuple(args, "On", &capsule, &sizehint)) return nullptr;
 
-    auto* buf = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    auto *buf = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
     if (!buf) {
         PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
         return nullptr;
     }
 
     size_t hint = (sizehint > 0) ? (size_t)sizehint : 8192;
-    if (hint < 4096) hint = 4096;  // Minimum useful read size
+    if (hint < 4096) hint = 4096; // Minimum useful read size
     if (!buf->ensure_writable(hint)) {
         PyErr_SetString(PyExc_MemoryError, "http_connection_buffer overflow");
         return nullptr;
     }
 
-    return PyMemoryView_FromMemory(
-        (char*)buf->write_ptr(), (Py_ssize_t)buf->writable_size(), PyBUF_WRITE);
+    return PyMemoryView_FromMemory((char *)buf->write_ptr(), (Py_ssize_t)buf->writable_size(), PyBUF_WRITE);
 }
 
 // http_buf_commit_write: Advance write position after asyncio wrote into the buffer.
 // Called from BufferedProtocol.buffer_updated(nbytes).
-PyObject* py_http_buf_commit_write(PyObject* /*self*/, PyObject* args) {
-    PyObject* capsule;
+PyObject *py_http_buf_commit_write(PyObject * /*self*/, PyObject *args) {
+    PyObject *capsule;
     Py_ssize_t nbytes;
     if (!PyArg_ParseTuple(args, "On", &capsule, &nbytes)) return nullptr;
 
-    auto* buf = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
+    auto *buf = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(capsule, HTTP_BUF_CAPSULE_NAME));
     if (!buf) {
         PyErr_SetString(PyExc_ValueError, "Invalid http_connection_buffer");
         return nullptr;
@@ -3118,13 +3052,9 @@ PyObject* py_http_buf_commit_write(PyObject* /*self*/, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// ── Post-response hook helper (for logging middleware) ──────────────────────
 // Calls the registered Python hook with (method, path, status_code, duration_ms)
-static inline void fire_post_response_hook(
-    CoreAppObject* self, const char* method_data, size_t method_len,
-    const char* path_data, size_t path_len, int status_code,
-    std::chrono::steady_clock::time_point start_time)
-{
+static inline void fire_post_response_hook(CoreAppObject *self, const char *method_data, size_t method_len,
+    const char *path_data, size_t path_len, int status_code, std::chrono::steady_clock::time_point start_time) {
     if (!self->post_response_hook) return;
     auto end = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(end - start_time).count();
@@ -3133,17 +3063,14 @@ static inline void fire_post_response_hook(
     PyRef sc(PyLong_FromLong(status_code));
     PyRef dur(PyFloat_FromDouble(ms));
     if (m && p && sc && dur) {
-        PyRef r(PyObject_CallFunctionObjArgs(self->post_response_hook,
-                m.get(), p.get(), sc.get(), dur.get(), nullptr));
+        PyRef r(PyObject_CallFunctionObjArgs(self->post_response_hook, m.get(), p.get(), sc.get(), dur.get(), nullptr));
         if (!r) log_and_clear_pyerr("post_response_hook error");
     }
 }
 
-static PyObject* dispatch_one_request(
-    CoreAppObject* self, const char* buf_data, Py_ssize_t buf_len,
-    PyObject* transport, int sock_fd);
+static PyObject *dispatch_one_request(CoreAppObject *self, const char *buf_data, Py_ssize_t buf_len,
+    PyObject *transport, int sock_fd);
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // handle_http — C++ HTTP Server Hot Path (METH_FASTCALL)
 //
 // Called from Python asyncio Protocol's data_received().
@@ -3155,19 +3082,15 @@ static PyObject* dispatch_one_request(
 //   (consumed_bytes, coroutine) — async endpoint, Python must await
 //   (0, None)                   — need more data (incomplete HTTP request)
 //   (-1, None)                  — parse error (400 already sent)
-// ═══════════════════════════════════════════════════════════════════════════════
 
-static PyObject* CoreApp_handle_http(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_handle_http(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs < 2 || nargs > 4) {
         PyErr_SetString(PyExc_TypeError, "handle_http requires 2-4 args (buffer, transport[, offset[, sock_fd]])");
         return nullptr;
     }
 
-    PyObject* buffer_obj = args[0];
-    PyObject* transport = args[1];
-    // OPT-7: Optional offset parameter eliminates memoryview slicing in Python loop
+    PyObject *buffer_obj = args[0];
+    PyObject *transport = args[1];
     Py_ssize_t offset = 0;
     if (nargs >= 3) {
         offset = PyLong_AsSsize_t(args[2]);
@@ -3177,7 +3100,10 @@ static PyObject* CoreApp_handle_http(
     int sock_fd = -1;
     if (nargs >= 4) {
         sock_fd = (int)PyLong_AsLong(args[3]);
-        if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+        if (sock_fd == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            sock_fd = -1;
+        }
     }
 
     // Re-arm TCP_QUICKACK immediately — ensures the kernel ACKs the just-received
@@ -3187,18 +3113,17 @@ static PyObject* CoreApp_handle_http(
     // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
     // Fast-path: PyCapsule (HttpConnectionBuffer) — skip memoryview creation entirely
-    char* buf_data;
+    char *buf_data;
     Py_ssize_t buf_len;
     Py_buffer view = {};
     bool have_view = false;
 
     if (PyCapsule_CheckExact(buffer_obj)) {
-        auto* hb = static_cast<HttpConnectionBuffer*>(
-            PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
+        auto *hb = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
         if (!hb) return nullptr;
         Py_ssize_t total = (Py_ssize_t)hb->size();
         if (offset > total) offset = total;
-        buf_data = (char*)hb->data() + offset;
+        buf_data = (char *)hb->data() + offset;
         buf_len = total - offset;
     } else {
         // Slow path: any buffer protocol object (bytes, bytearray, memoryview)
@@ -3207,68 +3132,88 @@ static PyObject* CoreApp_handle_http(
         }
         have_view = true;
         if (offset > view.len) offset = view.len;
-        buf_data = (char*)view.buf + offset;
+        buf_data = (char *)view.buf + offset;
         buf_len = view.len - offset;
     }
     // RAII guard to release buffer on all return paths (no-op if capsule path)
     struct BufferGuard {
-        Py_buffer* v; bool active;
-        ~BufferGuard() { if (active) PyBuffer_Release(v); }
+        Py_buffer *v;
+        bool active;
+        ~BufferGuard() {
+            if (active) PyBuffer_Release(v);
+        }
     } buf_guard{&view, have_view};
 
     return dispatch_one_request(self, buf_data, buf_len, transport, sock_fd);
 }
 
-static PyObject* dispatch_one_request(
-    CoreAppObject* self, const char* buf_data, Py_ssize_t buf_len,
-    PyObject* transport, int sock_fd)
-{
-    // ── Parse HTTP request ───────────────────────────────────────────────
+static PyObject *dispatch_one_request(CoreAppObject *self, const char *buf_data, Py_ssize_t buf_len,
+    PyObject *transport, int sock_fd) {
     ParsedHttpRequest req = {};
     // Fast-path GET/HEAD parser: avoids llhttp state machine for simple requests
     int parse_result = 0;
     {
-        const char* p = buf_data;
-        bool fast_get  = (buf_len >= 16 && p[0]=='G' && p[1]=='E' && p[2]=='T' && p[3]==' ');
-        bool fast_head = (!fast_get && buf_len >= 17 && p[0]=='H' && p[1]=='E' && p[2]=='A' && p[3]=='D' && p[4]==' ');
+        const char *p = buf_data;
+        bool fast_get = (buf_len >= 16 && p[0] == 'G' && p[1] == 'E' && p[2] == 'T' && p[3] == ' ');
+        bool fast_head =
+            (!fast_get && buf_len >= 17 && p[0] == 'H' && p[1] == 'E' && p[2] == 'A' && p[3] == 'D' && p[4] == ' ');
         if (fast_get || fast_head) {
             int mlen = fast_get ? 3 : 4;
-            const char* uri = p + mlen + 1;
-            const char* uri_end = uri;
-            const char* end = p + buf_len;
+            const char *uri = p + mlen + 1;
+            const char *uri_end = uri;
+            const char *end = p + buf_len;
             while (uri_end < end && *uri_end != ' ' && *uri_end != '\r') uri_end++;
-            if (uri_end + 9 < end && *uri_end == ' ' &&
-                uri_end[1]=='H' && uri_end[2]=='T' && uri_end[3]=='T' && uri_end[4]=='P' &&
-                uri_end[5]=='/' && uri_end[7]=='.' && uri_end[9]=='\r') {
-                const char* q = uri; while (q < uri_end && *q != '?') q++;
+            if (uri_end + 9 < end && *uri_end == ' ' && uri_end[1] == 'H' && uri_end[2] == 'T' && uri_end[3] == 'T' &&
+                uri_end[4] == 'P' && uri_end[5] == '/' && uri_end[7] == '.' && uri_end[9] == '\r') {
+                const char *q = uri;
+                while (q < uri_end && *q != '?') q++;
                 req.path = StringView(uri, (size_t)(q - uri));
-                if (q < uri_end) req.query_string = StringView(q+1, (size_t)(uri_end-q-1));
+                if (q < uri_end) req.query_string = StringView(q + 1, (size_t)(uri_end - q - 1));
                 req.full_uri = StringView(uri, (size_t)(uri_end - uri));
-                req.method = fast_get ? StringView("GET",3) : StringView("HEAD",4);
-                req.no_body = true; req.is_head = fast_head; req.keep_alive = true;
-                const char* hdr = uri_end + 10;
+                req.method = fast_get ? StringView("GET", 3) : StringView("HEAD", 4);
+                req.no_body = true;
+                req.is_head = fast_head;
+                req.keep_alive = true;
+                const char *hdr = uri_end + 10;
                 if (hdr < end && *hdr == '\n') hdr++;
-                req.header_count = 0; bool found_end = false;
+                req.header_count = 0;
+                bool found_end = false;
                 while (hdr < end && req.header_count < MAX_HEADERS) {
-                    if (hdr[0]=='\r' && hdr+1<end && hdr[1]=='\n') { hdr+=2; found_end=true; break; }
-                    if (hdr[0]=='\n') { hdr++; found_end=true; break; }
-                    const char* col=hdr; while(col<end && *col!=':' && *col!='\r' && *col!='\n') col++;
-                    if (col>=end || *col!=':') break;
-                    const char* v=col+1; while(v<end && *v==' ') v++;
-                    const char* ve=v; while(ve<end && *ve!='\r' && *ve!='\n') ve++;
-                    req.headers[req.header_count].name  = StringView(hdr,(size_t)(col-hdr));
-                    req.headers[req.header_count].value = StringView(v,(size_t)(ve-v));
+                    if (hdr[0] == '\r' && hdr + 1 < end && hdr[1] == '\n') {
+                        hdr += 2;
+                        found_end = true;
+                        break;
+                    }
+                    if (hdr[0] == '\n') {
+                        hdr++;
+                        found_end = true;
+                        break;
+                    }
+                    const char *col = hdr;
+                    while (col < end && *col != ':' && *col != '\r' && *col != '\n') col++;
+                    if (col >= end || *col != ':') break;
+                    const char *v = col + 1;
+                    while (v < end && *v == ' ') v++;
+                    const char *ve = v;
+                    while (ve < end && *ve != '\r' && *ve != '\n') ve++;
+                    req.headers[req.header_count].name = StringView(hdr, (size_t)(col - hdr));
+                    req.headers[req.header_count].value = StringView(v, (size_t)(ve - v));
                     req.header_count++;
-                    hdr=ve; if(hdr<end&&*hdr=='\r')hdr++; if(hdr<end&&*hdr=='\n')hdr++;
+                    hdr = ve;
+                    if (hdr < end && *hdr == '\r') hdr++;
+                    if (hdr < end && *hdr == '\n') hdr++;
                 }
                 if (found_end) {
                     req.total_consumed = (size_t)(hdr - buf_data);
                     bool has_upgrade = false;
-                    for (int i=0;i<req.header_count;i++) {
-                        const auto& h=req.headers[i];
-                        if (h.name.len==10 && (h.name.data[0]|32)=='c' && h.name.iequals("connection",10)) {
-                            if (h.value.len>=7 && strncasecmp(h.value.data,"upgrade",7)==0) { has_upgrade=true; break; }
-                            if (h.value.len>=5 && strncasecmp(h.value.data,"close",5)==0) req.keep_alive=false;
+                    for (int i = 0; i < req.header_count; i++) {
+                        const auto &h = req.headers[i];
+                        if (h.name.len == 10 && (h.name.data[0] | 32) == 'c' && h.name.iequals("connection", 10)) {
+                            if (h.value.len >= 7 && strncasecmp(h.value.data, "upgrade", 7) == 0) {
+                                has_upgrade = true;
+                                break;
+                            }
+                            if (h.value.len >= 5 && strncasecmp(h.value.data, "close", 5) == 0) req.keep_alive = false;
                         }
                     }
                     if (!has_upgrade) parse_result = 1;
@@ -3303,7 +3248,6 @@ static PyObject* dispatch_one_request(
     ++self->counters.total_requests;
     ++self->counters.active_requests;
 
-    // ── Method flags (pre-computed by HTTP parser using llhttp enum) ──────
     // GET, HEAD, OPTIONS: body bytes were consumed by llhttp but discarded
     // (on_body is a no-op). req.body is empty, no body processing needed.
     // HEAD additionally requires stripping the response body while keeping headers.
@@ -3311,11 +3255,9 @@ static PyObject* dispatch_one_request(
     const bool skip_body_parse = req.no_body;
 
     // Capture start time only if post-response hook is configured (skip ~25ns rdtsc otherwise)
-    auto request_start_time = self->post_response_hook
-        ? std::chrono::steady_clock::now()
-        : std::chrono::steady_clock::time_point{};
+    auto request_start_time =
+        self->post_response_hook ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 
-    // ── Extract Origin, Host, Accept-Encoding, Authorization headers ────
     StringView origin_sv;
     StringView host_sv;
     StringView accept_encoding_sv;
@@ -3328,36 +3270,45 @@ static PyObject* dispatch_one_request(
         // Content-Type only needed for POST/PUT/PATCH body parsing — skip for GET/HEAD/OPTIONS
         const int need = want_origin ? (skip_body_parse ? 4 : 5) : (skip_body_parse ? 3 : 4);
         for (int i = 0; i < req.header_count && found < need; i++) {
-            const auto& hdr = req.headers[i];
+            const auto &hdr = req.headers[i];
             size_t nlen = hdr.name.len;
             char fb = nlen > 0 ? (hdr.name.data[0] | 0x20) : 0;
             switch (nlen) {
-                case 4:
-                    if (host_sv.empty() && fb == 'h' && hdr.name.iequals("host", 4))
-                        { host_sv = hdr.value; found++; }
-                    break;
-                case 6:
-                    if (want_origin && origin_sv.empty() && fb == 'o' && hdr.name.iequals("origin", 6))
-                        { origin_sv = hdr.value; found++; }
-                    break;
-                case 12:
-                    // Skip content-type for body-less methods (GET, HEAD, OPTIONS)
-                    if (!skip_body_parse && content_type_sv.empty() && fb == 'c' && hdr.name.iequals("content-type", 12))
-                        { content_type_sv = hdr.value; found++; }
-                    break;
-                case 13:
-                    if (authorization_sv.empty() && fb == 'a' && hdr.name.iequals("authorization", 13))
-                        { authorization_sv = hdr.value; found++; }
-                    break;
-                case 15:
-                    if (accept_encoding_sv.empty() && fb == 'a' && hdr.name.iequals("accept-encoding", 15))
-                        { accept_encoding_sv = hdr.value; found++; }
-                    break;
+            case 4:
+                if (host_sv.empty() && fb == 'h' && hdr.name.iequals("host", 4)) {
+                    host_sv = hdr.value;
+                    found++;
+                }
+                break;
+            case 6:
+                if (want_origin && origin_sv.empty() && fb == 'o' && hdr.name.iequals("origin", 6)) {
+                    origin_sv = hdr.value;
+                    found++;
+                }
+                break;
+            case 12:
+                // Skip content-type for body-less methods (GET, HEAD, OPTIONS)
+                if (!skip_body_parse && content_type_sv.empty() && fb == 'c' && hdr.name.iequals("content-type", 12)) {
+                    content_type_sv = hdr.value;
+                    found++;
+                }
+                break;
+            case 13:
+                if (authorization_sv.empty() && fb == 'a' && hdr.name.iequals("authorization", 13)) {
+                    authorization_sv = hdr.value;
+                    found++;
+                }
+                break;
+            case 15:
+                if (accept_encoding_sv.empty() && fb == 'a' && hdr.name.iequals("accept-encoding", 15)) {
+                    accept_encoding_sv = hdr.value;
+                    found++;
+                }
+                break;
             }
         }
     }
 
-    // ── Trusted host check ──────────────────────────────────────────────
     if (self->trusted_host_enabled && !host_sv.empty()) {
         if (!check_trusted_host_inline(self->th_ptr_cached, host_sv.data, host_sv.len)) {
             --self->counters.active_requests;
@@ -3367,12 +3318,11 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── HTTPS redirect ──
     if (UNLIKELY(self->https_redirect_enabled)) {
         // Check if request is already HTTPS (via X-Forwarded-Proto or connection type)
         bool is_https = false;
         for (int i = 0; i < req.header_count; i++) {
-            const auto& hdr = req.headers[i];
+            const auto &hdr = req.headers[i];
             if (hdr.name.len == 17 && memcmp(hdr.name.data, "x-forwarded-proto", 17) == 0) {
                 is_https = (hdr.value.len >= 5 && memcmp(hdr.value.data, "https", 5) == 0);
                 break;
@@ -3395,8 +3345,10 @@ static PyObject* dispatch_one_request(
             resp_str += "HTTP/1.1 307 Temporary Redirect\r\nLocation: ";
             resp_str += redirect_url;
             resp_str += "\r\nContent-Length: 0\r\n";
-            if (req.keep_alive) resp_str += "Connection: keep-alive\r\n";
-            else resp_str += "Connection: close\r\n";
+            if (req.keep_alive)
+                resp_str += "Connection: keep-alive\r\n";
+            else
+                resp_str += "Connection: close\r\n";
             resp_str += "\r\n";
             PyRef resp_bytes(PyBytes_FromStringAndSize(resp_str.c_str(), (Py_ssize_t)resp_str.size()));
             if (resp_bytes) write_to_transport(transport, resp_bytes.get());
@@ -3405,27 +3357,29 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── CORS preflight (OPTIONS with Origin) ────────────────────────────
-    const CorsConfig* cors_ptr = self->cors_enabled ? self->cors_ptr_cached : nullptr;
+    const CorsConfig *cors_ptr = self->cors_enabled ? self->cors_ptr_cached : nullptr;
     bool has_cors = cors_ptr && !origin_sv.empty() && cors_origin_allowed(cors_ptr, origin_sv.data, origin_sv.len);
 
     if (UNLIKELY(has_cors && req.method.len == 7 && memcmp(req.method.data, "OPTIONS", 7) == 0)) {
         // Full CORS preflight response — entirely in C++, no route needed
         // Extract Access-Control-Request-Headers for echoing
-        const char* acrh_data = nullptr; size_t acrh_len = 0;
+        const char *acrh_data = nullptr;
+        size_t acrh_len = 0;
         for (int i = 0; i < req.header_count; i++) {
-            const auto& hdr = req.headers[i];
+            const auto &hdr = req.headers[i];
             if (hdr.name.len == 30 && hdr.name.iequals("access-control-request-headers", 30)) {
-                acrh_data = hdr.value.data; acrh_len = hdr.value.len; break;
+                acrh_data = hdr.value.data;
+                acrh_len = hdr.value.len;
+                break;
             }
         }
         --self->counters.active_requests;
-        PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive, acrh_data, acrh_len));
+        PyRef resp(build_cors_preflight_response(cors_ptr, origin_sv.data, origin_sv.len, req.keep_alive, acrh_data,
+            acrh_len));
         if (resp) write_to_transport(transport, resp.get());
         return make_consumed_true(self, req.total_consumed);
     }
 
-    // ── Serve /openapi.json, /docs, /redoc (pre-built responses) ──────
     if (req.path.len > 1) {
         std::string_view path_sv(req.path.data, req.path.len);
         if (self->openapi_json_resp && path_sv == self->openapi_url) {
@@ -3444,7 +3398,8 @@ static PyObject* dispatch_one_request(
             return make_consumed_true(self, req.total_consumed);
         } else if (self->oauth2_redirect_html_resp && path_sv == self->oauth2_redirect_url) {
             if (self->has_http_middleware) {
-                if (self->oauth2_redirect_html_content) return make_mw_tuple(self, req, self->oauth2_redirect_html_content, 200);
+                if (self->oauth2_redirect_html_content)
+                    return make_mw_tuple(self, req, self->oauth2_redirect_html_content, 200);
             }
             --self->counters.active_requests;
             write_to_transport(transport, self->oauth2_redirect_html_resp);
@@ -3459,7 +3414,6 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── WebSocket upgrade detection ────────────────────────────────────
     if (UNLIKELY(req.upgrade)) {
         // Extract Sec-WebSocket-Key header
         StringView ws_key;
@@ -3483,18 +3437,16 @@ static PyObject* dispatch_one_request(
             // Use ext-aware upgrade: negotiates permessage-deflate if client requests it,
             // ensures RSV bits are explicitly refused when compression is NOT agreed —
             // prevents clients sending RSV1=1 frames that would trigger protocol error 1002.
-            auto upgrade_resp = ws_build_upgrade_response_ext(
-                ws_key.data, ws_key.len,
-                ws_extensions.data, ws_extensions.len,
-                ws_subprotocol.data, ws_subprotocol.len,
-                nullptr);  // deflate_out=nullptr: never negotiate compression (no inflate ctx)
+            auto upgrade_resp = ws_build_upgrade_response_ext(ws_key.data, ws_key.len, ws_extensions.data,
+                ws_extensions.len, ws_subprotocol.data, ws_subprotocol.len,
+                nullptr); // deflate_out=nullptr: never negotiate compression (no inflate ctx)
             PyRef resp_bytes(PyBytes_FromStringAndSize(upgrade_resp.data(), (Py_ssize_t)upgrade_resp.size()));
             if (resp_bytes) write_to_transport(transport, resp_bytes.get());
 
             // Find the WebSocket route endpoint
             std::shared_lock ws_lock(self->routes_mutex);
             auto ws_match = self->router.at(req.path.data, req.path.len);
-            PyObject* ws_endpoint = nullptr;
+            PyObject *ws_endpoint = nullptr;
             if (ws_match) {
                 int ws_idx = ws_match->route_index;
                 if (ws_idx >= 0 && ws_idx < (int)self->routes.size()) {
@@ -3508,7 +3460,8 @@ static PyObject* dispatch_one_request(
             PyRef consumed(PyLong_FromLongLong((long long)req.total_consumed));
 
             if (ws_endpoint) {
-                // Return (consumed, ("ws", endpoint, path_params_dict, path, headers_list, query_bytes)) for Python to handle
+                // Return (consumed, ("ws", endpoint, path_params_dict, path, headers_list, query_bytes)) for Python to
+                // handle
                 PyRef ws_tag(PyUnicode_InternFromString("ws"));
                 PyRef path_params(PyDict_New());
                 if (ws_match && ws_match->param_count > 0) {
@@ -3526,12 +3479,12 @@ static PyObject* dispatch_one_request(
                 PyRef headers_list(PyList_New(req.header_count));
                 if (headers_list) {
                     for (int hi = 0; hi < req.header_count; hi++) {
-                        const auto& hdr = req.headers[hi];
+                        const auto &hdr = req.headers[hi];
                         PyRef hname(PyBytes_FromStringAndSize(hdr.name.data, (Py_ssize_t)hdr.name.len));
                         PyRef hval(PyBytes_FromStringAndSize(hdr.value.data, (Py_ssize_t)hdr.value.len));
                         if (hname && hval) {
-                            PyObject* pair = PyTuple_Pack(2, hname.get(), hval.get());
-                            PyList_SET_ITEM(headers_list.get(), hi, pair);  // steals ref
+                            PyObject *pair = PyTuple_Pack(2, hname.get(), hval.get());
+                            PyList_SET_ITEM(headers_list.get(), hi, pair); // steals ref
                         } else {
                             Py_INCREF(Py_None);
                             PyList_SET_ITEM(headers_list.get(), hi, Py_None);
@@ -3540,12 +3493,11 @@ static PyObject* dispatch_one_request(
                 }
 
                 // Query string as bytes
-                PyRef qs_bytes(PyBytes_FromStringAndSize(
-                    req.query_string.data ? req.query_string.data : "",
+                PyRef qs_bytes(PyBytes_FromStringAndSize(req.query_string.data ? req.query_string.data : "",
                     req.query_string.data ? (Py_ssize_t)req.query_string.len : 0));
 
-                PyRef ws_info(PyTuple_Pack(6, ws_tag.get(), ws_endpoint, path_params.get(),
-                              path_str.get(), headers_list.get(), qs_bytes.get()));
+                PyRef ws_info(PyTuple_Pack(6, ws_tag.get(), ws_endpoint, path_params.get(), path_str.get(),
+                    headers_list.get(), qs_bytes.get()));
                 Py_DECREF(ws_endpoint);
                 // Must set last_consumed so handle_http_append_and_dispatch /
                 // handle_http_batch_v2 advance the HTTP buffer past the upgrade request.
@@ -3560,7 +3512,6 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── Route matching ───────────────────────────────────────────────────
     // Skip lock when routes are frozen (after startup) — atomic check first.
     // Auto-freeze on first request if not already frozen to eliminate lock contention.
     if (UNLIKELY(!self->routes_frozen.load(std::memory_order_acquire))) {
@@ -3570,7 +3521,6 @@ static PyObject* dispatch_one_request(
 
     auto match = self->router.at(req.path.data, req.path.len);
     if (UNLIKELY(!match)) {
-        // ── Trailing slash redirect: try with/without '/' ───────────
         // Use stack buffer to avoid heap allocation for path probe
         char alt_buf[512];
         size_t alt_len = req.path.len;
@@ -3578,13 +3528,14 @@ static PyObject* dispatch_one_request(
         if (do_redirect_check) {
             std::memcpy(alt_buf, req.path.data, alt_len);
             if (alt_buf[alt_len - 1] == '/') {
-                alt_len--;  // try without trailing slash
+                alt_len--; // try without trailing slash
             } else {
-                alt_buf[alt_len++] = '/';  // try with trailing slash
+                alt_buf[alt_len++] = '/'; // try with trailing slash
             }
             alt_buf[alt_len] = '\0';
         }
-        auto alt_match = (do_redirect_check && self->redirect_slashes) ? self->router.at(alt_buf, alt_len) : std::nullopt;
+        auto alt_match =
+            (do_redirect_check && self->redirect_slashes) ? self->router.at(alt_buf, alt_len) : std::nullopt;
         if (alt_match) {
             --self->counters.active_requests;
             // Build 307 redirect response using resize+memcpy
@@ -3592,7 +3543,7 @@ static PyObject* dispatch_one_request(
             std::string_view host_sv;
             bool is_https = false;
             for (int hi = 0; hi < req.header_count; hi++) {
-                const auto& hdr = req.headers[hi];
+                const auto &hdr = req.headers[hi];
                 if (hdr.name.len == 4 && strncasecmp(hdr.name.data, "host", 4) == 0) {
                     host_sv = std::string_view(hdr.value.data, hdr.value.len);
                 } else if (hdr.name.len == 17 && strncasecmp(hdr.name.data, "x-forwarded-proto", 17) == 0) {
@@ -3607,9 +3558,10 @@ static PyObject* dispatch_one_request(
             buf.resize(old + redir_sz);
             std::memcpy(buf.data() + old, redir, redir_sz);
             // Prepend scheme+host if host header is present and not a test placeholder
-            bool is_test_host = (host_sv == "testserver" || host_sv == "localhost" || host_sv.find("127.0.0.1") == 0 || host_sv.find("::1") == 0);
+            bool is_test_host = (host_sv == "testserver" || host_sv == "localhost" || host_sv.find("127.0.0.1") == 0 ||
+                                 host_sv.find("::1") == 0);
             if (!host_sv.empty() && !is_test_host) {
-                const char* scheme = is_https ? "https://" : "http://";
+                const char *scheme = is_https ? "https://" : "http://";
                 size_t scheme_len = is_https ? 8 : 7;
                 old = buf.size();
                 buf.resize(old + scheme_len + host_sv.size());
@@ -3640,18 +3592,19 @@ static PyObject* dispatch_one_request(
         --self->counters.active_requests;
         // Use pre-built cached 404 response when no CORS (common case — zero alloc)
         if (!has_cors) {
-            if (s_resp_404) write_to_transport(transport, s_resp_404);
+            if (s_resp_404)
+                write_to_transport(transport, s_resp_404);
             else {
                 PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
                 if (resp) write_to_transport(transport, resp.get());
             }
         } else {
-            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
-                       cors_ptr, origin_sv.data, origin_sv.len));
+            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive, cors_ptr, origin_sv.data,
+                origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
         }
-        fire_post_response_hook(self, req.method.data, req.method.len,
-                                req.path.data, req.path.len, 404, request_start_time);
+        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, 404,
+            request_start_time);
         return make_consumed_true(self, req.total_consumed);
     }
 
@@ -3659,67 +3612,67 @@ static PyObject* dispatch_one_request(
     if (idx < 0 || idx >= (int)self->routes.size()) {
         --self->counters.active_requests;
         if (!has_cors) {
-            if (s_resp_404) write_to_transport(transport, s_resp_404);
+            if (s_resp_404)
+                write_to_transport(transport, s_resp_404);
             else {
                 PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
                 if (resp) write_to_transport(transport, resp.get());
             }
         } else {
-            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive,
-                       cors_ptr, origin_sv.data, origin_sv.len));
+            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive, cors_ptr, origin_sv.data,
+                origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
         }
-        fire_post_response_hook(self, req.method.data, req.method.len,
-                                req.path.data, req.path.len, 404, request_start_time);
+        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, 404,
+            request_start_time);
         return make_consumed_true(self, req.total_consumed);
     }
 
-    const auto& route = self->routes[idx];
+    const auto &route = self->routes[idx];
 
-    // ── Method check (O(1) bitmask) ────────────────────────────────────
     if (LIKELY(route.method_mask)) {
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (UNLIKELY(!(route.method_mask & req_method))) {
             --self->counters.active_requests;
             // Use pre-built cached 405 response when no CORS (common case — zero alloc)
             if (!has_cors) {
-                if (s_resp_405) write_to_transport(transport, s_resp_405);
+                if (s_resp_405)
+                    write_to_transport(transport, s_resp_405);
                 else {
                     PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
                     if (resp) write_to_transport(transport, resp.get());
                 }
             } else {
-                PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive,
-                           cors_ptr, origin_sv.data, origin_sv.len));
+                PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive, cors_ptr,
+                    origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
             }
-            fire_post_response_hook(self, req.method.data, req.method.len,
-                                    req.path.data, req.path.len, 405, request_start_time);
+            fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, 405,
+                request_start_time);
             return make_consumed_true(self, req.total_consumed);
         }
     }
 
-    // ── Rate limiting (C++ native, per client IP) — sharded for low contention
     if (UNLIKELY(self->rate_limit_enabled && !self->current_client_ip.empty())) {
-        const double now_ns = (double)std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const double now_ns =
+            (double)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()
+                                                                             .time_since_epoch())
+                .count();
         const double window_ns = (double)self->rate_limit_window_seconds * 1'000'000'000.0;
         const double max_tokens = (double)self->rate_limit_max_requests;
         const double refill_rate = max_tokens / (double)std::max(1, self->rate_limit_window_seconds);
-        size_t shard_idx = self->current_shard_idx;  // cached at connection time
-        auto& shard = self->rate_limit_shards[shard_idx];
+        size_t shard_idx = self->current_shard_idx; // cached at connection time
+        auto &shard = self->rate_limit_shards[shard_idx];
         std::lock_guard<std::mutex> rl_lock(shard.mutex);
         // OPT-3.7: Use transparent find with string_view to avoid per-request
         // std::string copy+hash. Only insert (which needs a key copy) on first miss.
         std::string_view ip_sv(self->current_client_ip);
         auto it = shard.counters.find(ip_sv);
         if (it == shard.counters.end()) {
-            it = shard.counters.try_emplace(
-                self->current_client_ip,
-                CoreAppObject::RateLimitEntry{max_tokens, now_ns}
-            ).first;
+            it = shard.counters.try_emplace(self->current_client_ip, CoreAppObject::RateLimitEntry{max_tokens, now_ns})
+                     .first;
         }
-        auto& entry = it->second;
+        auto &entry = it->second;
         const double elapsed_s = (now_ns - entry.last_refill_ns) / 1'000'000'000.0;
         if (elapsed_s > 0.0) {
             entry.tokens = std::min(max_tokens, entry.tokens + elapsed_s * refill_rate);
@@ -3730,7 +3683,7 @@ static PyObject* dispatch_one_request(
             // Unlock route lock before writing response
             --self->counters.active_requests;
             PyRef resp(build_http_error_response(429, "Rate limit exceeded", req.keep_alive,
-                       has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
             if (resp) write_to_transport(transport, resp.get());
             return make_consumed_true(self, req.total_consumed);
         }
@@ -3740,7 +3693,7 @@ static PyObject* dispatch_one_request(
         static thread_local uint32_t rl_cleanup_counter = 0;
         if (++rl_cleanup_counter >= 10000) {
             rl_cleanup_counter = 0;
-            for (auto it = shard.counters.begin(); it != shard.counters.end(); ) {
+            for (auto it = shard.counters.begin(); it != shard.counters.end();) {
                 if (now_ns - it->second.last_refill_ns > 2.0 * window_ns)
                     it = shard.counters.erase(it);
                 else
@@ -3751,44 +3704,42 @@ static PyObject* dispatch_one_request(
 
     if (UNLIKELY(!route.fast_spec)) {
         --self->counters.active_requests;
-        PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive,
-                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+        PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive, has_cors ? cors_ptr : nullptr,
+            origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
         return make_consumed_true(self, req.total_consumed);
     }
 
     // Copy route data to locals and release lock early.
     // Routes are immutable after startup — safe to use spec pointer after unlock.
-    const FastRouteSpec* spec_ptr = &(*route.fast_spec);
-    PyObject* endpoint_local = route.endpoint;
+    const FastRouteSpec *spec_ptr = &(*route.fast_spec);
+    PyObject *endpoint_local = route.endpoint;
     Py_INCREF(endpoint_local);
     uint16_t status_code_local = route.status_code;
     bool has_body_params_local = spec_ptr->has_body_params;
-    PyObject* body_params_local = spec_ptr->body_params;
+    PyObject *body_params_local = spec_ptr->body_params;
     if (body_params_local) Py_INCREF(body_params_local);
     bool embed_body_local = spec_ptr->embed_body_fields;
-    PyObject* response_model_local = route.response_model_field;
-    if (response_model_local) Py_INCREF(response_model_local);  // strong ref
+    PyObject *response_model_local = route.response_model_field;
+    if (response_model_local) Py_INCREF(response_model_local); // strong ref
     bool is_form_local = route.is_form;
     bool is_coro_local = route.is_coroutine;
 
-
     // RAII guard — auto-DECREF response_model_local on any return path
-    struct PyObjGuard { PyObject* p; ~PyObjGuard() { Py_XDECREF(p); } };
+    struct PyObjGuard {
+        PyObject *p;
+        ~PyObjGuard() { Py_XDECREF(p); }
+    };
     PyObjGuard model_guard{response_model_local};
 
-    const auto& spec = *spec_ptr;
+    const auto &spec = *spec_ptr;
 
-    // ── OPT: Skip kwargs for zero-param endpoints (e.g. GET /) ──────────
-    // NOTE: is_form_local must also force kwargs creation — form routes don't
     // register body_params (has_body_params_local=false) but the form parser
     // writes field values directly into kwargs via PyDict_SetItem. Without this,
     // kwargs is nullptr for form-only routes → segfault in PyDict_SetItem.
-    bool needs_kwargs = (match->param_count > 0) ||
-        spec.has_query_params || spec.has_header_params ||
-        spec.has_cookie_params || has_body_params_local ||
-        spec.has_dependencies || !req.query_string.empty() ||
-        is_form_local || route.is_multi_method;
+    bool needs_kwargs = (match->param_count > 0) || spec.has_query_params || spec.has_header_params ||
+                        spec.has_cookie_params || has_body_params_local || spec.has_dependencies ||
+                        !req.query_string.empty() || is_form_local || route.is_multi_method;
 
     PyRef kwargs(needs_kwargs ? PyDict_New() : nullptr);
     if (needs_kwargs && !kwargs) return nullptr;
@@ -3796,8 +3747,11 @@ static PyObject* dispatch_one_request(
     // Inject __method__ and __body__ for multi-method routes (group dispatcher needs them)
     if (route.is_multi_method && kwargs) {
         bool mc = false;
-        PyObject* ms = get_cached_method(req.method.data, req.method.len, mc);
-        if (ms) { PyDict_SetItem(kwargs.get(), s_m_key, ms); if (!mc) Py_DECREF(ms); }
+        PyObject *ms = get_cached_method(req.method.data, req.method.len, mc);
+        if (ms) {
+            PyDict_SetItem(kwargs.get(), s_m_key, ms);
+            if (!mc) Py_DECREF(ms);
+        }
         // Pass raw body bytes so group dispatcher can parse body params
         if (req.body.len > 0) {
             PyRef body_bytes(PyBytes_FromStringAndSize(req.body.data, (Py_ssize_t)req.body.len));
@@ -3807,9 +3761,9 @@ static PyObject* dispatch_one_request(
         }
         // Pass content-type header
         for (int hi = 0; hi < req.header_count; hi++) {
-            if (req.headers[hi].name.len == 12 &&
-                strncasecmp(req.headers[hi].name.data, "content-type", 12) == 0) {
-                PyRef ct(PyUnicode_FromStringAndSize(req.headers[hi].value.data, (Py_ssize_t)req.headers[hi].value.len));
+            if (req.headers[hi].name.len == 12 && strncasecmp(req.headers[hi].name.data, "content-type", 12) == 0) {
+                PyRef ct(PyUnicode_FromStringAndSize(req.headers[hi].value.data,
+                    (Py_ssize_t)req.headers[hi].value.len));
                 if (ct) {
                     PyDict_SetItem(kwargs.get(), s_ct_key, ct.get());
                 }
@@ -3818,15 +3772,14 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── Path parameters — O(1) hash map lookup ────────────────────────
     if (needs_kwargs && match->param_count > 0) {
         for (int pi = 0; pi < match->param_count; pi++) {
             auto pname = match->params[pi].name;
             auto pval = match->params[pi].value;
             auto pit = spec.path_map.find(pname);
             if (pit != spec.path_map.end()) {
-                const auto& fs = spec.path_specs[pit->second];
-                PyObject* py_val = coerce_param(pval, fs.type_tag);
+                const auto &fs = spec.path_specs[pit->second];
+                PyObject *py_val = coerce_param(pval, fs.type_tag);
                 if (!py_val) return nullptr;
                 PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
                 Py_DECREF(py_val);
@@ -3838,25 +3791,24 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── Query parameters (O(1) hash map lookup + percent-decoding) ─────
     if (spec.has_query_params && !req.query_string.empty()) {
-        const char* p = req.query_string.data;
-        const char* end = p + req.query_string.len;
+        const char *p = req.query_string.data;
+        const char *end = p + req.query_string.len;
         // Scratch buffers — reused across iterations (eliminates 2N allocs)
         std::string decoded_key, decoded_val;
         decoded_key.reserve(64);
         decoded_val.reserve(256);
         while (p < end) {
-            const char* key_start = p;
-            const char* eq = nullptr;
+            const char *key_start = p;
+            const char *eq = nullptr;
             while (p < end && *p != '&') {
                 if (*p == '=' && !eq) eq = p;
                 p++;
             }
             if (eq) {
-                const char* raw_key = key_start;
+                const char *raw_key = key_start;
                 size_t raw_key_len = eq - key_start;
-                const char* raw_val = eq + 1;
+                const char *raw_val = eq + 1;
                 size_t raw_val_len = p - eq - 1;
 
                 // Single-pass decode: skip if no encoding needed (common case)
@@ -3869,7 +3821,7 @@ static PyObject* dispatch_one_request(
 
                 auto qit = spec.query_map.find(key_sv);
                 if (qit != spec.query_map.end()) {
-                    const auto& fs = spec.query_specs[qit->second];
+                    const auto &fs = spec.query_specs[qit->second];
                     // Single-pass percent-decode value before coercion
                     std::string_view val_sv;
                     if (percent_decode_into_if_needed(decoded_val, raw_val, raw_val_len)) {
@@ -3877,11 +3829,11 @@ static PyObject* dispatch_one_request(
                     } else {
                         val_sv = std::string_view(raw_val, raw_val_len);
                     }
-                    PyObject* py_val = coerce_param(val_sv, fs.type_tag);
+                    PyObject *py_val = coerce_param(val_sv, fs.type_tag);
                     if (!py_val) return nullptr;
                     // Multi-value: accumulate repeated keys into a list
                     // (handles List[T], frozenset[T], set[T] query params)
-                    PyObject* existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
+                    PyObject *existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
                     if (existing && PyList_Check(existing)) {
                         PyList_Append(existing, py_val);
                     } else if (existing) {
@@ -3900,33 +3852,32 @@ static PyObject* dispatch_one_request(
                     Py_DECREF(py_val);
                 }
             }
-            if (p < end) p++;  // skip '&'
+            if (p < end) p++; // skip '&'
         }
     }
 
-    // ── Header + Cookie extraction (O(1) hash map lookup) ──────────────
     if (spec.has_header_params || spec.has_cookie_params) {
         for (int i = 0; i < req.header_count; i++) {
-            const auto& hdr = req.headers[i];
+            const auto &hdr = req.headers[i];
 
             // Cookie header
             if (spec.has_cookie_params && hdr.name.iequals("cookie", 6)) {
-                const char* cp = hdr.value.data;
-                const char* cend = cp + hdr.value.len;
+                const char *cp = hdr.value.data;
+                const char *cend = cp + hdr.value.len;
                 while (cp < cend) {
                     while (cp < cend && (*cp == ' ' || *cp == ';')) cp++;
-                    const char* ck_start = cp;
+                    const char *ck_start = cp;
                     while (cp < cend && *cp != '=') cp++;
                     if (cp >= cend) break;
                     std::string_view cookie_name(ck_start, cp - ck_start);
-                    cp++;  // skip '='
-                    const char* cv_start = cp;
+                    cp++; // skip '='
+                    const char *cv_start = cp;
                     while (cp < cend && *cp != ';') cp++;
                     std::string_view cookie_val(cv_start, cp - cv_start);
 
                     auto cit = spec.cookie_map.find(cookie_name);
                     if (cit != spec.cookie_map.end()) {
-                        const auto& fs = spec.cookie_specs[cit->second];
+                        const auto &fs = spec.cookie_specs[cit->second];
                         PyRef py_val(PyUnicode_FromStringAndSize(cookie_val.data(), cookie_val.size()));
                         PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
                     }
@@ -3936,7 +3887,7 @@ static PyObject* dispatch_one_request(
 
             // Header params
             if (spec.has_header_params) {
-                if (hdr.name.len > 255) continue;  // Skip oversized header names
+                if (hdr.name.len > 255) continue; // Skip oversized header names
                 char norm_buf[256];
                 size_t norm_len = hdr.name.len;
                 for (size_t j = 0; j < norm_len; j++) {
@@ -3945,13 +3896,16 @@ static PyObject* dispatch_one_request(
                 std::string_view normalized(norm_buf, norm_len);
                 auto hit = spec.header_map.find(normalized);
                 if (hit != spec.header_map.end()) {
-                    const auto& fs = spec.header_specs[hit->second];
+                    const auto &fs = spec.header_specs[hit->second];
                     {
                         // Check if header has dashes (needed for convert_underscores and seq_underscore_only)
                         bool hdr_has_dash = false;
                         if (!fs.convert_underscores || fs.seq_underscore_only) {
                             for (size_t j = 0; j < hdr.name.len; j++) {
-                                if (hdr.name.data[j] == '-') { hdr_has_dash = true; break; }
+                                if (hdr.name.data[j] == '-') {
+                                    hdr_has_dash = true;
+                                    break;
+                                }
                             }
                         }
                         // convert_underscores=False + scalar: skip dash headers
@@ -3962,7 +3916,7 @@ static PyObject* dispatch_one_request(
                             bool do_collect = fs.is_sequence && !(fs.seq_underscore_only && hdr_has_dash);
                             if (do_collect) {
                                 // Collect multiple values into a list
-                                PyObject* existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
+                                PyObject *existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
                                 if (existing && PyList_Check(existing)) {
                                     PyList_Append(existing, py_val.get());
                                 } else {
@@ -3983,9 +3937,8 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── Fill defaults for missing params ─────────────────────────────────
-    auto fill_defaults_http = [&](const std::vector<FieldSpec>& specs) {
-        for (const auto& fs : specs) {
+    auto fill_defaults_http = [&](const std::vector<FieldSpec> &specs) {
+        for (const auto &fs : specs) {
             // PyDict_SetDefault: single hash+lookup — sets only if key absent
             if (fs.default_value) {
                 PyDict_SetDefault(kwargs.get(), fs.py_field_name, fs.default_value);
@@ -3996,12 +3949,11 @@ static PyObject* dispatch_one_request(
     fill_defaults_http(spec.header_specs);
     fill_defaults_http(spec.cookie_specs);
 
-    // ── Param validation (Pydantic TypeAdapter constraints + required check) ─
     if (spec.param_validator && needs_kwargs) {
         PyRef pv_result(PyObject_CallOneArg(spec.param_validator, kwargs.get()));
         if (pv_result && PyTuple_Check(pv_result.get()) && PyTuple_GET_SIZE(pv_result.get()) >= 2) {
-            PyObject* pv_values = PyTuple_GET_ITEM(pv_result.get(), 0);  // borrowed
-            PyObject* pv_errors = PyTuple_GET_ITEM(pv_result.get(), 1);  // borrowed
+            PyObject *pv_values = PyTuple_GET_ITEM(pv_result.get(), 0); // borrowed
+            PyObject *pv_errors = PyTuple_GET_ITEM(pv_result.get(), 1); // borrowed
             if (pv_errors && PyList_Check(pv_errors) && PyList_GET_SIZE(pv_errors) > 0) {
                 // Return 422 with validation errors
                 PyRef err_dict(PyDict_New());
@@ -4010,10 +3962,11 @@ static PyObject* dispatch_one_request(
                     PyDict_SetItem(err_dict.get(), s_detail_key_global, pv_errors);
                     PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
                     if (err_json) {
-                        char* ej_data; Py_ssize_t ej_len;
+                        char *ej_data;
+                        Py_ssize_t ej_len;
                         PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
                         build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
-                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                     }
                 }
                 Py_DECREF(endpoint_local);
@@ -4026,20 +3979,21 @@ static PyObject* dispatch_one_request(
                 PyDict_Update(kwargs.get(), pv_values);
             }
         } else {
-            PyErr_Clear();  // Don't break dispatch on validator error
+            PyErr_Clear(); // Don't break dispatch on validator error
         }
     }
 
-    // ── Body parsing: JSON or Form data ────────────────────────────────────
     // Skip entirely for GET, HEAD, OPTIONS — these methods carry no request body.
-    PyObject* json_body_obj = Py_None;
+    PyObject *json_body_obj = Py_None;
     // Body size limit (0 = unlimited, like FastAPI/Hono/Bun/Express)
     if (self->max_body_size > 0 && req.body.len > self->max_body_size) {
         PyRef resp(build_http_error_response(413, "Request Entity Too Large", req.keep_alive,
-                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
-        --self->counters.active_requests; ++self->counters.total_errors;
-        Py_DECREF(endpoint_local); Py_XDECREF(body_params_local);
+        --self->counters.active_requests;
+        ++self->counters.total_errors;
+        Py_DECREF(endpoint_local);
+        Py_XDECREF(body_params_local);
         return make_consumed_true(self, req.total_consumed);
     }
 
@@ -4056,30 +4010,38 @@ static PyObject* dispatch_one_request(
 
             if (is_multipart) {
                 // Streaming multipart: BMH boundary search, SpooledTemporaryFile
-                const char* bnd_start = nullptr; size_t bnd_len = 0;
-                const char* ct_data = content_type_sv.data; size_t ct_len = content_type_sv.len;
+                const char *bnd_start = nullptr;
+                size_t bnd_len = 0;
+                const char *ct_data = content_type_sv.data;
+                size_t ct_len = content_type_sv.len;
                 for (size_t ci = 0; ci + 9 <= ct_len; ci++) {
                     if (strncasecmp(ct_data + ci, "boundary=", 9) == 0) {
-                        bnd_start = ct_data + ci + 9; bnd_len = ct_len - ci - 9;
-                        if (bnd_len > 0 && bnd_start[0] == '"') { bnd_start++; bnd_len -= 2; }
+                        bnd_start = ct_data + ci + 9;
+                        bnd_len = ct_len - ci - 9;
+                        if (bnd_len > 0 && bnd_start[0] == '"') {
+                            bnd_start++;
+                            bnd_len -= 2;
+                        }
                         break;
                     }
                 }
                 if (bnd_start && bnd_len > 0) {
                     StreamingMultipartParser smp(std::string(bnd_start, bnd_len), self->max_body_size);
-                    FeedResult fr = smp.feed((const uint8_t*)req.body.data, req.body.len);
+                    FeedResult fr = smp.feed((const uint8_t *)req.body.data, req.body.len);
                     if (fr == FeedResult::SIZE_EXCEEDED) {
                         PyRef resp(build_http_error_response(413, "Request Entity Too Large", req.keep_alive,
-                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                         if (resp) write_to_transport(transport, resp.get());
-                        --self->counters.active_requests; ++self->counters.total_errors;
-                        Py_DECREF(endpoint_local); Py_XDECREF(body_params_local);
+                        --self->counters.active_requests;
+                        ++self->counters.total_errors;
+                        Py_DECREF(endpoint_local);
+                        Py_XDECREF(body_params_local);
                         return make_consumed_true(self, req.total_consumed);
                     }
                     // build_kwargs injects UploadFile objects directly into kwargs
                     // Zero Python calls during parsing - C++ owns all data buffers
                     if (kwargs) {
-                        PyObject* result = smp.build_kwargs(kwargs.get());
+                        PyObject *result = smp.build_kwargs(kwargs.get());
                         if (!result) PyErr_Clear();
                         // json_body_obj stays Py_None for form routes
                     }
@@ -4089,22 +4051,22 @@ static PyObject* dispatch_one_request(
 
             if (is_urlencoded) {
                 // Parse urlencoded body → list of (key, value) tuples → merge into kwargs
-                const char* p = req.body.data;
-                const char* end = p + req.body.len;
+                const char *p = req.body.data;
+                const char *end = p + req.body.len;
                 PyRef form_dict(PyDict_New());
                 // Scratch buffers — reused across iterations (same pattern as query params)
                 std::string decoded_form_key, decoded_form_val;
                 while (p < end) {
-                    const char* key_start = p;
-                    const char* eq = nullptr;
+                    const char *key_start = p;
+                    const char *eq = nullptr;
                     while (p < end && *p != '&') {
                         if (*p == '=' && !eq) eq = p;
                         p++;
                     }
                     if (eq) {
-                        const char* raw_key = key_start;
+                        const char *raw_key = key_start;
                         size_t raw_key_len = eq - key_start;
-                        const char* raw_val = eq + 1;
+                        const char *raw_val = eq + 1;
                         size_t raw_val_len = p - eq - 1;
 
                         // Single-pass percent-decode key and value (handles %XX and + → space)
@@ -4125,7 +4087,7 @@ static PyObject* dispatch_one_request(
                         PyRef pv(PyUnicode_FromStringAndSize(val_sv.data(), val_sv.size()));
                         if (pk && pv) {
                             // Handle multi-value fields: if key already exists, collect into list
-                            PyObject* existing = PyDict_GetItem(form_dict.get(), pk.get());  // borrowed
+                            PyObject *existing = PyDict_GetItem(form_dict.get(), pk.get()); // borrowed
                             if (existing == nullptr) {
                                 // First occurrence — store as plain string
                                 PyDict_SetItem(form_dict.get(), pk.get(), pv.get());
@@ -4147,7 +4109,7 @@ static PyObject* dispatch_one_request(
                                 // Second occurrence — promote to [existing, new] list
                                 PyRef lst(PyList_New(0));
                                 if (lst) {
-                                    PyList_Append(lst.get(), existing);  // INCREF'd by Append
+                                    PyList_Append(lst.get(), existing); // INCREF'd by Append
                                     PyList_Append(lst.get(), pv.get()); // INCREF'd by Append
                                     PyDict_SetItem(form_dict.get(), pk.get(), lst.get());
                                     if (embed_body_local) {
@@ -4159,27 +4121,28 @@ static PyObject* dispatch_one_request(
                     }
                     if (p < end) p++;
                 }
-                json_body_obj = form_dict.release();  // for Pydantic validation path
+                json_body_obj = form_dict.release(); // for Pydantic validation path
             } else if (is_multipart) {
                 // Extract boundary from content-type (zero-alloc: scan raw string_view)
-                const char* ct_ptr = content_type_sv.data;
+                const char *ct_ptr = content_type_sv.data;
                 size_t ct_len = content_type_sv.len;
                 size_t bpos = std::string_view(ct_ptr, ct_len).find("boundary=");
                 if (bpos == std::string_view::npos) {
                     // Try case-insensitive
                     for (size_t i = 0; i + 9 <= ct_len; i++) {
                         if (ci_starts_with(ct_ptr + i, ct_len - i, "boundary=", 9)) {
-                            bpos = i; break;
+                            bpos = i;
+                            break;
                         }
                     }
                 }
                 if (bpos != std::string_view::npos) {
-                    bpos += 9;  // skip "boundary="
+                    bpos += 9; // skip "boundary="
                     // Find end of boundary (';' or end of string)
                     size_t bend = bpos;
                     while (bend < ct_len && ct_ptr[bend] != ';') bend++;
                     // Use string_view into original content-type for boundary
-                    const char* bnd_start = ct_ptr + bpos;
+                    const char *bnd_start = ct_ptr + bpos;
                     size_t bnd_len = bend - bpos;
                     // Strip quotes if present (using string_view — no alloc)
                     if (bnd_len >= 2 && bnd_start[0] == '"' && bnd_start[bnd_len - 1] == '"') {
@@ -4193,18 +4156,18 @@ static PyObject* dispatch_one_request(
                     if (body_bytes && boundary_str) {
                         PyRef parse_args(PyTuple_Pack(2, body_bytes.get(), boundary_str.get()));
                         // py_parse_multipart_body is declared in form_parser
-                        extern PyObject* py_parse_multipart_body(PyObject*, PyObject*);
+                        extern PyObject *py_parse_multipart_body(PyObject *, PyObject *);
                         PyRef parts(py_parse_multipart_body(nullptr, parse_args.get()));
                         if (parts && PyList_Check(parts.get())) {
                             // Convert parts list to dict: name → data (or UploadFile-like)
                             PyRef form_dict(PyDict_New());
                             Py_ssize_t nparts = PyList_GET_SIZE(parts.get());
                             for (Py_ssize_t pi = 0; pi < nparts; pi++) {
-                                PyObject* part = PyList_GET_ITEM(parts.get(), pi);  // borrowed
+                                PyObject *part = PyList_GET_ITEM(parts.get(), pi); // borrowed
                                 // PyDict_GetItemString returns borrowed ref — no PyRef
-                                PyObject* name_obj = PyDict_GetItemString(part, "name");
-                                PyObject* data_obj = PyDict_GetItemString(part, "data");
-                                PyObject* fn_obj = PyDict_GetItemString(part, "filename");
+                                PyObject *name_obj = PyDict_GetItemString(part, "name");
+                                PyObject *data_obj = PyDict_GetItemString(part, "data");
+                                PyObject *fn_obj = PyDict_GetItemString(part, "filename");
                                 if (name_obj) {
                                     if (fn_obj && fn_obj != Py_None) {
                                         // File upload — create UploadFile(filename, file=BytesIO(data), ...)
@@ -4213,13 +4176,15 @@ static PyObject* dispatch_one_request(
                                             PyRef m(PyImport_ImportModule("astraapi._datastructures_impl"));
                                             if (m) {
                                                 s_upload_file_class = PyObject_GetAttrString(m.get(), "UploadFile");
-                                            } else { PyErr_Clear(); }
+                                            } else {
+                                                PyErr_Clear();
+                                            }
                                         }
-                                        PyObject* upload_file_obj = nullptr;
+                                        PyObject *upload_file_obj = nullptr;
                                         if (s_upload_file_class && data_obj) {
                                             // Build file-like object: use SpooledTemporaryFile directly
                                             // if C++ form_parser already created one, else wrap bytes in BytesIO
-                                            static PyObject* s_read_str = nullptr;
+                                            static PyObject *s_read_str = nullptr;
                                             if (!s_read_str) s_read_str = PyUnicode_InternFromString("read");
                                             bool data_is_file = s_read_str && PyObject_HasAttr(data_obj, s_read_str);
                                             PyRef file_obj;
@@ -4230,21 +4195,26 @@ static PyObject* dispatch_one_request(
                                                 PyRef io_mod(PyImport_ImportModule("io"));
                                                 if (io_mod) {
                                                     PyRef bytes_io_cls(PyObject_GetAttrString(io_mod.get(), "BytesIO"));
-                                                    if (bytes_io_cls) file_obj = PyRef(PyObject_CallOneArg(bytes_io_cls.get(), data_obj));
-                                                } else { PyErr_Clear(); }
+                                                    if (bytes_io_cls)
+                                                        file_obj =
+                                                            PyRef(PyObject_CallOneArg(bytes_io_cls.get(), data_obj));
+                                                } else {
+                                                    PyErr_Clear();
+                                                }
                                             }
                                             if (file_obj) {
                                                 // Get content_type from part dict
-                                                PyObject* ct_obj = PyDict_GetItemString(part, "content_type");
-                                                const char* ct_str = "application/octet-stream";
+                                                PyObject *ct_obj = PyDict_GetItemString(part, "content_type");
+                                                const char *ct_str = "application/octet-stream";
                                                 if (ct_obj && ct_obj != Py_None && PyUnicode_Check(ct_obj)) {
-                                                    const char* ct_tmp = PyUnicode_AsUTF8(ct_obj);
+                                                    const char *ct_tmp = PyUnicode_AsUTF8(ct_obj);
                                                     if (ct_tmp) ct_str = ct_tmp;
                                                 }
                                                 // UploadFile(filename=..., file=..., content_type=...)
                                                 PyRef kw(PyDict_New());
                                                 if (kw) {
-                                                    if (!s_kw_filename) s_kw_filename = PyUnicode_InternFromString("filename");
+                                                    if (!s_kw_filename)
+                                                        s_kw_filename = PyUnicode_InternFromString("filename");
                                                     if (!s_kw_file) s_kw_file = PyUnicode_InternFromString("file");
                                                     if (!s_kw_ct) s_kw_ct = PyUnicode_InternFromString("content_type");
                                                     PyRef ct_pystr(PyUnicode_FromString(ct_str));
@@ -4252,26 +4222,35 @@ static PyObject* dispatch_one_request(
                                                         PyDict_SetItem(kw.get(), s_kw_filename, fn_obj);
                                                         PyDict_SetItem(kw.get(), s_kw_file, file_obj.get());
                                                         PyDict_SetItem(kw.get(), s_kw_ct, ct_pystr.get());
-                                                        upload_file_obj = PyObject_Call(s_upload_file_class, g_empty_tuple, kw.get());
+                                                        upload_file_obj =
+                                                            PyObject_Call(s_upload_file_class, g_empty_tuple, kw.get());
                                                         if (!upload_file_obj) PyErr_Clear();
                                                     }
                                                 }
-                                            } else { PyErr_Clear(); }
+                                            } else {
+                                                PyErr_Clear();
+                                            }
                                         }
                                         if (upload_file_obj) {
                                             // Handle multi-value: collect into list if key exists
-                                            PyObject* existing_fd = PyDict_GetItem(form_dict.get(), name_obj);
+                                            PyObject *existing_fd = PyDict_GetItem(form_dict.get(), name_obj);
                                             if (existing_fd == nullptr) {
                                                 PyDict_SetItem(form_dict.get(), name_obj, upload_file_obj);
-                                                if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, upload_file_obj);
+                                                if (embed_body_local)
+                                                    PyDict_SetItem(kwargs.get(), name_obj, upload_file_obj);
                                             } else if (PyList_Check(existing_fd)) {
                                                 PyList_Append(existing_fd, upload_file_obj);
-                                                if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, existing_fd);
+                                                if (embed_body_local)
+                                                    PyDict_SetItem(kwargs.get(), name_obj, existing_fd);
                                             } else {
                                                 PyRef lst(PyList_New(0));
-                                                if (lst) { PyList_Append(lst.get(), existing_fd); PyList_Append(lst.get(), upload_file_obj);
+                                                if (lst) {
+                                                    PyList_Append(lst.get(), existing_fd);
+                                                    PyList_Append(lst.get(), upload_file_obj);
                                                     PyDict_SetItem(form_dict.get(), name_obj, lst.get());
-                                                    if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, lst.get()); }
+                                                    if (embed_body_local)
+                                                        PyDict_SetItem(kwargs.get(), name_obj, lst.get());
+                                                }
                                             }
                                             Py_DECREF(upload_file_obj);
                                         } else {
@@ -4281,25 +4260,33 @@ static PyObject* dispatch_one_request(
                                         // Simple form field
                                         PyRef str_val;
                                         if (PyBytes_Check(data_obj)) {
-                                            char* d; Py_ssize_t dlen;
+                                            char *d;
+                                            Py_ssize_t dlen;
                                             PyBytes_AsStringAndSize(data_obj, &d, &dlen);
                                             str_val = PyRef(PyUnicode_FromStringAndSize(d, dlen));
                                         } else {
-                                            str_val = PyRef(data_obj); Py_INCREF(data_obj);
+                                            str_val = PyRef(data_obj);
+                                            Py_INCREF(data_obj);
                                         }
                                         if (str_val) {
-                                            PyObject* existing_fd2 = PyDict_GetItem(form_dict.get(), name_obj);
+                                            PyObject *existing_fd2 = PyDict_GetItem(form_dict.get(), name_obj);
                                             if (existing_fd2 == nullptr) {
                                                 PyDict_SetItem(form_dict.get(), name_obj, str_val.get());
-                                                if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, str_val.get());
+                                                if (embed_body_local)
+                                                    PyDict_SetItem(kwargs.get(), name_obj, str_val.get());
                                             } else if (PyList_Check(existing_fd2)) {
                                                 PyList_Append(existing_fd2, str_val.get());
-                                                if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, existing_fd2);
+                                                if (embed_body_local)
+                                                    PyDict_SetItem(kwargs.get(), name_obj, existing_fd2);
                                             } else {
                                                 PyRef lst(PyList_New(0));
-                                                if (lst) { PyList_Append(lst.get(), existing_fd2); PyList_Append(lst.get(), str_val.get());
+                                                if (lst) {
+                                                    PyList_Append(lst.get(), existing_fd2);
+                                                    PyList_Append(lst.get(), str_val.get());
                                                     PyDict_SetItem(form_dict.get(), name_obj, lst.get());
-                                                    if (embed_body_local) PyDict_SetItem(kwargs.get(), name_obj, lst.get()); }
+                                                    if (embed_body_local)
+                                                        PyDict_SetItem(kwargs.get(), name_obj, lst.get());
+                                                }
                                             }
                                         }
                                     }
@@ -4313,12 +4300,11 @@ static PyObject* dispatch_one_request(
                 }
             }
         } else if (spec.has_body_params) {
-            // ── JSON body parsing (yyjson — GIL-released raw parse) ──────
             // Validate content-type: must be application/json (or absent/empty)
             // Check content-type: allow application/json and application/*+json
             bool ct_is_json = false;
             if (content_type_sv.empty()) {
-                ct_is_json = true;  // No content-type: assume JSON
+                ct_is_json = true; // No content-type: assume JSON
             } else if (ci_contains(content_type_sv.data, content_type_sv.len, "application/json", 16)) {
                 ct_is_json = true;
             } else {
@@ -4327,14 +4313,20 @@ static PyObject* dispatch_one_request(
                 for (size_t ci = 0; ci + 5 <= content_type_sv.len; ci++) {
                     if (content_type_sv.data[ci] == '+' || content_type_sv.data[ci] == '+') {
                         if (ci + 5 <= content_type_sv.len) {
-                            char lc[5]; for (int li=0;li<5;li++) lc[li]=tolower((unsigned char)content_type_sv.data[ci+li]);
+                            char lc[5];
+                            for (int li = 0; li < 5; li++)
+                                lc[li] = tolower((unsigned char)content_type_sv.data[ci + li]);
                             if (memcmp(lc, "+json", 5) == 0) {
                                 // Check what follows +json
                                 size_t after = ci + 5;
                                 // Skip to end or semicolon (params)
-                                while (after < content_type_sv.len && content_type_sv.data[after] != ';' && content_type_sv.data[after] != ' ') after++;
+                                while (after < content_type_sv.len && content_type_sv.data[after] != ';' &&
+                                       content_type_sv.data[after] != ' ')
+                                    after++;
                                 // If nothing follows +json (or only whitespace/params), it is valid
-                                if (after == ci + 5) { ct_is_json = true; }
+                                if (after == ci + 5) {
+                                    ct_is_json = true;
+                                }
                                 break;
                             }
                         }
@@ -4353,7 +4345,9 @@ static PyObject* dispatch_one_request(
                         if (!s_ct_msg_key) s_ct_msg_key = PyUnicode_InternFromString("msg");
                         if (!s_ct_input_key) s_ct_input_key = PyUnicode_InternFromString("input");
                         if (!s_ct_mat_val) s_ct_mat_val = PyUnicode_InternFromString("model_attributes_type");
-                        if (!s_ct_mat_msg) s_ct_mat_msg = PyUnicode_InternFromString("Input should be a valid dictionary or object to extract fields from");
+                        if (!s_ct_mat_msg)
+                            s_ct_mat_msg = PyUnicode_InternFromString("Input should be a valid dictionary or object to "
+                                                                      "extract fields from");
                         if (!s_ct_body_str) s_ct_body_str = PyUnicode_InternFromString("body");
                         PyRef loc(PyTuple_Pack(1, s_ct_body_str));
                         if (loc) {
@@ -4368,10 +4362,11 @@ static PyObject* dispatch_one_request(
                                 PyDict_SetItem(outer.get(), s_detail_key_global, err_list.get());
                                 PyRef err_json(serialize_to_json_pybytes(outer.get()));
                                 if (err_json) {
-                                    char* ej; Py_ssize_t ej_len;
+                                    char *ej;
+                                    Py_ssize_t ej_len;
                                     PyBytes_AsStringAndSize(err_json.get(), &ej, &ej_len);
-                                    build_and_write_http_response(sock_fd, transport, 422, ej, (size_t)ej_len, req.keep_alive,
-                                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                    build_and_write_http_response(sock_fd, transport, 422, ej, (size_t)ej_len,
+                                        req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                                 }
                             }
                         }
@@ -4383,13 +4378,13 @@ static PyObject* dispatch_one_request(
                 ++self->counters.total_errors;
                 return make_consumed_true(self, req.total_consumed);
             }
-            yyjson_doc* doc = nullptr;
-            const char* json_parse_err_msg = nullptr;
-            PyObject* py_json_result = nullptr; // set if json.loads was used instead of yyjson
+            yyjson_doc *doc = nullptr;
+            const char *json_parse_err_msg = nullptr;
+            PyObject *py_json_result = nullptr; // set if json.loads was used instead of yyjson
             // Check if json.loads is patched (e.g. in tests); if so, call it
             {
-                static PyObject* _orig_json_loads = nullptr;
-                static PyObject* _json_module_dict = nullptr;
+                static PyObject *_orig_json_loads = nullptr;
+                static PyObject *_json_module_dict = nullptr;
                 if (!_orig_json_loads) {
                     PyRef jm(PyImport_ImportModule("json"));
                     if (jm) {
@@ -4399,7 +4394,8 @@ static PyObject* dispatch_one_request(
                         Py_XINCREF(_orig_json_loads);
                     }
                 }
-                PyObject* cur_loads_raw = _json_module_dict ? PyDict_GetItemString(_json_module_dict, "loads") : nullptr;
+                PyObject *cur_loads_raw =
+                    _json_module_dict ? PyDict_GetItemString(_json_module_dict, "loads") : nullptr;
                 if (cur_loads_raw && _orig_json_loads && cur_loads_raw != _orig_json_loads) {
                     // json.loads is patched -- call it
                     PyRef body_str(PyUnicode_DecodeUTF8(req.body.data, (Py_ssize_t)req.body.len, "replace"));
@@ -4413,9 +4409,9 @@ static PyObject* dispatch_one_request(
                 }
             }
             if (!py_json_result) {
-            Py_BEGIN_ALLOW_THREADS
-            doc = yyjson_parse_raw_with_err(req.body.data, req.body.len, &json_parse_err_msg);
-            Py_END_ALLOW_THREADS
+                Py_BEGIN_ALLOW_THREADS doc =
+                    yyjson_parse_raw_with_err(req.body.data, req.body.len, &json_parse_err_msg);
+                Py_END_ALLOW_THREADS
             }
             if (py_json_result) {
                 // json.loads was patched and succeeded -- use its result
@@ -4431,9 +4427,9 @@ static PyObject* dispatch_one_request(
                 if (spec.embed_body_fields && kwargs) {
                     // OPT: merge yyjson keys directly into kwargs in one pass,
                     // avoiding intermediate dict + PyDict_Update overhead
-                    PyObject* full_dict = nullptr;
+                    PyObject *full_dict = nullptr;
                     if (yyjson_doc_merge_to_dict(doc, kwargs.get(), &full_dict) == 0 && full_dict) {
-                        json_body_obj = full_dict;  // for model_validate / InlineResult
+                        json_body_obj = full_dict; // for model_validate / InlineResult
                     }
                     // doc freed by yyjson_doc_merge_to_dict
                 } else {
@@ -4446,9 +4442,12 @@ static PyObject* dispatch_one_request(
                 }
             } else if (req.body.len > 0) {
                 // JSON parse failed on non-empty body: return 422 JSON decode error
-                    --self->counters.active_requests;
-                // Build error: [{"type":"json_invalid","loc":["body",1],"msg":"JSON decode error","input":{},"ctx":{"error":"..."}}]
-                static const char json_err_prefix[] = "{\"detail\":[{\"type\":\"json_invalid\",\"loc\":[\"body\",1],\"msg\":\"JSON decode error\",\"input\":{},\"ctx\":{\"error\":\"";
+                --self->counters.active_requests;
+                // Build error: [{"type":"json_invalid","loc":["body",1],"msg":"JSON decode
+                // error","input":{},"ctx":{"error":"..."}}]
+                static const char json_err_prefix[] =
+                    "{\"detail\":[{\"type\":\"json_invalid\",\"loc\":[\"body\",1],\"msg\":\"JSON decode "
+                    "error\",\"input\":{},\"ctx\":{\"error\":\"";
                 static const char json_err_suffix[] = "\"}}]}";
                 std::string err_body = json_err_prefix;
                 // Try Python json.loads to get the exact error message
@@ -4467,11 +4466,13 @@ static PyObject* dispatch_one_request(
                                     if (ev) {
                                         PyRef ev_str(PyObject_Str(ev));
                                         if (ev_str) {
-                                            const char* s = PyUnicode_AsUTF8(ev_str.get());
+                                            const char *s = PyUnicode_AsUTF8(ev_str.get());
                                             if (s) py_err_msg = s;
                                         }
                                     }
-                                    Py_XDECREF(et); Py_XDECREF(ev); Py_XDECREF(etb);
+                                    Py_XDECREF(et);
+                                    Py_XDECREF(ev);
+                                    Py_XDECREF(etb);
                                 }
                             }
                         }
@@ -4484,24 +4485,32 @@ static PyObject* dispatch_one_request(
                         py_err_msg = py_err_msg.substr(0, colon_pos);
                     }
                 }
-                const char* err_msg = py_err_msg.empty() ? (json_parse_err_msg ? json_parse_err_msg : "Invalid JSON") : py_err_msg.c_str();
+                const char *err_msg = py_err_msg.empty() ? (json_parse_err_msg ? json_parse_err_msg : "Invalid JSON")
+                                                         : py_err_msg.c_str();
                 // Escape the error message for JSON
-                for (const char* p = err_msg; *p; ++p) {
-                    if (*p == '"') err_body += "\\\"";
-                    else if (*p == '\\') err_body += "\\\\";
-                    else err_body += *p;
+                for (const char *p = err_msg; *p; ++p) {
+                    if (*p == '"')
+                        err_body += "\\\"";
+                    else if (*p == '\\')
+                        err_body += "\\\\";
+                    else
+                        err_body += *p;
                 }
                 err_body += json_err_suffix;
                 auto buf = acquire_buffer();
                 buf.reserve(256);
-                static const char hdr422[] = "HTTP/1.1 422 Unprocessable Entity\r\ncontent-type: application/json\r\ncontent-length: ";
+                static const char hdr422[] =
+                    "HTTP/1.1 422 Unprocessable Entity\r\ncontent-type: application/json\r\ncontent-length: ";
                 constexpr size_t hdr422_sz = sizeof(hdr422) - 1;
                 std::string cl_str = std::to_string(err_body.size());
                 buf.resize(hdr422_sz + cl_str.size() + 4 + err_body.size());
                 size_t pos = 0;
-                std::memcpy(buf.data() + pos, hdr422, hdr422_sz); pos += hdr422_sz;
-                std::memcpy(buf.data() + pos, cl_str.data(), cl_str.size()); pos += cl_str.size();
-                std::memcpy(buf.data() + pos, "\r\n\r\n", 4); pos += 4;
+                std::memcpy(buf.data() + pos, hdr422, hdr422_sz);
+                pos += hdr422_sz;
+                std::memcpy(buf.data() + pos, cl_str.data(), cl_str.size());
+                pos += cl_str.size();
+                std::memcpy(buf.data() + pos, "\r\n\r\n", 4);
+                pos += 4;
                 std::memcpy(buf.data() + pos, err_body.data(), err_body.size());
                 PyRef resp(PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size()));
                 release_buffer(std::move(buf));
@@ -4514,18 +4523,24 @@ static PyObject* dispatch_one_request(
 
             // Label for when patched json.loads raises an exception
             if (false) {
-                handle_json_loads_exception:
+            handle_json_loads_exception:
                 // json.loads raised -- return 400 with the exception message
-                    --self->counters.active_requests;
+                --self->counters.active_requests;
                 PyObject *et400, *ev400, *etb400;
                 PyErr_Fetch(&et400, &ev400, &etb400);
                 std::string exc_msg;
                 if (ev400) {
                     PyRef ev_s(PyObject_Str(ev400));
-                    if (ev_s) { const char* s = PyUnicode_AsUTF8(ev_s.get()); if (s) exc_msg = s; }
+                    if (ev_s) {
+                        const char *s = PyUnicode_AsUTF8(ev_s.get());
+                        if (s) exc_msg = s;
+                    }
                 }
-                Py_XDECREF(et400); Py_XDECREF(ev400); Py_XDECREF(etb400);
-                static const char hdr400[] = "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: ";
+                Py_XDECREF(et400);
+                Py_XDECREF(ev400);
+                Py_XDECREF(etb400);
+                static const char hdr400[] =
+                    "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: ";
                 std::string body400 = "{\"detail\":\"" + exc_msg + "\"}";
                 std::string cl400 = std::to_string(body400.size());
                 std::string resp400 = std::string(hdr400) + cl400 + "\r\n\r\n" + body400;
@@ -4551,7 +4566,7 @@ static PyObject* dispatch_one_request(
     // so request_body_to_args calls _extract_form_body which fills in model defaults.
     // This ensures error "input" shows the defaults (matching standard AstraAPI behavior).
     if (is_form_local && has_body_params_local && s_form_data_class) {
-        PyObject* src = (json_body_obj != Py_None) ? json_body_obj : nullptr;
+        PyObject *src = (json_body_obj != Py_None) ? json_body_obj : nullptr;
         PyRef empty_dict;
         if (!src) {
             empty_dict = PyRef(PyDict_New());
@@ -4566,12 +4581,14 @@ static PyObject* dispatch_one_request(
 
     // For dep routes with form body: inject form fields into kwargs so dep_solver can access them
     if (is_form_local && spec.has_dependencies && json_body_obj != Py_None && kwargs) {
-        PyObject* form_src = json_body_obj;
+        PyObject *form_src = json_body_obj;
         PyRef raw_dict_attr(PyObject_GetAttrString(form_src, "_dict"));
-        if (!raw_dict_attr) { PyErr_Clear(); }
-        PyObject* form_dict_to_merge = (raw_dict_attr && PyDict_Check(raw_dict_attr.get()))
-            ? raw_dict_attr.get()
-            : (PyDict_Check(form_src) ? form_src : nullptr);
+        if (!raw_dict_attr) {
+            PyErr_Clear();
+        }
+        PyObject *form_dict_to_merge = (raw_dict_attr && PyDict_Check(raw_dict_attr.get()))
+                                           ? raw_dict_attr.get()
+                                           : (PyDict_Check(form_src) ? form_src : nullptr);
         if (form_dict_to_merge) {
             PyObject *fk, *fv;
             Py_ssize_t fpos = 0;
@@ -4583,7 +4600,6 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── Dependency injection (resolve Depends() callables) ──────────────
     if (spec.has_dependencies && spec.dep_solver) {
         // Only inject request metadata that dependencies actually need.
         // dep_inject_mask is computed at registration time by analyzing the dep tree.
@@ -4593,7 +4609,7 @@ static PyObject* dispatch_one_request(
             PyRef headers_list(PyList_New(req.header_count));
             if (headers_list) {
                 for (int i = 0; i < req.header_count; i++) {
-                    const auto& hdr = req.headers[i];
+                    const auto &hdr = req.headers[i];
                     PyRef nb(PyBytes_FromStringAndSize(hdr.name.data, (Py_ssize_t)hdr.name.len));
                     PyRef vb(PyBytes_FromStringAndSize(hdr.value.data, (Py_ssize_t)hdr.value.len));
                     if (nb && vb) {
@@ -4617,7 +4633,7 @@ static PyObject* dispatch_one_request(
             // s_m_key pre-cached at startup
             // Use cached method string if available (avoids per-request allocation)
             bool method_cached = false;
-            PyObject* method_str = get_cached_method(req.method.data, req.method.len, method_cached);
+            PyObject *method_str = get_cached_method(req.method.data, req.method.len, method_cached);
             if (method_str) {
                 PyDict_SetItem(kwargs.get(), s_m_key, method_str);
                 if (!method_cached) Py_DECREF(method_str);
@@ -4633,15 +4649,13 @@ static PyObject* dispatch_one_request(
         // Python dep solver uses these for native HTTPBearer/HTTPBasic handling
         if (!authorization_sv.empty()) {
             size_t space_pos = 0;
-            while (space_pos < authorization_sv.len && authorization_sv.data[space_pos] != ' ')
-                space_pos++;
+            while (space_pos < authorization_sv.len && authorization_sv.data[space_pos] != ' ') space_pos++;
 
             // s_as_key, s_ac_key pre-cached at startup
 
             PyRef scheme(PyUnicode_FromStringAndSize(authorization_sv.data, (Py_ssize_t)space_pos));
             size_t cred_start = space_pos < authorization_sv.len ? space_pos + 1 : space_pos;
-            PyRef creds(PyUnicode_FromStringAndSize(
-                authorization_sv.data + cred_start,
+            PyRef creds(PyUnicode_FromStringAndSize(authorization_sv.data + cred_start,
                 (Py_ssize_t)(authorization_sv.len - cred_start)));
             if (scheme) PyDict_SetItem(kwargs.get(), s_as_key, scheme.get());
             if (creds) PyDict_SetItem(kwargs.get(), s_ac_key, creds.get());
@@ -4667,7 +4681,7 @@ static PyObject* dispatch_one_request(
         // Detect at runtime: if result is a coroutine, drive it; if tuple, use directly.
         PyRef dep_call_result(PyObject_CallOneArg(spec.dep_solver, kwargs.get()));
         if (dep_call_result) {
-            PyObject* dep_raw = nullptr;
+            PyObject *dep_raw = nullptr;
             bool dep_resolved = false;
 
             if (PyCoro_CheckExact(dep_call_result.get())) {
@@ -4688,10 +4702,9 @@ static PyObject* dispatch_one_request(
                     // skip attribute setting for None to avoid AttributeError.
                     if (dep_raw && dep_raw != Py_None) {
                         PyObject_SetAttr(dep_raw, s_fut_blocking, Py_False);
-                        PyErr_Clear();  // Ignore AttributeError if object doesn't support it
+                        PyErr_Clear(); // Ignore AttributeError if object doesn't support it
                     }
 
-                    // NOTE: Do NOT decrement active_requests here — Python will call
                     // record_request_end() after async DI completion
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     Py_XDECREF(body_params_local);
@@ -4699,15 +4712,13 @@ static PyObject* dispatch_one_request(
                     if (!s_async_di_tag) s_async_di_tag = PyUnicode_InternFromString("async_di");
                     Py_INCREF(s_async_di_tag);
 
-                    PyObject* ka = req.keep_alive ? Py_True : Py_False;
+                    PyObject *ka = req.keep_alive ? Py_True : Py_False;
                     Py_INCREF(ka);
-                    PyRef origin_py(origin_sv.len > 0
-                        ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
-                        : nullptr);
-                    PyRef di_info(PyTuple_Pack(8, s_async_di_tag, dep_call_result.release(),
-                                 dep_raw, endpoint_local, kwargs.release(),
-                                 get_cached_status(status_code_local), ka,
-                                 origin_py ? origin_py.get() : Py_None));
+                    PyRef origin_py(origin_sv.len > 0 ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
+                                                      : nullptr);
+                    PyRef di_info(PyTuple_Pack(8, s_async_di_tag, dep_call_result.release(), dep_raw, endpoint_local,
+                        kwargs.release(), get_cached_status(status_code_local), ka,
+                        origin_py ? origin_py.get() : Py_None));
                     Py_XDECREF(dep_raw);
                     return make_consumed_obj(self, req.total_consumed, di_info.release());
                 } else {
@@ -4721,24 +4732,31 @@ static PyObject* dispatch_one_request(
                             PyRef detail(PyObject_GetAttrString(dep_ev, "detail"));
                             PyRef sc(PyObject_GetAttrString(dep_ev, "status_code"));
                             int scode = sc ? (int)PyLong_AsLong(sc.get()) : 500;
-                            if (scode == -1 && PyErr_Occurred()) { PyErr_Clear(); scode = 500; }
+                            if (scode == -1 && PyErr_Occurred()) {
+                                PyErr_Clear();
+                                scode = 500;
+                            }
                             hook_status = scode;
                             PyRef detail_str(detail ? PyObject_Str(detail.get()) : nullptr);
-                            const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
+                            const char *detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
                             std::string exc_hdrs = extract_http_exc_headers(dep_ev);
-                            Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
+                            Py_XDECREF(dep_et);
+                            Py_XDECREF(dep_ev);
+                            Py_XDECREF(dep_tb);
                             PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error",
-                                       req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                                       exc_hdrs.empty() ? nullptr : exc_hdrs.c_str(), exc_hdrs.size()));
+                                req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
+                                exc_hdrs.empty() ? nullptr : exc_hdrs.c_str(), exc_hdrs.size()));
                             if (resp) write_to_transport(transport, resp.get());
                         } else {
-                            Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
-                            PyRef resp(build_http_error_response(500, "Internal Server Error",
-                                       req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                            Py_XDECREF(dep_et);
+                            Py_XDECREF(dep_ev);
+                            Py_XDECREF(dep_tb);
+                            PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
+                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                             if (resp) write_to_transport(transport, resp.get());
                         }
-                        fire_post_response_hook(self, req.method.data, req.method.len,
-                                                req.path.data, req.path.len, hook_status, request_start_time);
+                        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                            hook_status, request_start_time);
                     }
                     --self->counters.active_requests;
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
@@ -4749,14 +4767,14 @@ static PyObject* dispatch_one_request(
             } else if (PyTuple_Check(dep_call_result.get())) {
                 // Sync dep solver — result is already the tuple, no coroutine overhead
                 dep_raw = dep_call_result.get();
-                Py_INCREF(dep_raw);  // keep alive while we inspect it
+                Py_INCREF(dep_raw); // keep alive while we inspect it
                 dep_resolved = true;
             }
 
             if (dep_resolved && dep_raw) {
                 if (PyTuple_Check(dep_raw) && PyTuple_GET_SIZE(dep_raw) >= 2) {
-                    PyObject* dep_values = PyTuple_GET_ITEM(dep_raw, 0);
-                    PyObject* dep_errors = PyTuple_GET_ITEM(dep_raw, 1);
+                    PyObject *dep_values = PyTuple_GET_ITEM(dep_raw, 0);
+                    PyObject *dep_errors = PyTuple_GET_ITEM(dep_raw, 1);
 
                     // Merge resolved dependency values into kwargs
                     if (dep_values && PyDict_Check(dep_values)) {
@@ -4767,7 +4785,7 @@ static PyObject* dispatch_one_request(
                     PyDict_SetItem(kwargs.get(), s_deps_ran_key, Py_True);
                     // Extract bg_tasks (index 2) from dep result and inject into kwargs
                     if (PyTuple_GET_SIZE(dep_raw) > 2) {
-                        PyObject* dep_bg = PyTuple_GET_ITEM(dep_raw, 2);
+                        PyObject *dep_bg = PyTuple_GET_ITEM(dep_raw, 2);
                         if (dep_bg && dep_bg != Py_None) {
                             if (!s_bg_key) s_bg_key = PyUnicode_InternFromString("__bg_tasks__");
                             PyDict_SetItem(kwargs.get(), s_bg_key, dep_bg);
@@ -4791,14 +4809,15 @@ static PyObject* dispatch_one_request(
                             PyDict_SetItem(err_dict.get(), s_detail_key_global, dep_errors);
                             PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
                             if (err_json) {
-                                char* ej_data; Py_ssize_t ej_len;
+                                char *ej_data;
+                                Py_ssize_t ej_len;
                                 PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
-                                build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
-                                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len,
+                                    req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                             } else {
                                 PyErr_Clear();
                                 PyRef resp(build_http_error_response(422, "Validation Error", req.keep_alive,
-                                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                                 if (resp) write_to_transport(transport, resp.get());
                             }
                         }
@@ -4819,24 +4838,31 @@ static PyObject* dispatch_one_request(
                     PyRef detail(PyObject_GetAttrString(dep_ev, "detail"));
                     PyRef sc(PyObject_GetAttrString(dep_ev, "status_code"));
                     int scode = sc ? (int)PyLong_AsLong(sc.get()) : 500;
-                    if (scode == -1 && PyErr_Occurred()) { PyErr_Clear(); scode = 500; }
+                    if (scode == -1 && PyErr_Occurred()) {
+                        PyErr_Clear();
+                        scode = 500;
+                    }
                     hook_status = scode;
                     PyRef detail_str(detail ? PyObject_Str(detail.get()) : nullptr);
-                    const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
+                    const char *detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
                     std::string exc_hdrs = extract_http_exc_headers(dep_ev);
-                    Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
-                    PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error",
-                               req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                               exc_hdrs.empty() ? nullptr : exc_hdrs.c_str(), exc_hdrs.size()));
+                    Py_XDECREF(dep_et);
+                    Py_XDECREF(dep_ev);
+                    Py_XDECREF(dep_tb);
+                    PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error", req.keep_alive,
+                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
+                        exc_hdrs.empty() ? nullptr : exc_hdrs.c_str(), exc_hdrs.size()));
                     if (resp) write_to_transport(transport, resp.get());
                 } else {
-                    Py_XDECREF(dep_et); Py_XDECREF(dep_ev); Py_XDECREF(dep_tb);
-                    PyRef resp(build_http_error_response(500, "Internal Server Error",
-                               req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                    Py_XDECREF(dep_et);
+                    Py_XDECREF(dep_ev);
+                    Py_XDECREF(dep_tb);
+                    PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
+                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                     if (resp) write_to_transport(transport, resp.get());
                 }
-                fire_post_response_hook(self, req.method.data, req.method.len,
-                                        req.path.data, req.path.len, hook_status, request_start_time);
+                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, hook_status,
+                    request_start_time);
             }
             --self->counters.active_requests;
             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
@@ -4846,13 +4872,11 @@ static PyObject* dispatch_one_request(
         }
     }
 
-    // ── Pydantic body validation — inline from C++ (no event loop round-trip) ──
     // request_body_to_args() is async def but NEVER actually awaits for JSON bodies
     // (only awaits for FormData). So PyIter_Send completes inline → PYGEN_RETURN.
     // This makes POST JSON follow the exact same zero-transition path as GET.
     if (has_body_params_local && body_params_local) {
 
-        // ── FAST PATH: plain dict body (no Pydantic model) ──────────────
         // For routes like `body: dict = Body(...)`, skip validation entirely
         if (spec.body_is_plain_dict && json_body_obj != Py_None && spec.py_body_param_name) {
             PyDict_SetItem(kwargs.get(), spec.py_body_param_name, json_body_obj);
@@ -4860,14 +4884,13 @@ static PyObject* dispatch_one_request(
             goto body_done;
         }
 
-        // ── FAST PATH: single Pydantic model → call model_validate directly ──
         // Avoids going through request_body_to_args async wrapper
         if (spec.model_validate && json_body_obj != Py_None && spec.py_body_param_name) {
             // When embed_body_fields=True, json_body_obj is the full dict (e.g. {"item": {...}}).
             // Extract the nested value for this param before calling model_validate.
-            PyObject* model_input = json_body_obj;
+            PyObject *model_input = json_body_obj;
             if (spec.embed_body_fields && PyDict_Check(json_body_obj)) {
-                PyObject* nested = PyDict_GetItem(json_body_obj, spec.py_body_param_name);
+                PyObject *nested = PyDict_GetItem(json_body_obj, spec.py_body_param_name);
                 if (nested) {
                     model_input = nested;
                 } else {
@@ -4893,10 +4916,11 @@ static PyObject* dispatch_one_request(
                                 PyDict_SetItem(err_dict.get(), s_detail_key_global, err_list.get());
                                 PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
                                 if (err_json) {
-                                    char* ej_data; Py_ssize_t ej_len;
+                                    char *ej_data;
+                                    Py_ssize_t ej_len;
                                     PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
-                                    build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
-                                               has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                    build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len,
+                                        req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                                 }
                             }
                         }
@@ -4935,9 +4959,9 @@ static PyObject* dispatch_one_request(
                             if (!s_body_str_global) s_body_str_global = PyUnicode_InternFromString("body");
                             Py_ssize_t prefix_count = spec.embed_body_fields ? 2 : 1;
                             for (Py_ssize_t ei = 0; ei < PyList_GET_SIZE(error_list.get()); ei++) {
-                                PyObject* err_item = PyList_GET_ITEM(error_list.get(), ei);
+                                PyObject *err_item = PyList_GET_ITEM(error_list.get(), ei);
                                 if (!PyDict_Check(err_item)) continue;
-                                PyObject* loc_obj = PyDict_GetItem(err_item, s_loc_key_global);
+                                PyObject *loc_obj = PyDict_GetItem(err_item, s_loc_key_global);
                                 if (loc_obj) {
                                     Py_ssize_t loc_len = PySequence_Length(loc_obj);
                                     PyRef new_loc(PyTuple_New(loc_len + prefix_count));
@@ -4949,7 +4973,7 @@ static PyObject* dispatch_one_request(
                                             PyTuple_SET_ITEM(new_loc.get(), 1, spec.py_body_param_name);
                                         }
                                         for (Py_ssize_t li = 0; li < loc_len; li++) {
-                                            PyObject* litem = PySequence_GetItem(loc_obj, li);
+                                            PyObject *litem = PySequence_GetItem(loc_obj, li);
                                             if (litem) PyTuple_SET_ITEM(new_loc.get(), li + prefix_count, litem);
                                         }
                                         PyDict_SetItem(err_item, s_loc_key_global, new_loc.get());
@@ -4958,46 +4982,82 @@ static PyObject* dispatch_one_request(
                             }
                             // Check for custom RequestValidationError handler
                             if (self->type_exception_handlers && PyDict_Size(self->type_exception_handlers) > 0) {
-                                PyObject* mv_handler = nullptr;
-                                { PyObject *th_key, *th_val; Py_ssize_t th_pos = 0;
-                                  while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
-                                      PyRef cn(PyObject_GetAttrString(th_key, "__name__"));
-                                      if (cn && PyUnicode_Check(cn.get())) {
-                                          const char* cns = PyUnicode_AsUTF8(cn.get());
-                                          if (cns && strcmp(cns, "RequestValidationError") == 0) { mv_handler = th_val; break; }
-                                      } else PyErr_Clear();
-                                  }
+                                PyObject *mv_handler = nullptr;
+                                {
+                                    PyObject *th_key, *th_val;
+                                    Py_ssize_t th_pos = 0;
+                                    while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
+                                        PyRef cn(PyObject_GetAttrString(th_key, "__name__"));
+                                        if (cn && PyUnicode_Check(cn.get())) {
+                                            const char *cns = PyUnicode_AsUTF8(cn.get());
+                                            if (cns && strcmp(cns, "RequestValidationError") == 0) {
+                                                mv_handler = th_val;
+                                                break;
+                                            }
+                                        } else
+                                            PyErr_Clear();
+                                    }
                                 }
                                 if (mv_handler) {
-                                    if (!s_mv_rve_cls) { PyRef em(PyImport_ImportModule("astraapi.exceptions")); if (em) s_mv_rve_cls = PyObject_GetAttrString(em.get(), "RequestValidationError"); }
+                                    if (!s_mv_rve_cls) {
+                                        PyRef em(PyImport_ImportModule("astraapi.exceptions"));
+                                        if (em)
+                                            s_mv_rve_cls = PyObject_GetAttrString(em.get(), "RequestValidationError");
+                                    }
                                     if (s_mv_rve_cls) {
                                         if (!s_mv_body_kw) s_mv_body_kw = PyUnicode_InternFromString("body");
-                                        PyRef mv_kw(PyDict_New()); if (mv_kw) PyDict_SetItem(mv_kw.get(), s_mv_body_kw, json_body_obj);
+                                        PyRef mv_kw(PyDict_New());
+                                        if (mv_kw) PyDict_SetItem(mv_kw.get(), s_mv_body_kw, json_body_obj);
                                         PyRef mv_args(PyTuple_Pack(1, error_list.get()));
-                                        PyRef mv_rve(mv_args && mv_kw ? PyObject_Call(s_mv_rve_cls, mv_args.get(), mv_kw.get()) : nullptr);
+                                        PyRef mv_rve(mv_args && mv_kw
+                                                         ? PyObject_Call(s_mv_rve_cls, mv_args.get(), mv_kw.get())
+                                                         : nullptr);
                                         if (mv_rve) {
-                                            PyRef mv_raw(PyObject_CallFunctionObjArgs(mv_handler, Py_None, mv_rve.get(), nullptr));
+                                            PyRef mv_raw(PyObject_CallFunctionObjArgs(mv_handler, Py_None, mv_rve.get(),
+                                                nullptr));
                                             PyRef mv_result;
                                             if (mv_raw && PyCoro_CheckExact(mv_raw.get())) {
-                                                PyObject* cr = nullptr; PySendResult sr = PyIter_Send(mv_raw.get(), Py_None, &cr);
-                                                if (sr == PYGEN_RETURN && cr) mv_result = PyRef(cr); else if (cr) Py_DECREF(cr);
+                                                PyObject *cr = nullptr;
+                                                PySendResult sr = PyIter_Send(mv_raw.get(), Py_None, &cr);
+                                                if (sr == PYGEN_RETURN && cr)
+                                                    mv_result = PyRef(cr);
+                                                else if (cr)
+                                                    Py_DECREF(cr);
                                                 if (sr != PYGEN_RETURN) PyErr_Clear();
-                                            } else if (mv_raw) mv_result = std::move(mv_raw);
+                                            } else if (mv_raw)
+                                                mv_result = std::move(mv_raw);
                                             if (mv_result) {
-                                                int hsc = 422; PyRef sc_a(PyObject_GetAttrString(mv_result.get(), "status_code"));
-                                                if (sc_a) { hsc = (int)PyLong_AsLong(sc_a.get()); if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = 422; } }
+                                                int hsc = 422;
+                                                PyRef sc_a(PyObject_GetAttrString(mv_result.get(), "status_code"));
+                                                if (sc_a) {
+                                                    hsc = (int)PyLong_AsLong(sc_a.get());
+                                                    if (hsc == -1 && PyErr_Occurred()) {
+                                                        PyErr_Clear();
+                                                        hsc = 422;
+                                                    }
+                                                }
                                                 PyRef body_b(PyObject_GetAttrString(mv_result.get(), "body"));
                                                 if (body_b && PyBytes_Check(body_b.get())) {
-                                                    char* hb; Py_ssize_t hbl; PyBytes_AsStringAndSize(body_b.get(), &hb, &hbl);
-                                                    build_and_write_http_response(sock_fd, transport, hsc, hb, (size_t)hbl, req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
-                                                } else PyErr_Clear();
-                                            } else PyErr_Clear();
+                                                    char *hb;
+                                                    Py_ssize_t hbl;
+                                                    PyBytes_AsStringAndSize(body_b.get(), &hb, &hbl);
+                                                    build_and_write_http_response(sock_fd, transport, hsc, hb,
+                                                        (size_t)hbl, req.keep_alive, has_cors ? cors_ptr : nullptr,
+                                                        origin_sv.data, origin_sv.len);
+                                                } else
+                                                    PyErr_Clear();
+                                            } else
+                                                PyErr_Clear();
                                         }
                                     }
-                                    Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                                    Py_XDECREF(exc_type);
+                                    Py_XDECREF(exc_val);
+                                    Py_XDECREF(exc_tb);
                                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
-                                    Py_DECREF(endpoint_local); Py_DECREF(body_params_local);
-                                    --self->counters.active_requests; ++self->counters.total_errors;
+                                    Py_DECREF(endpoint_local);
+                                    Py_DECREF(body_params_local);
+                                    --self->counters.active_requests;
+                                    ++self->counters.total_errors;
                                     return make_consumed_true(self, req.total_consumed);
                                 }
                             }
@@ -5007,13 +5067,16 @@ static PyObject* dispatch_one_request(
                                 PyDict_SetItem(err_dict.get(), s_detail_key_global, error_list.get());
                                 PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
                                 if (err_json) {
-                                    char* ej_data; Py_ssize_t ej_len;
+                                    char *ej_data;
+                                    Py_ssize_t ej_len;
                                     PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
-                                    build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
-                                               has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                    build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len,
+                                        req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                                 }
                             }
-                            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                            Py_XDECREF(exc_type);
+                            Py_XDECREF(exc_val);
+                            Py_XDECREF(exc_tb);
                             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                             Py_DECREF(endpoint_local);
                             Py_DECREF(body_params_local);
@@ -5023,7 +5086,9 @@ static PyObject* dispatch_one_request(
                         }
                     }
                 }
-                Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                Py_XDECREF(exc_type);
+                Py_XDECREF(exc_val);
+                Py_XDECREF(exc_tb);
                 PyErr_Clear();
                 // Fall through to standard validation path
             }
@@ -5039,10 +5104,8 @@ static PyObject* dispatch_one_request(
 
         bool inline_ok = false;
         if (s_request_body_to_args) {
-            // Build kwargs: body_fields, received_body, embed_body_fields
             PyRef call_kw(PyDict_New());
             if (call_kw) {
-                // Pre-interned by init_cached_refs() — fallback if not called
                 if (!s_kw_body_fields) {
                     s_kw_body_fields = PyUnicode_InternFromString("body_fields");
                     s_kw_received_body = PyUnicode_InternFromString("received_body");
@@ -5051,49 +5114,54 @@ static PyObject* dispatch_one_request(
 
                 PyDict_SetItem(call_kw.get(), s_kw_body_fields, body_params_local);
                 PyDict_SetItem(call_kw.get(), s_kw_received_body, json_body_obj);
-                PyObject* embed_val = embed_body_local ? Py_True : Py_False;
+                PyObject *embed_val = embed_body_local ? Py_True : Py_False;
                 PyDict_SetItem(call_kw.get(), s_kw_embed, embed_val);
 
                 // Call request_body_to_args() → returns coroutine
                 PyRef body_coro(PyObject_Call(s_request_body_to_args, g_empty_tuple, call_kw.get()));
                 if (body_coro) {
                     // Drive coroutine — for JSON bodies, completes inline (PYGEN_RETURN)
-                    PyObject* validation_result = nullptr;
+                    PyObject *validation_result = nullptr;
                     PySendResult vr_status = PyIter_Send(body_coro.get(), Py_None, &validation_result);
 
                     if (vr_status == PYGEN_RETURN && validation_result) {
                         if (PyTuple_Check(validation_result) && PyTuple_GET_SIZE(validation_result) >= 2) {
-                            PyObject* body_values = PyTuple_GET_ITEM(validation_result, 0);  // borrowed
-                            PyObject* body_errors = PyTuple_GET_ITEM(validation_result, 1);  // borrowed
+                            PyObject *body_values = PyTuple_GET_ITEM(validation_result, 0); // borrowed
+                            PyObject *body_errors = PyTuple_GET_ITEM(validation_result, 1); // borrowed
 
                             if (body_errors && PyList_Check(body_errors) && PyList_GET_SIZE(body_errors) > 0) {
                                 // Validation error
                                 // If custom RequestValidationError handler exists, raise it
                                 if (self->type_exception_handlers && PyDict_Size(self->type_exception_handlers) > 0) {
                                     // Find handler for RequestValidationError by iterating
-                                    PyObject* handler = nullptr;
+                                    PyObject *handler = nullptr;
                                     {
-                                        PyObject *th_key, *th_val; Py_ssize_t th_pos = 0;
+                                        PyObject *th_key, *th_val;
+                                        Py_ssize_t th_pos = 0;
                                         while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
                                             // Check if body_errors list items are instances of th_key
                                             // We check by class name for simplicity
                                             PyRef cls_name(PyObject_GetAttrString(th_key, "__name__"));
                                             if (cls_name && PyUnicode_Check(cls_name.get())) {
-                                                const char* cn = PyUnicode_AsUTF8(cls_name.get());
+                                                const char *cn = PyUnicode_AsUTF8(cls_name.get());
                                                 if (cn && (strcmp(cn, "RequestValidationError") == 0 ||
-                                                           strcmp(cn, "ValidationException") == 0 ||
-                                                           strcmp(cn, "Exception") == 0)) {
+                                                              strcmp(cn, "ValidationException") == 0 ||
+                                                              strcmp(cn, "Exception") == 0)) {
                                                     handler = th_val;
                                                     break;
                                                 }
-                                            } else { PyErr_Clear(); }
+                                            } else {
+                                                PyErr_Clear();
+                                            }
                                         }
                                     }
                                     if (handler) {
                                         // Create RequestValidationError to pass to handler
                                         if (!s_rve_cls2) {
                                             PyRef exc_mod(PyImport_ImportModule("astraapi.exceptions"));
-                                            if (exc_mod) s_rve_cls2 = PyObject_GetAttrString(exc_mod.get(), "RequestValidationError");
+                                            if (exc_mod)
+                                                s_rve_cls2 =
+                                                    PyObject_GetAttrString(exc_mod.get(), "RequestValidationError");
                                         }
                                         if (s_rve_cls2) {
                                             // Call RequestValidationError(errors, body=json_body_obj)
@@ -5101,32 +5169,51 @@ static PyObject* dispatch_one_request(
                                             PyRef rve_kw(PyDict_New());
                                             if (rve_kw) PyDict_SetItem(rve_kw.get(), s_rve_body_kw, json_body_obj);
                                             PyRef rve_args(PyTuple_Pack(1, body_errors));
-                                            PyRef rve(rve_args && rve_kw ? PyObject_Call(s_rve_cls2, rve_args.get(), rve_kw.get()) : nullptr);
+                                            PyRef rve(rve_args && rve_kw
+                                                          ? PyObject_Call(s_rve_cls2, rve_args.get(), rve_kw.get())
+                                                          : nullptr);
                                             if (rve) {
-                                                PyRef th_raw(PyObject_CallFunctionObjArgs(handler, Py_None, rve.get(), nullptr));
+                                                PyRef th_raw(PyObject_CallFunctionObjArgs(handler, Py_None, rve.get(),
+                                                    nullptr));
                                                 // Drive coroutine if async handler
                                                 PyRef th_result;
                                                 if (th_raw && PyCoro_CheckExact(th_raw.get())) {
-                                                    PyObject* coro_result = nullptr;
+                                                    PyObject *coro_result = nullptr;
                                                     PySendResult sr = PyIter_Send(th_raw.get(), Py_None, &coro_result);
-                                                    if (sr == PYGEN_RETURN && coro_result) th_result = PyRef(coro_result);
-                                                    else if (coro_result) Py_DECREF(coro_result);
+                                                    if (sr == PYGEN_RETURN && coro_result)
+                                                        th_result = PyRef(coro_result);
+                                                    else if (coro_result)
+                                                        Py_DECREF(coro_result);
                                                     if (sr != PYGEN_RETURN) PyErr_Clear();
                                                 } else if (th_raw) {
                                                     th_result = std::move(th_raw);
                                                 }
                                                 if (th_result) {
                                                     int hsc = 422;
-                                                    PyRef sc_attr(PyObject_GetAttrString(th_result.get(), "status_code"));
-                                                    if (sc_attr) { hsc = (int)PyLong_AsLong(sc_attr.get()); if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = 422; } }
+                                                    PyRef sc_attr(PyObject_GetAttrString(th_result.get(),
+                                                        "status_code"));
+                                                    if (sc_attr) {
+                                                        hsc = (int)PyLong_AsLong(sc_attr.get());
+                                                        if (hsc == -1 && PyErr_Occurred()) {
+                                                            PyErr_Clear();
+                                                            hsc = 422;
+                                                        }
+                                                    }
                                                     PyRef body_b(PyObject_GetAttrString(th_result.get(), "body"));
                                                     if (body_b && PyBytes_Check(body_b.get())) {
-                                                        char* hbody; Py_ssize_t hbody_len;
+                                                        char *hbody;
+                                                        Py_ssize_t hbody_len;
                                                         PyBytes_AsStringAndSize(body_b.get(), &hbody, &hbody_len);
-                                                        build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len, req.keep_alive,
-                                                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
-                                                    } else { PyErr_Clear(); }
-                                                } else { PyErr_Clear(); }
+                                                        build_and_write_http_response(sock_fd, transport, hsc, hbody,
+                                                            (size_t)hbody_len, req.keep_alive,
+                                                            has_cors ? cors_ptr : nullptr, origin_sv.data,
+                                                            origin_sv.len);
+                                                    } else {
+                                                        PyErr_Clear();
+                                                    }
+                                                } else {
+                                                    PyErr_Clear();
+                                                }
                                             }
                                         }
                                         Py_DECREF(validation_result);
@@ -5136,19 +5223,22 @@ static PyObject* dispatch_one_request(
                                         --self->counters.active_requests;
                                         ++self->counters.total_errors;
                                         return make_consumed_true(self, req.total_consumed);
-                                        } // if (s_rve_cls2)
-                                    } // if (handler)
+                                    } // if (s_rve_cls2)
+                                } // if (handler)
                                 // Build {"detail": errors_list} and serialize as JSON
                                 PyRef err_dict(PyDict_New());
                                 if (err_dict) {
-                                    if (!s_detail_key_global) s_detail_key_global = PyUnicode_InternFromString("detail");
+                                    if (!s_detail_key_global)
+                                        s_detail_key_global = PyUnicode_InternFromString("detail");
                                     PyDict_SetItem(err_dict.get(), s_detail_key_global, body_errors);
                                     PyRef err_json(serialize_to_json_pybytes(err_dict.get()));
                                     if (err_json) {
-                                        char* ej_data; Py_ssize_t ej_len;
+                                        char *ej_data;
+                                        Py_ssize_t ej_len;
                                         PyBytes_AsStringAndSize(err_json.get(), &ej_data, &ej_len);
-                                        build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len, req.keep_alive,
-                                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                                        build_and_write_http_response(sock_fd, transport, 422, ej_data, (size_t)ej_len,
+                                            req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data,
+                                            origin_sv.len);
                                     }
                                 }
                                 Py_DECREF(validation_result);
@@ -5160,7 +5250,6 @@ static PyObject* dispatch_one_request(
                                 return make_consumed_true(self, req.total_consumed);
                             }
 
-                            // ── Validation succeeded — merge values into kwargs ──
                             if (body_values && PyDict_Check(body_values)) {
                                 PyDict_Update(kwargs.get(), body_values);
                             }
@@ -5183,8 +5272,7 @@ static PyObject* dispatch_one_request(
         }
 
         if (!inline_ok) {
-            // ── Fallback: InlineResult for async body (FormData) or errors ──
-            InlineResultObject* ir = PyObject_New(InlineResultObject, &InlineResultType);
+            InlineResultObject *ir = PyObject_New(InlineResultObject, &InlineResultType);
             if (!ir) {
                 if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                 Py_DECREF(endpoint_local);
@@ -5193,7 +5281,8 @@ static PyObject* dispatch_one_request(
             }
 
             ir->status_code_obj = get_cached_status(status_code_local);
-            ir->has_body_params = Py_True; Py_INCREF(Py_True);
+            ir->has_body_params = Py_True;
+            Py_INCREF(Py_True);
             ir->embed_body_fields = embed_body_local ? Py_True : Py_False;
             Py_INCREF(ir->embed_body_fields);
             ir->kwargs = kwargs.release();
@@ -5207,16 +5296,14 @@ static PyObject* dispatch_one_request(
             ir->body_params = body_params_local;
 
             --self->counters.active_requests;
-            return make_consumed_obj(self, req.total_consumed, (PyObject*)ir);
+            return make_consumed_obj(self, req.total_consumed, (PyObject *)ir);
         }
     }
 
     // Clean up body_params_local if not used in InlineResult
     Py_XDECREF(body_params_local);
 
-
 body_done:
-    // ── CALL ENDPOINT FROM C++ (OPT-9: fast-call) ──────────────────────
     // Use PyObject_CallNoArgs for zero-param endpoints (fastest possible call).
     // Use PyObject_VectorcallDict for endpoints with params (avoids tuple creation).
     PyRef coro(nullptr);
@@ -5230,10 +5317,9 @@ body_done:
             coro = PyRef(PyObject_Call(endpoint_local, g_empty_tuple, kwargs.get()));
         }
     }
-    Py_DECREF(endpoint_local);  // release our strong ref
+    Py_DECREF(endpoint_local); // release our strong ref
     if (!coro) {
         if (PyErr_Occurred()) {
-            // ── Exception handler dispatch ──────────────────────────────
             PyObject *exc_type, *exc_val, *exc_tb;
             PyErr_Fetch(&exc_type, &exc_val, &exc_tb);
             // Check type-keyed exception handlers (user-registered, first match wins)
@@ -5245,25 +5331,40 @@ body_done:
                     int is_inst = PyObject_IsInstance(exc_val, th_key);
                     if (is_inst > 0) {
                         PyRef th_result(PyObject_CallFunctionObjArgs(th_val, Py_None, exc_val, nullptr));
-                        Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                        Py_XDECREF(exc_type);
+                        Py_XDECREF(exc_val);
+                        Py_XDECREF(exc_tb);
                         if (th_result) {
                             int hsc = 200;
                             PyRef sc_attr(PyObject_GetAttrString(th_result.get(), "status_code"));
-                            if (sc_attr) { hsc = (int)PyLong_AsLong(sc_attr.get()); if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = 200; } }
+                            if (sc_attr) {
+                                hsc = (int)PyLong_AsLong(sc_attr.get());
+                                if (hsc == -1 && PyErr_Occurred()) {
+                                    PyErr_Clear();
+                                    hsc = 200;
+                                }
+                            }
                             PyRef body_b(PyObject_GetAttrString(th_result.get(), "body"));
                             if (body_b && PyBytes_Check(body_b.get())) {
-                                char* hbody; Py_ssize_t hbody_len;
+                                char *hbody;
+                                Py_ssize_t hbody_len;
                                 PyBytes_AsStringAndSize(body_b.get(), &hbody, &hbody_len);
-                                build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len, req.keep_alive,
-                                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
-                            } else { PyErr_Clear(); }
-                        } else { PyErr_Clear(); }
-                        fire_post_response_hook(self, req.method.data, req.method.len,
-                                                req.path.data, req.path.len, 200, request_start_time);
+                                build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len,
+                                    req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                            } else {
+                                PyErr_Clear();
+                            }
+                        } else {
+                            PyErr_Clear();
+                        }
+                        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, 200,
+                            request_start_time);
                         --self->counters.active_requests;
                         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                         return make_consumed_true(self, req.total_consumed);
-                    } else if (is_inst < 0) { PyErr_Clear(); }
+                    } else if (is_inst < 0) {
+                        PyErr_Clear();
+                    }
                 }
             }
             if (is_http_exception(exc_type)) {
@@ -5271,7 +5372,10 @@ body_done:
                 PyRef detail(PyObject_GetAttrString(exc_val, "detail"));
                 PyRef sc(PyObject_GetAttrString(exc_val, "status_code"));
                 int scode = sc ? (int)PyLong_AsLong(sc.get()) : 500;
-                if (scode == -1 && PyErr_Occurred()) { PyErr_Clear(); scode = 500; }
+                if (scode == -1 && PyErr_Occurred()) {
+                    PyErr_Clear();
+                    scode = 500;
+                }
                 std::string exc_hdrs_main = extract_http_exc_headers(exc_val);
 
                 // Check custom exception handlers first
@@ -5279,55 +5383,65 @@ body_done:
                 if (eh_it != self->exception_handlers.end()) {
                     // Call handler(request_dict, exc) — handler returns Response
                     PyRef handler_result(PyObject_CallOneArg(eh_it->second, exc_val));
-                    Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-                    exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
+                    Py_XDECREF(exc_type);
+                    Py_XDECREF(exc_val);
+                    Py_XDECREF(exc_tb);
+                    exc_type = exc_val = exc_tb = nullptr; // prevent double-free
                     if (handler_result) {
                         // Try to extract response body from handler result
                         PyRef body_attr(PyObject_GetAttrString(handler_result.get(), "body"));
                         if (body_attr && PyBytes_Check(body_attr.get())) {
-                            char* hbody; Py_ssize_t hbody_len;
+                            char *hbody;
+                            Py_ssize_t hbody_len;
                             PyBytes_AsStringAndSize(body_attr.get(), &hbody, &hbody_len);
                             PyRef sc_attr(PyObject_GetAttrString(handler_result.get(), "status_code"));
                             int hsc = sc_attr ? (int)PyLong_AsLong(sc_attr.get()) : scode;
-                            if (hsc == -1 && PyErr_Occurred()) { PyErr_Clear(); hsc = scode; }
-                            build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len, req.keep_alive,
-                                       has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                            if (hsc == -1 && PyErr_Occurred()) {
+                                PyErr_Clear();
+                                hsc = scode;
+                            }
+                            build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len,
+                                req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                         }
                     } else {
                         // Handler raised an exception — clear it before falling through to 500
                         PyErr_Clear();
                     }
-                    fire_post_response_hook(self, req.method.data, req.method.len,
-                                            req.path.data, req.path.len, scode, request_start_time);
+                    fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, scode,
+                        request_start_time);
                     --self->counters.active_requests;
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(self, req.total_consumed);
                 }
 
-                Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-                exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
+                Py_XDECREF(exc_type);
+                Py_XDECREF(exc_val);
+                Py_XDECREF(exc_tb);
+                exc_type = exc_val = exc_tb = nullptr; // prevent double-free
                 if (detail && sc) {
                     PyRef detail_str(PyObject_Str(detail.get()));
-                    const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
+                    const char *detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
                     PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error", req.keep_alive,
-                               has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                               exc_hdrs_main.empty() ? nullptr : exc_hdrs_main.c_str(), exc_hdrs_main.size()));
+                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
+                        exc_hdrs_main.empty() ? nullptr : exc_hdrs_main.c_str(), exc_hdrs_main.size()));
                     if (resp) write_to_transport(transport, resp.get());
-                    fire_post_response_hook(self, req.method.data, req.method.len,
-                                            req.path.data, req.path.len, scode, request_start_time);
+                    fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, scode,
+                        request_start_time);
                     --self->counters.active_requests;
                     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
                     return make_consumed_true(self, req.total_consumed);
                 }
             }
-            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_val);
+            Py_XDECREF(exc_tb);
         }
         // 500 error
         PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
-                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
         if (resp) write_to_transport(transport, resp.get());
-        fire_post_response_hook(self, req.method.data, req.method.len,
-                                req.path.data, req.path.len, 500, request_start_time);
+        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, 500,
+            request_start_time);
         --self->counters.active_requests;
         ++self->counters.total_errors;
         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
@@ -5337,10 +5451,9 @@ body_done:
     // Clean up json_body_obj if it was allocated
     if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
 
-    // ── Sync vs async endpoint dispatch ──────────────────────────────────
     // For sync endpoints, PyObject_Call returns the result directly (no coroutine).
     // For async endpoints, it returns a coroutine we must drive via PyIter_Send.
-    PyObject* raw_result = nullptr;
+    PyObject *raw_result = nullptr;
     PySendResult send_status;
     if (!is_coro_local) {
         // Sync endpoint — result is already the return value, no coroutine driving needed
@@ -5352,15 +5465,14 @@ body_done:
     }
 
     if (send_status == PYGEN_RETURN) {
-        // ── Pre-encoded body fast path — bytes or str from Python ──────────
         // When response_model is configured AND Python shim returns bytes or
         // model_dump_json() str, write directly — skip validate/JSON re-serialize.
         // Only for response_model routes: ensures the str is valid JSON.
         if (raw_result && response_model_local && response_model_local != Py_None &&
             (PyBytes_Check(raw_result) || PyUnicode_Check(raw_result))) {
-            const char* body_ptr = nullptr;
+            const char *body_ptr = nullptr;
             Py_ssize_t body_len = 0;
-            PyObject* encoded = nullptr;
+            PyObject *encoded = nullptr;
             if (PyBytes_Check(raw_result)) {
                 body_ptr = PyBytes_AS_STRING(raw_result);
                 body_len = PyBytes_GET_SIZE(raw_result);
@@ -5372,22 +5484,21 @@ body_done:
                 }
             }
             if (body_ptr && body_len > 0) {
-                PyRef resp_bytes(build_http_response_bytes(status_code_local, body_ptr, (size_t)body_len, req.keep_alive,
-                                                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                                                            nullptr, is_head_method));
+                PyRef resp_bytes(build_http_response_bytes(status_code_local, body_ptr, (size_t)body_len,
+                    req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len, nullptr,
+                    is_head_method));
                 if (resp_bytes) {
                     write_to_transport(transport, resp_bytes.get());
                 }
             }
             Py_XDECREF(encoded);
             Py_DECREF(raw_result);
-            fire_post_response_hook(self, req.method.data, req.method.len,
-                                    req.path.data, req.path.len, status_code_local, request_start_time);
+            fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                status_code_local, request_start_time);
             --self->counters.active_requests;
             return make_consumed_true(self, req.total_consumed);
         }
 
-        // ── Response model validation ────────────────────────────────────
         // If route has a response_model, validate + serialize through Pydantic
         if (response_model_local && response_model_local != Py_None) {
             // s_validate_str pre-cached at startup; s_serialize stays lazy (rare path)
@@ -5400,7 +5511,7 @@ body_done:
                 PyErr_Clear();
                 Py_DECREF(raw_result);
                 PyRef resp(build_http_error_response(422, "Response validation error", req.keep_alive,
-                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                 if (resp) write_to_transport(transport, resp.get());
                 --self->counters.active_requests;
                 return make_consumed_true(self, req.total_consumed);
@@ -5410,27 +5521,25 @@ body_done:
             PyRef serialized(PyObject_CallMethodOneArg(response_model_local, s_serialize, validated.get()));
             if (serialized) {
                 Py_DECREF(raw_result);
-                raw_result = serialized.release();  // Replace raw_result with serialized form
+                raw_result = serialized.release(); // Replace raw_result with serialized form
             } else {
                 PyErr_Clear();
                 // Fall through with original raw_result
             }
         }
 
-        // ── Bytes result — pre-encoded JSON body, write directly ────────────
         // When Python shim returns _serializer.to_json() bytes, skip C++ JSON encoding.
         if (raw_result && PyBytes_Check(raw_result)) {
-            char* body_ptr = PyBytes_AS_STRING(raw_result);
+            char *body_ptr = PyBytes_AS_STRING(raw_result);
             Py_ssize_t body_len = PyBytes_GET_SIZE(raw_result);
             PyRef resp_bytes(build_http_response_bytes(status_code_local, body_ptr, (size_t)body_len, req.keep_alive,
-                                                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                                                        nullptr, is_head_method));
+                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len, nullptr, is_head_method));
             if (resp_bytes) {
                 write_to_transport(transport, resp_bytes.get());
             }
             Py_DECREF(raw_result);
-            fire_post_response_hook(self, req.method.data, req.method.len,
-                                    req.path.data, req.path.len, status_code_local, request_start_time);
+            fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                status_code_local, request_start_time);
             --self->counters.active_requests;
             return make_consumed_true(self, req.total_consumed);
         }
@@ -5438,7 +5547,7 @@ body_done:
         // Endpoint completed immediately — serialize + build HTTP response + write
         // If HTTP middleware is registered, return result to Python for middleware processing
         if (self->has_http_middleware && raw_result != nullptr) {
-            PyObject* ka = req.keep_alive ? Py_True : Py_False;
+            PyObject *ka = req.keep_alive ? Py_True : Py_False;
             Py_INCREF(ka);
             if (!s_mw_tag) s_mw_tag = PyUnicode_InternFromString("mw");
             Py_INCREF(s_mw_tag);
@@ -5446,20 +5555,29 @@ body_done:
             PyRef hdrs_list(PyList_New(req.header_count));
             if (hdrs_list) {
                 for (int i = 0; i < req.header_count; i++) {
-                    const auto& hdr = req.headers[i];
+                    const auto &hdr = req.headers[i];
                     PyRef nb(PyBytes_FromStringAndSize(hdr.name.data, (Py_ssize_t)hdr.name.len));
                     PyRef vb(PyBytes_FromStringAndSize(hdr.value.data, (Py_ssize_t)hdr.value.len));
-                    if (nb && vb) { PyRef p(PyTuple_Pack(2, nb.get(), vb.get())); if (p) PyList_SET_ITEM(hdrs_list.get(), i, p.release()); else { Py_INCREF(Py_None); PyList_SET_ITEM(hdrs_list.get(), i, Py_None); } }
-                    else { Py_INCREF(Py_None); PyList_SET_ITEM(hdrs_list.get(), i, Py_None); }
+                    if (nb && vb) {
+                        PyRef p(PyTuple_Pack(2, nb.get(), vb.get()));
+                        if (p)
+                            PyList_SET_ITEM(hdrs_list.get(), i, p.release());
+                        else {
+                            Py_INCREF(Py_None);
+                            PyList_SET_ITEM(hdrs_list.get(), i, Py_None);
+                        }
+                    } else {
+                        Py_INCREF(Py_None);
+                        PyList_SET_ITEM(hdrs_list.get(), i, Py_None);
+                    }
                 }
             }
             bool mc = false;
-            PyObject* method_str = get_cached_method(req.method.data, req.method.len, mc);
+            PyObject *method_str = get_cached_method(req.method.data, req.method.len, mc);
             PyRef path_str(PyUnicode_FromStringAndSize(req.path.data, (Py_ssize_t)req.path.len));
             PyRef qs_bytes(PyBytes_FromStringAndSize(req.query_string.data, (Py_ssize_t)req.query_string.len));
             PyRef mw_info(PyTuple_Pack(7, s_mw_tag, raw_result, get_cached_status(status_code_local), ka,
-                hdrs_list ? hdrs_list.get() : Py_None,
-                method_str ? method_str : Py_None,
+                hdrs_list ? hdrs_list.get() : Py_None, method_str ? method_str : Py_None,
                 path_str ? path_str.get() : Py_None));
             if (!mc && method_str) Py_DECREF(method_str);
             Py_DECREF(ka);
@@ -5470,27 +5588,25 @@ body_done:
                 return make_consumed_obj(self, req.total_consumed, mw_info.release());
             }
         }
-        if (LIKELY(PyDict_Check(raw_result) || PyList_Check(raw_result) ||
-            PyUnicode_Check(raw_result) || PyLong_Check(raw_result) ||
-            PyFloat_Check(raw_result) || PyBool_Check(raw_result) ||
-            PyTuple_Check(raw_result) || PySet_Check(raw_result) ||
-            PyFrozenSet_Check(raw_result) || raw_result == Py_None)) {
+        if (LIKELY(PyDict_Check(raw_result) || PyList_Check(raw_result) || PyUnicode_Check(raw_result) ||
+                   PyLong_Check(raw_result) || PyFloat_Check(raw_result) || PyBool_Check(raw_result) ||
+                   PyTuple_Check(raw_result) || PySet_Check(raw_result) || PyFrozenSet_Check(raw_result) ||
+                   raw_result == Py_None)) {
 
-            // ── Fast-path response cache for constant-return endpoints ───────
             // 8-way set associative: multiple routes can coexist without evicting each other.
             // Uses content-based hashing (not pointers) so it's safe across GC and memory reuse.
             uintptr_t dict_hash = 0;
             if (PyDict_Check(raw_result)) {
                 dict_hash = hash_dict_content(raw_result);
                 if (dict_hash != 0) {
-                    uintptr_t key = make_cache_key(dict_hash, req.keep_alive, is_head_method,
-                                                    status_code_local, has_cors);
-                    PyObject* cached = cache_lookup(s_dict_cache, key);
+                    uintptr_t key =
+                        make_cache_key(dict_hash, req.keep_alive, is_head_method, status_code_local, has_cors);
+                    PyObject *cached = cache_lookup(s_dict_cache, key);
                     if (cached) {
                         write_to_transport(transport, cached);
                         Py_DECREF(raw_result);
-                        fire_post_response_hook(self, req.method.data, req.method.len,
-                                                req.path.data, req.path.len, status_code_local, request_start_time);
+                        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                            status_code_local, request_start_time);
                         --self->counters.active_requests;
                         return make_consumed_true(self, req.total_consumed);
                     }
@@ -5498,10 +5614,8 @@ body_done:
             }
 
             // Build response bytes (without writing)
-            PyRef resp_bytes(build_json_response_bytes(
-                raw_result, status_code_local, req.keep_alive,
-                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                is_head_method));
+            PyRef resp_bytes(build_json_response_bytes(raw_result, status_code_local, req.keep_alive,
+                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len, is_head_method));
             if (!resp_bytes) {
                 Py_DECREF(raw_result);
                 --self->counters.active_requests;
@@ -5510,20 +5624,18 @@ body_done:
             }
             // Cache dict responses (only if content is hashable)
             if (dict_hash != 0) {
-                uintptr_t key = make_cache_key(dict_hash, req.keep_alive, is_head_method,
-                                                status_code_local, has_cors);
+                uintptr_t key = make_cache_key(dict_hash, req.keep_alive, is_head_method, status_code_local, has_cors);
                 cache_store(s_dict_cache, key, resp_bytes.get());
             }
             write_to_transport(transport, resp_bytes.get());
             Py_DECREF(raw_result);
 
-            fire_post_response_hook(self, req.method.data, req.method.len,
-                                    req.path.data, req.path.len, status_code_local, request_start_time);
+            fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                status_code_local, request_start_time);
             --self->counters.active_requests;
             return make_consumed_true(self, req.total_consumed);
         }
 
-        // ── Response object detection ─────────────────────────────────────
         // Check if result is a Starlette Response (has .body, .status_code, .raw_headers)
         // Use HasAttrString first to avoid expensive exception set+clear on dict/list
 
@@ -5531,33 +5643,27 @@ body_done:
         // _handle_stream for proper async iteration without blocking the event loop.
         // Python will call record_request_end() when done, so do NOT decrement here.
         if (s_attr_body_iterator && PyObject_HasAttr(raw_result, s_attr_body_iterator)) {
-            PyObject* ka = req.keep_alive ? Py_True : Py_False;
-            PyRef origin_py(origin_sv.len > 0
-                ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
-                : nullptr);
-            PyRef stream_info(PyTuple_Pack(5, s_stream_tag, raw_result,
-                                           get_cached_status(status_code_local), ka,
-                                           origin_py ? origin_py.get() : Py_None));
+            PyObject *ka = req.keep_alive ? Py_True : Py_False;
+            PyRef origin_py(origin_sv.len > 0 ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len) : nullptr);
+            PyRef stream_info(PyTuple_Pack(5, s_stream_tag, raw_result, get_cached_status(status_code_local), ka,
+                origin_py ? origin_py.get() : Py_None));
             if (stream_info) {
-                Py_DECREF(raw_result);  // PyTuple_Pack holds its own ref; release ours
+                Py_DECREF(raw_result); // PyTuple_Pack holds its own ref; release ours
                 return make_consumed_obj(self, req.total_consumed, stream_info.release());
             }
             // fallthrough on pack failure
         }
 
         // Special case: FileResponse (has path, body is empty placeholder) — dispatch to Python
-        if (s_attr_path && s_attr_body_iterator &&
-            PyObject_HasAttr(raw_result, s_attr_path) &&
+        if (s_attr_path && s_attr_body_iterator && PyObject_HasAttr(raw_result, s_attr_path) &&
             !PyObject_HasAttr(raw_result, s_attr_body_iterator)) {
             PyRef path_attr(PyObject_GetAttr(raw_result, s_attr_path));
             if (path_attr && PyUnicode_Check(path_attr.get())) {
-                PyObject* ka = req.keep_alive ? Py_True : Py_False;
-                PyRef origin_py(origin_sv.len > 0
-                    ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
-                    : nullptr);
-                PyRef stream_info(PyTuple_Pack(5, s_stream_tag, raw_result,
-                                               get_cached_status(status_code_local), ka,
-                                               origin_py ? origin_py.get() : Py_None));
+                PyObject *ka = req.keep_alive ? Py_True : Py_False;
+                PyRef origin_py(origin_sv.len > 0 ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
+                                                  : nullptr);
+                PyRef stream_info(PyTuple_Pack(5, s_stream_tag, raw_result, get_cached_status(status_code_local), ka,
+                    origin_py ? origin_py.get() : Py_None));
                 if (stream_info) {
                     Py_DECREF(raw_result);
                     return make_consumed_obj(self, req.total_consumed, stream_info.release());
@@ -5566,8 +5672,7 @@ body_done:
         }
 
         PyRef body_attr, sc_attr;
-        if (s_attr_body && s_attr_status_code &&
-            PyObject_HasAttr(raw_result, s_attr_body) &&
+        if (s_attr_body && s_attr_status_code && PyObject_HasAttr(raw_result, s_attr_body) &&
             PyObject_HasAttr(raw_result, s_attr_status_code)) {
             body_attr = PyRef(PyObject_GetAttr(raw_result, s_attr_body));
             sc_attr = PyRef(PyObject_GetAttr(raw_result, s_attr_status_code));
@@ -5576,7 +5681,8 @@ body_done:
         if (body_attr && PyBytes_Check(body_attr.get()) && sc_attr && PyLong_Check(sc_attr.get())) {
             // This is a Response object — extract body + status + headers
             int resp_sc = (int)PyLong_AsLong(sc_attr.get());
-            char* resp_body; Py_ssize_t resp_body_len;
+            char *resp_body;
+            Py_ssize_t resp_body_len;
             PyBytes_AsStringAndSize(body_attr.get(), &resp_body, &resp_body_len);
 
             // Extract raw_headers to build custom header block
@@ -5595,8 +5701,8 @@ body_done:
 
             // Build HTTP response status line (use cache if available)
             if (resp_sc > 0 && resp_sc < 600 && s_status_lines[resp_sc].data) {
-                const auto& sl = s_status_lines[resp_sc];
-                buf_append(buf, sl.data, sl.len - 2);  // exclude trailing \r\n
+                const auto &sl = s_status_lines[resp_sc];
+                buf_append(buf, sl.data, sl.len - 2); // exclude trailing \r\n
             } else {
                 static const char prefix[] = "HTTP/1.1 ";
                 buf_append(buf, prefix, sizeof(prefix) - 1);
@@ -5604,7 +5710,7 @@ body_done:
                 int sn = fast_i64_to_buf(sc_buf, resp_sc);
                 buf_append(buf, sc_buf, sn);
                 buf.push_back(' ');
-                const char* reason = status_reason(resp_sc);
+                const char *reason = status_reason(resp_sc);
                 size_t rlen = strlen(reason);
                 buf_append(buf, reason, rlen);
             }
@@ -5614,10 +5720,10 @@ body_done:
             if (raw_hdrs && PyList_Check(raw_hdrs.get())) {
                 Py_ssize_t nhdr = PyList_GET_SIZE(raw_hdrs.get());
                 for (Py_ssize_t hi = 0; hi < nhdr; hi++) {
-                    PyObject* htuple = PyList_GET_ITEM(raw_hdrs.get(), hi);
+                    PyObject *htuple = PyList_GET_ITEM(raw_hdrs.get(), hi);
                     if (PyTuple_Check(htuple) && PyTuple_GET_SIZE(htuple) >= 2) {
-                        PyObject* hname = PyTuple_GET_ITEM(htuple, 0);
-                        PyObject* hval = PyTuple_GET_ITEM(htuple, 1);
+                        PyObject *hname = PyTuple_GET_ITEM(htuple, 0);
+                        PyObject *hval = PyTuple_GET_ITEM(htuple, 1);
                         if (PyBytes_Check(hname) && PyBytes_Check(hval)) {
                             buf_append(buf, "\r\n", 2);
                             buf_append(buf, PyBytes_AS_STRING(hname), (size_t)PyBytes_GET_SIZE(hname));
@@ -5626,9 +5732,8 @@ body_done:
                             if (!saw_content_length) {
                                 // Check if this is the content-length header
                                 Py_ssize_t hn_len = PyBytes_GET_SIZE(hname);
-                                const char* hn_str = PyBytes_AS_STRING(hname);
-                                if (hn_len == 14 &&
-                                    (hn_str[0] == 'c' || hn_str[0] == 'C') &&
+                                const char *hn_str = PyBytes_AS_STRING(hname);
+                                if (hn_len == 14 && (hn_str[0] == 'c' || hn_str[0] == 'C') &&
                                     strncasecmp(hn_str, "content-length", 14) == 0) {
                                     saw_content_length = true;
                                 }
@@ -5663,7 +5768,6 @@ body_done:
                 buf_append(buf, resp_body, resp_body_len);
             }
 
-            // ── Response object cache ──────────────────────────────────────
             // Hash body content + status + headers to cache complete HTTP responses
             // for endpoints that return JSONResponse / PlainTextResponse etc.
             uintptr_t body_hash = fnv1a_hash_bytes(resp_body, (size_t)resp_body_len);
@@ -5675,14 +5779,14 @@ body_done:
                     header_hash ^= (uintptr_t)PyList_GET_ITEM(raw_hdrs.get(), hi);
                 }
             }
-            uintptr_t cache_key = make_cache_key(body_hash ^ header_hash, req.keep_alive,
-                                                   is_head_method, resp_sc, has_cors);
-            PyObject* cached_resp = cache_lookup(s_response_cache, cache_key);
+            uintptr_t cache_key =
+                make_cache_key(body_hash ^ header_hash, req.keep_alive, is_head_method, resp_sc, has_cors);
+            PyObject *cached_resp = cache_lookup(s_response_cache, cache_key);
             if (cached_resp) {
                 write_to_transport(transport, cached_resp);
                 Py_DECREF(raw_result);
-                fire_post_response_hook(self, req.method.data, req.method.len,
-                                        req.path.data, req.path.len, resp_sc, request_start_time);
+                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, resp_sc,
+                    request_start_time);
                 --self->counters.active_requests;
                 return make_consumed_true(self, req.total_consumed);
             }
@@ -5695,10 +5799,8 @@ body_done:
             }
             // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
-            // ── Background tasks ─────────────────────────────────────────
-            PyRef bg_attr(s_attr_background
-                ? PyObject_GetAttr(raw_result, s_attr_background)
-                : PyObject_GetAttrString(raw_result, "background"));
+            PyRef bg_attr(s_attr_background ? PyObject_GetAttr(raw_result, s_attr_background)
+                                            : PyObject_GetAttrString(raw_result, "background"));
             PyErr_Clear();
             if (bg_attr && bg_attr.get() != Py_None) {
                 // Call background() to get coroutine, schedule on event loop
@@ -5717,16 +5819,14 @@ body_done:
                 PyErr_Clear();
             }
 
-            fire_post_response_hook(self, req.method.data, req.method.len,
-                                    req.path.data, req.path.len, resp_sc, request_start_time);
+            fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, resp_sc,
+                request_start_time);
             Py_DECREF(raw_result);
             --self->counters.active_requests;
             return make_consumed_true(self, req.total_consumed);
         }
 
-        // ── Pydantic model: no response_model_field configured ──────────────────
         // model_dump_json(by_alias=True) returns JSON bytes directly — zero re-encode overhead.
-        // Fixes endpoints that return Pydantic models without response_model_field.
         // by_alias=True matches AstraAPI's jsonable_encoder default behavior.
         {
             if (!s_mdj) s_mdj = PyUnicode_InternFromString("model_dump_json");
@@ -5741,31 +5841,30 @@ body_done:
                     if (kw) PyDict_SetItem(kw.get(), s_by_alias_kw, Py_True);
                     PyRef json_bytes(PyObject_Call(mdj_method.get(), g_empty_tuple, kw.get()));
                     if (json_bytes) {
-                        const char* body_ptr = nullptr;
+                        const char *body_ptr = nullptr;
                         Py_ssize_t body_sz = 0;
                         if (PyBytes_Check(json_bytes.get())) {
                             body_ptr = PyBytes_AS_STRING(json_bytes.get());
-                            body_sz  = PyBytes_GET_SIZE(json_bytes.get());
+                            body_sz = PyBytes_GET_SIZE(json_bytes.get());
                         } else if (PyUnicode_Check(json_bytes.get())) {
                             body_ptr = PyUnicode_AsUTF8AndSize(json_bytes.get(), &body_sz);
                         }
                         if (body_ptr) {
-                            build_and_write_http_response(
-                                sock_fd, transport, status_code_local,
-                                body_ptr, (size_t)body_sz, req.keep_alive,
-                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                                nullptr, is_head_method);
+                            build_and_write_http_response(sock_fd, transport, status_code_local, body_ptr,
+                                (size_t)body_sz, req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data,
+                                origin_sv.len, nullptr, is_head_method);
                         }
-                    } else { PyErr_Clear(); }
+                    } else {
+                        PyErr_Clear();
+                    }
                 }
-                fire_post_response_hook(self, req.method.data, req.method.len,
-                                        req.path.data, req.path.len, status_code_local, request_start_time);
+                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                    status_code_local, request_start_time);
                 --self->counters.active_requests;
                 return make_consumed_true(self, req.total_consumed);
             }
         }
 
-        // ── Fallback: serialize as string ───────────────────────────────
         // Try dataclass/Pydantic model: call dataclasses.asdict or model_dump
         {
             if (!s_asdict) {
@@ -5786,16 +5885,19 @@ body_done:
                         PyRef err_json(serialize_to_json_pybytes(raw_result));
                         Py_DECREF(raw_result);
                         if (err_json) {
-                            char* ej; Py_ssize_t ejl;
+                            char *ej;
+                            Py_ssize_t ejl;
                             PyBytes_AsStringAndSize(err_json.get(), &ej, &ejl);
-                            build_and_write_http_response(sock_fd, transport, status_code_local, ej, (size_t)ejl, req.keep_alive,
-                                has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                            build_and_write_http_response(sock_fd, transport, status_code_local, ej, (size_t)ejl,
+                                req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                         }
-                        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, status_code_local, request_start_time);
+                        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                            status_code_local, request_start_time);
                         --self->counters.active_requests;
                         return make_consumed_true(self, req.total_consumed);
                     }
-                } else if (!is_dc_result) PyErr_Clear();
+                } else if (!is_dc_result)
+                    PyErr_Clear();
             }
         }
         // Try __dict__ for plain Python objects (e.g. OAuth2PasswordRequestForm)
@@ -5807,28 +5909,32 @@ body_done:
                 PyRef err_json(serialize_to_json_pybytes(raw_result));
                 Py_DECREF(raw_result);
                 if (err_json) {
-                    char* ej; Py_ssize_t ejl;
+                    char *ej;
+                    Py_ssize_t ejl;
                     PyBytes_AsStringAndSize(err_json.get(), &ej, &ejl);
-                    build_and_write_http_response(sock_fd, transport, status_code_local, ej, (size_t)ejl, req.keep_alive,
-                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                    build_and_write_http_response(sock_fd, transport, status_code_local, ej, (size_t)ejl,
+                        req.keep_alive, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                 }
-                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, status_code_local, request_start_time);
+                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                    status_code_local, request_start_time);
                 --self->counters.active_requests;
                 return make_consumed_true(self, req.total_consumed);
-            } else { PyErr_Clear(); }
+            } else {
+                PyErr_Clear();
+            }
         }
         PyRef str_repr(PyObject_Str(raw_result));
         Py_DECREF(raw_result);
         if (str_repr) {
             Py_ssize_t slen;
-            const char* s = PyUnicode_AsUTF8AndSize(str_repr.get(), &slen);
+            const char *s = PyUnicode_AsUTF8AndSize(str_repr.get(), &slen);
             if (s) {
                 build_and_write_http_response(sock_fd, transport, status_code_local, s, (size_t)slen, req.keep_alive,
-                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
             }
         }
-        fire_post_response_hook(self, req.method.data, req.method.len,
-                                req.path.data, req.path.len, status_code_local, request_start_time);
+        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, status_code_local,
+            request_start_time);
         --self->counters.active_requests;
         return make_consumed_true(self, req.total_consumed);
     }
@@ -5837,7 +5943,6 @@ body_done:
         // Endpoint suspended — needs real async I/O
         // Return (consumed, ("async", coro, yielded, status_code, keep_alive)) for Python
         // raw_result is the yielded Future — pass it so Python can await it properly
-        // NOTE: Do NOT decrement active_requests here — Python will call
         // record_request_end() after async completion
 
         // Reset _asyncio_future_blocking — C++ intercepted the yield before
@@ -5846,20 +5951,17 @@ body_done:
         // s_fut_blocking pre-cached at startup
         if (raw_result) {
             PyObject_SetAttr(raw_result, s_fut_blocking, Py_False);
-            PyErr_Clear();  // Clear AttributeError if raw_result is None or non-Future
+            PyErr_Clear(); // Clear AttributeError if raw_result is None or non-Future
         }
 
         // s_async_tag pre-cached at startup
         Py_INCREF(s_async_tag);
 
-        PyObject* ka = req.keep_alive ? Py_True : Py_False;
+        PyObject *ka = req.keep_alive ? Py_True : Py_False;
         Py_INCREF(ka);
-        PyRef origin_py(origin_sv.len > 0
-            ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len)
-            : nullptr);
-        PyRef async_info(PyTuple_Pack(6, s_async_tag, coro.release(),
-                         raw_result, get_cached_status(status_code_local), ka,
-                         origin_py ? origin_py.get() : Py_None));
+        PyRef origin_py(origin_sv.len > 0 ? PyUnicode_FromStringAndSize(origin_sv.data, origin_sv.len) : nullptr);
+        PyRef async_info(PyTuple_Pack(6, s_async_tag, coro.release(), raw_result, get_cached_status(status_code_local),
+            ka, origin_py ? origin_py.get() : Py_None));
         Py_XDECREF(raw_result);
         return make_consumed_obj(self, req.total_consumed, async_info.release());
     }
@@ -5879,105 +5981,148 @@ body_done:
             auto eh_it = self->exception_handlers.find((uint16_t)scode);
             if (eh_it != self->exception_handlers.end()) {
                 PyRef handler_result(PyObject_CallOneArg(eh_it->second, exc_val));
-                Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-                exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
+                Py_XDECREF(exc_type);
+                Py_XDECREF(exc_val);
+                Py_XDECREF(exc_tb);
+                exc_type = exc_val = exc_tb = nullptr; // prevent double-free
                 if (handler_result) {
                     PyRef body_attr(PyObject_GetAttrString(handler_result.get(), "body"));
                     if (body_attr && PyBytes_Check(body_attr.get())) {
-                        char* hbody; Py_ssize_t hbody_len;
+                        char *hbody;
+                        Py_ssize_t hbody_len;
                         PyBytes_AsStringAndSize(body_attr.get(), &hbody, &hbody_len);
                         PyRef sc_attr(PyObject_GetAttrString(handler_result.get(), "status_code"));
                         int hsc = sc_attr ? (int)PyLong_AsLong(sc_attr.get()) : scode;
                         build_and_write_http_response(sock_fd, transport, hsc, hbody, (size_t)hbody_len, req.keep_alive,
-                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
+                            has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                     }
                 }
-                fire_post_response_hook(self, req.method.data, req.method.len,
-                                        req.path.data, req.path.len, scode, request_start_time);
+                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, scode,
+                    request_start_time);
                 --self->counters.active_requests;
                 return make_consumed_true(self, req.total_consumed);
             }
 
-            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-            exc_type = exc_val = exc_tb = nullptr;  // prevent double-free
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_val);
+            Py_XDECREF(exc_tb);
+            exc_type = exc_val = exc_tb = nullptr; // prevent double-free
             if (detail && sc) {
                 PyRef detail_str(PyObject_Str(detail.get()));
-                const char* detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
+                const char *detail_cstr = detail_str ? PyUnicode_AsUTF8(detail_str.get()) : "Error";
                 PyRef resp(build_http_error_response(scode, detail_cstr ? detail_cstr : "Error", req.keep_alive,
-                           has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
-                           exc_hdrs_async.empty() ? nullptr : exc_hdrs_async.c_str(), exc_hdrs_async.size()));
+                    has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len,
+                    exc_hdrs_async.empty() ? nullptr : exc_hdrs_async.c_str(), exc_hdrs_async.size()));
                 if (resp) write_to_transport(transport, resp.get());
-                fire_post_response_hook(self, req.method.data, req.method.len,
-                                        req.path.data, req.path.len, scode, request_start_time);
+                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, scode,
+                    request_start_time);
                 --self->counters.active_requests;
                 return make_consumed_true(self, req.total_consumed);
             }
         } else if (is_validation_exception(exc_type)) {
             PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
             // Store for raise_server_exceptions and call type_exception_handlers
-            { PyRef m(PyImport_ImportModule("astraapi._cpp_server"));
-              if (m) { PyRef fn(PyObject_GetAttrString(m.get(), "_set_last_server_exception"));
-                if (fn && exc_val) { PyRef r(PyObject_CallOneArg(fn.get(), exc_val)); (void)r; } PyErr_Clear(); }
-              else PyErr_Clear(); }
+            {
+                PyRef m(PyImport_ImportModule("astraapi._cpp_server"));
+                if (m) {
+                    PyRef fn(PyObject_GetAttrString(m.get(), "_set_last_server_exception"));
+                    if (fn && exc_val) {
+                        PyRef r(PyObject_CallOneArg(fn.get(), exc_val));
+                        (void)r;
+                    }
+                    PyErr_Clear();
+                } else
+                    PyErr_Clear();
+            }
             if (self->type_exception_handlers && PyDict_Size(self->type_exception_handlers) > 0 && exc_val) {
-                PyObject* rv_handler = nullptr;
+                PyObject *rv_handler = nullptr;
                 // Walk MRO of actual exception type to find matching handler
                 PyRef exc_mro(exc_type ? PyObject_GetAttrString(exc_type, "__mro__") : nullptr);
                 if (exc_mro && PyTuple_Check(exc_mro.get())) {
                     Py_ssize_t mro_len = PyTuple_GET_SIZE(exc_mro.get());
                     for (Py_ssize_t mi = 0; mi < mro_len && !rv_handler; mi++) {
-                        PyObject* mro_cls = PyTuple_GET_ITEM(exc_mro.get(), mi);
+                        PyObject *mro_cls = PyTuple_GET_ITEM(exc_mro.get(), mi);
                         PyRef mro_cn(PyObject_GetAttrString(mro_cls, "__name__"));
-                        if (!mro_cn) { PyErr_Clear(); continue; }
-                        const char* mro_cns = PyUnicode_AsUTF8(mro_cn.get());
-                        if (!mro_cns) { PyErr_Clear(); continue; }
-                        PyObject *th_key, *th_val; Py_ssize_t th_pos = 0;
+                        if (!mro_cn) {
+                            PyErr_Clear();
+                            continue;
+                        }
+                        const char *mro_cns = PyUnicode_AsUTF8(mro_cn.get());
+                        if (!mro_cns) {
+                            PyErr_Clear();
+                            continue;
+                        }
+                        PyObject *th_key, *th_val;
+                        Py_ssize_t th_pos = 0;
                         while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
                             PyRef cn(PyObject_GetAttrString(th_key, "__name__"));
                             if (cn && PyUnicode_Check(cn.get())) {
-                                const char* cns = PyUnicode_AsUTF8(cn.get());
-                                if (cns && strcmp(cns, mro_cns) == 0) { rv_handler = th_val; break; }
-                            } else PyErr_Clear();
+                                const char *cns = PyUnicode_AsUTF8(cn.get());
+                                if (cns && strcmp(cns, mro_cns) == 0) {
+                                    rv_handler = th_val;
+                                    break;
+                                }
+                            } else
+                                PyErr_Clear();
                         }
                     }
                 } else {
                     PyErr_Clear();
-                    // Fallback: look for RequestValidationError handler
-                    PyObject *th_key, *th_val; Py_ssize_t th_pos = 0;
+                    PyObject *th_key, *th_val;
+                    Py_ssize_t th_pos = 0;
                     while (PyDict_Next(self->type_exception_handlers, &th_pos, &th_key, &th_val)) {
                         PyRef cn(PyObject_GetAttrString(th_key, "__name__"));
                         if (cn && PyUnicode_Check(cn.get())) {
-                            const char* cns = PyUnicode_AsUTF8(cn.get());
-                            if (cns && strcmp(cns, "RequestValidationError") == 0) { rv_handler = th_val; break; }
-                        } else PyErr_Clear();
+                            const char *cns = PyUnicode_AsUTF8(cn.get());
+                            if (cns && strcmp(cns, "RequestValidationError") == 0) {
+                                rv_handler = th_val;
+                                break;
+                            }
+                        } else
+                            PyErr_Clear();
                     }
                 }
                 if (rv_handler) {
                     PyRef rv_result(PyObject_CallFunctionObjArgs(rv_handler, Py_None, exc_val, nullptr));
                     PyRef rv_final;
                     if (rv_result && PyCoro_CheckExact(rv_result.get())) {
-                        PyObject* cr = nullptr;
+                        PyObject *cr = nullptr;
                         PySendResult sr = PyIter_Send(rv_result.get(), Py_None, &cr);
-                        if (sr == PYGEN_RETURN && cr) rv_final = PyRef(cr);
-                        else if (cr) Py_DECREF(cr);
+                        if (sr == PYGEN_RETURN && cr)
+                            rv_final = PyRef(cr);
+                        else if (cr)
+                            Py_DECREF(cr);
                         PyErr_Clear();
-                    } else if (rv_result) { rv_final = std::move(rv_result); }
-                    else PyErr_Clear();
+                    } else if (rv_result) {
+                        rv_final = std::move(rv_result);
+                    } else
+                        PyErr_Clear();
                     if (rv_final) {
                         int hsc = 422;
                         PyRef sc_a(PyObject_GetAttrString(rv_final.get(), "status_code"));
-                        if (sc_a) { hsc=(int)PyLong_AsLong(sc_a.get()); if(hsc==-1&&PyErr_Occurred()){PyErr_Clear();hsc=422;} }
+                        if (sc_a) {
+                            hsc = (int)PyLong_AsLong(sc_a.get());
+                            if (hsc == -1 && PyErr_Occurred()) {
+                                PyErr_Clear();
+                                hsc = 422;
+                            }
+                        }
                         PyRef body_b(PyObject_GetAttrString(rv_final.get(), "body"));
                         if (body_b && PyBytes_Check(body_b.get())) {
-                            char* hb; Py_ssize_t hbl; PyBytes_AsStringAndSize(body_b.get(), &hb, &hbl);
+                            char *hb;
+                            Py_ssize_t hbl;
+                            PyBytes_AsStringAndSize(body_b.get(), &hb, &hbl);
                             build_and_write_http_response(sock_fd, transport, hsc, hb, (size_t)hbl, req.keep_alive,
                                 has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
-                            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
-                            fire_post_response_hook(self, req.method.data, req.method.len,
-                                                    req.path.data, req.path.len, hsc, request_start_time);
+                            Py_XDECREF(exc_type);
+                            Py_XDECREF(exc_val);
+                            Py_XDECREF(exc_tb);
+                            fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                                hsc, request_start_time);
                             --self->counters.active_requests;
                             return make_consumed_true(self, req.total_consumed);
-                        } else PyErr_Clear();
+                        } else
+                            PyErr_Clear();
                     }
                 }
             }
@@ -5993,10 +6138,13 @@ body_done:
                 PyRef filtered(PyList_New(nerr));
                 if (filtered) {
                     for (Py_ssize_t ei = 0; ei < nerr; ei++) {
-                        PyObject* orig = PyList_GET_ITEM(el_raw.get(), ei);
+                        PyObject *orig = PyList_GET_ITEM(el_raw.get(), ei);
                         if (PyDict_Check(orig)) {
                             PyRef copy(PyDict_Copy(orig));
-                            if (copy) { PyDict_DelItem(copy.get(), s_url_key); PyErr_Clear(); }
+                            if (copy) {
+                                PyDict_DelItem(copy.get(), s_url_key);
+                                PyErr_Clear();
+                            }
                             Py_INCREF(copy ? copy.get() : orig);
                             PyList_SET_ITEM(filtered.get(), ei, copy ? copy.release() : (Py_INCREF(orig), orig));
                         } else {
@@ -6009,120 +6157,153 @@ body_done:
             } else {
                 el = std::move(el_raw);
             }
-            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_val);
+            Py_XDECREF(exc_tb);
             if (!s_det_key) s_det_key = PyUnicode_InternFromString("detail");
             PyRef dd(PyDict_New());
             if (dd && el) PyDict_SetItem(dd.get(), s_det_key, el.get());
             if (dd) {
-                int wrc422 = serialize_json_and_write_response(
-                    sock_fd, transport, dd.get(), 422, req.keep_alive,
+                int wrc422 = serialize_json_and_write_response(sock_fd, transport, dd.get(), 422, req.keep_alive,
                     nullptr, 0, has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
                 if (wrc422 < 0) {
                     PyRef r422(build_http_error_response(422, "Validation Error", req.keep_alive,
-                                   has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+                        has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
                     if (r422) write_to_transport(transport, r422.get());
                 }
-                fire_post_response_hook(self, req.method.data, req.method.len,
-                                        req.path.data, req.path.len, 422, request_start_time);
+                fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, 422,
+                    request_start_time);
                 --self->counters.active_requests;
                 return make_consumed_true(self, req.total_consumed);
             }
         } else if (self->type_exception_handlers && PyDict_Size(self->type_exception_handlers) > 0) {
             // Generic type-keyed handler lookup via MRO walk (e.g. ResponseValidationError)
             PyErr_NormalizeException(&exc_type, &exc_val, &exc_tb);
-            { PyRef m(PyImport_ImportModule("astraapi._cpp_server"));
-              if (m) { PyRef fn(PyObject_GetAttrString(m.get(), "_set_last_server_exception"));
-                if (fn && exc_val) { PyRef r(PyObject_CallOneArg(fn.get(), exc_val)); (void)r; } PyErr_Clear(); }
-              else PyErr_Clear(); }
-            PyObject* gen_handler = nullptr;
+            {
+                PyRef m(PyImport_ImportModule("astraapi._cpp_server"));
+                if (m) {
+                    PyRef fn(PyObject_GetAttrString(m.get(), "_set_last_server_exception"));
+                    if (fn && exc_val) {
+                        PyRef r(PyObject_CallOneArg(fn.get(), exc_val));
+                        (void)r;
+                    }
+                    PyErr_Clear();
+                } else
+                    PyErr_Clear();
+            }
+            PyObject *gen_handler = nullptr;
             PyRef exc_mro2(exc_type ? PyObject_GetAttrString(exc_type, "__mro__") : nullptr);
             if (exc_mro2 && PyTuple_Check(exc_mro2.get())) {
                 Py_ssize_t mro_len2 = PyTuple_GET_SIZE(exc_mro2.get());
                 for (Py_ssize_t mi2 = 0; mi2 < mro_len2 && !gen_handler; mi2++) {
-                    PyObject* mro_cls2 = PyTuple_GET_ITEM(exc_mro2.get(), mi2);
+                    PyObject *mro_cls2 = PyTuple_GET_ITEM(exc_mro2.get(), mi2);
                     PyRef mro_cn2(PyObject_GetAttrString(mro_cls2, "__name__"));
-                    if (!mro_cn2) { PyErr_Clear(); continue; }
-                    const char* mro_cns2 = PyUnicode_AsUTF8(mro_cn2.get());
-                    if (!mro_cns2) { PyErr_Clear(); continue; }
-                    PyObject *th_key2, *th_val2; Py_ssize_t th_pos2 = 0;
+                    if (!mro_cn2) {
+                        PyErr_Clear();
+                        continue;
+                    }
+                    const char *mro_cns2 = PyUnicode_AsUTF8(mro_cn2.get());
+                    if (!mro_cns2) {
+                        PyErr_Clear();
+                        continue;
+                    }
+                    PyObject *th_key2, *th_val2;
+                    Py_ssize_t th_pos2 = 0;
                     while (PyDict_Next(self->type_exception_handlers, &th_pos2, &th_key2, &th_val2)) {
                         PyRef cn2(PyObject_GetAttrString(th_key2, "__name__"));
                         if (cn2 && PyUnicode_Check(cn2.get())) {
-                            const char* cns2 = PyUnicode_AsUTF8(cn2.get());
-                            if (cns2 && strcmp(cns2, mro_cns2) == 0) { gen_handler = th_val2; break; }
-                        } else PyErr_Clear();
+                            const char *cns2 = PyUnicode_AsUTF8(cn2.get());
+                            if (cns2 && strcmp(cns2, mro_cns2) == 0) {
+                                gen_handler = th_val2;
+                                break;
+                            }
+                        } else
+                            PyErr_Clear();
                     }
                 }
-            } else PyErr_Clear();
+            } else
+                PyErr_Clear();
             if (gen_handler && exc_val) {
                 PyRef gen_result(PyObject_CallFunctionObjArgs(gen_handler, Py_None, exc_val, nullptr));
                 PyRef gen_final;
                 if (gen_result && PyCoro_CheckExact(gen_result.get())) {
-                    PyObject* cr2 = nullptr;
+                    PyObject *cr2 = nullptr;
                     PySendResult sr2 = PyIter_Send(gen_result.get(), Py_None, &cr2);
-                    if (sr2 == PYGEN_RETURN && cr2) gen_final = PyRef(cr2);
-                    else if (cr2) Py_DECREF(cr2);
+                    if (sr2 == PYGEN_RETURN && cr2)
+                        gen_final = PyRef(cr2);
+                    else if (cr2)
+                        Py_DECREF(cr2);
                     PyErr_Clear();
-                } else if (gen_result) { gen_final = std::move(gen_result); }
-                else PyErr_Clear();
+                } else if (gen_result) {
+                    gen_final = std::move(gen_result);
+                } else
+                    PyErr_Clear();
                 if (gen_final) {
                     int hsc2 = 500;
                     PyRef sc_a2(PyObject_GetAttrString(gen_final.get(), "status_code"));
-                    if (sc_a2) { hsc2=(int)PyLong_AsLong(sc_a2.get()); if(hsc2==-1&&PyErr_Occurred()){PyErr_Clear();hsc2=500;} }
+                    if (sc_a2) {
+                        hsc2 = (int)PyLong_AsLong(sc_a2.get());
+                        if (hsc2 == -1 && PyErr_Occurred()) {
+                            PyErr_Clear();
+                            hsc2 = 500;
+                        }
+                    }
                     PyRef body_b2(PyObject_GetAttrString(gen_final.get(), "body"));
                     if (body_b2 && PyBytes_Check(body_b2.get())) {
-                        char* hb2; Py_ssize_t hbl2; PyBytes_AsStringAndSize(body_b2.get(), &hb2, &hbl2);
+                        char *hb2;
+                        Py_ssize_t hbl2;
+                        PyBytes_AsStringAndSize(body_b2.get(), &hb2, &hbl2);
                         build_and_write_http_response(sock_fd, transport, hsc2, hb2, (size_t)hbl2, req.keep_alive,
                             has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len);
-                        Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+                        Py_XDECREF(exc_type);
+                        Py_XDECREF(exc_val);
+                        Py_XDECREF(exc_tb);
                         exc_type = exc_val = exc_tb = nullptr;
-                        fire_post_response_hook(self, req.method.data, req.method.len,
-                                                req.path.data, req.path.len, hsc2, request_start_time);
+                        fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len,
+                            hsc2, request_start_time);
                         --self->counters.active_requests;
                         return make_consumed_true(self, req.total_consumed);
-                    } else PyErr_Clear();
+                    } else
+                        PyErr_Clear();
                 }
             }
-            Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+            Py_XDECREF(exc_type);
+            Py_XDECREF(exc_val);
+            Py_XDECREF(exc_tb);
             exc_type = exc_val = exc_tb = nullptr;
         }
-        Py_XDECREF(exc_type); Py_XDECREF(exc_val); Py_XDECREF(exc_tb);
+        Py_XDECREF(exc_type);
+        Py_XDECREF(exc_val);
+        Py_XDECREF(exc_tb);
     }
 
-
-    PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive,
-               has_cors ? cors_ptr : nullptr, origin_sv.data, origin_sv.len));
+    PyRef resp(build_http_error_response(500, "Internal Server Error", req.keep_alive, has_cors ? cors_ptr : nullptr,
+        origin_sv.data, origin_sv.len));
     if (resp) write_to_transport(transport, resp.get());
-    fire_post_response_hook(self, req.method.data, req.method.len,
-                            req.path.data, req.path.len, 500, request_start_time);
+    fire_post_response_hook(self, req.method.data, req.method.len, req.path.data, req.path.len, 500,
+        request_start_time);
     --self->counters.active_requests;
     ++self->counters.total_errors;
     return make_consumed_true(self, req.total_consumed);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // handle_http_batch — Batch HTTP dispatch (METH_FASTCALL)
 //
 // Processes ALL complete requests in the buffer in a single C++ call.
 // For N pipelined/batched requests: N Python→C++ boundary crossings → 1.
-// Eliminates N PyLong allocations (offset/last_consumed) per TCP segment.
 //
 // Returns:
 //   True  = all sync requests processed, last_consumed = total bytes consumed
-//   None  = need more data (nothing consumed)
 //   False = parse error (400 already sent)
 //   tuple = async/WS/Pydantic endpoint hit; tuple[0] = total consumed so far
-// ═══════════════════════════════════════════════════════════════════════════════
-static PyObject* CoreApp_handle_http_batch(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_handle_http_batch(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs < 2 || nargs > 4) {
         PyErr_SetString(PyExc_TypeError, "handle_http_batch requires 2-4 args");
         return nullptr;
     }
 
-    PyObject* buffer_obj = args[0];
-    PyObject* transport  = args[1];
+    PyObject *buffer_obj = args[0];
+    PyObject *transport = args[1];
     Py_ssize_t base_offset = 0;
     if (nargs >= 3) {
         base_offset = PyLong_AsSsize_t(args[2]);
@@ -6131,46 +6312,49 @@ static PyObject* CoreApp_handle_http_batch(
     int sock_fd = -1;
     if (nargs >= 4) {
         sock_fd = (int)PyLong_AsLong(args[3]);
-        if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+        if (sock_fd == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            sock_fd = -1;
+        }
     }
 
     // Re-arm TCP_QUICKACK once for the whole batch (one syscall per data_received).
     // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
     // Buffer access — same dual-path as handle_http.
-    const char* raw_base;
-    Py_ssize_t  raw_len;
-    Py_buffer   view = {};
-    bool        have_view = false;
+    const char *raw_base;
+    Py_ssize_t raw_len;
+    Py_buffer view = {};
+    bool have_view = false;
 
     if (PyCapsule_CheckExact(buffer_obj)) {
-        auto* hb = static_cast<HttpConnectionBuffer*>(
-            PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
+        auto *hb = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
         if (!hb) return nullptr;
         Py_ssize_t total = (Py_ssize_t)hb->size();
         if (base_offset > total) base_offset = total;
-        raw_base = (const char*)hb->data() + base_offset;
-        raw_len  = total - base_offset;
+        raw_base = (const char *)hb->data() + base_offset;
+        raw_len = total - base_offset;
     } else {
         if (PyObject_GetBuffer(buffer_obj, &view, PyBUF_SIMPLE) < 0) return nullptr;
         have_view = true;
         if (base_offset > view.len) base_offset = view.len;
-        raw_base = (const char*)view.buf + base_offset;
-        raw_len  = view.len - base_offset;
+        raw_base = (const char *)view.buf + base_offset;
+        raw_len = view.len - base_offset;
     }
     struct BufferGuard {
-        Py_buffer* v; bool active;
-        ~BufferGuard() { if (active) PyBuffer_Release(v); }
+        Py_buffer *v;
+        bool active;
+        ~BufferGuard() {
+            if (active) PyBuffer_Release(v);
+        }
     } buf_guard{&view, have_view};
 
-    // ── Batch loop: process all complete requests in C++ ────────────────────────
     // Only exits to Python for: async/WS/Pydantic endpoints, incomplete data,
     // or parse errors.  All sync requests are handled inline with zero Python cost.
-    Py_ssize_t prefix = 0;  // bytes consumed by sync requests so far
+    Py_ssize_t prefix = 0; // bytes consumed by sync requests so far
 
     while (true) {
-        PyObject* r = dispatch_one_request(
-            self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
+        PyObject *r = dispatch_one_request(self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
 
         if (r == Py_True) {
             // Sync request completed — accumulate and loop.
@@ -6188,7 +6372,7 @@ static PyObject* CoreApp_handle_http_batch(
                 self->last_consumed = prefix;
                 Py_RETURN_TRUE;
             }
-            Py_RETURN_NONE;  // Genuinely nothing consumed — need more data.
+            Py_RETURN_NONE; // Genuinely nothing consumed — need more data.
         }
 
         if (r == Py_False) {
@@ -6203,18 +6387,17 @@ static PyObject* CoreApp_handle_http_batch(
         if (prefix > 0 && LIKELY(PyTuple_Check(r) && PyTuple_GET_SIZE(r) == 2)) {
             Py_ssize_t req_consumed = self->last_consumed; // set by make_consumed_obj
             Py_ssize_t total_c = prefix + req_consumed;
-            PyObject* new_c = PyLong_FromSsize_t(total_c);
+            PyObject *new_c = PyLong_FromSsize_t(total_c);
             if (LIKELY(new_c)) {
                 Py_DECREF(PyTuple_GET_ITEM(r, 0));
                 PyTuple_SET_ITEM(r, 0, new_c);
                 self->last_consumed = total_c;
             }
         }
-        return r;  // Python handles async work, then loops back with new offset.
+        return r; // Python handles async work, then loops back with new offset.
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // handle_http_batch_v2 — Zero-overhead batch HTTP dispatch (METH_FASTCALL)
 //
 // Upgrade over handle_http_batch: auto-consumes the HttpConnectionBuffer
@@ -6235,49 +6418,46 @@ static PyObject* CoreApp_handle_http_batch(
 //              or InlineResult — buffer already consumed past this item
 //
 // All non-tuple returns are small cached ints (Python caches -5..256) → zero allocation
-// ═══════════════════════════════════════════════════════════════════════════════
-static PyObject* CoreApp_handle_http_batch_v2(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_handle_http_batch_v2(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs < 2 || nargs > 3) {
         PyErr_SetString(PyExc_TypeError, "handle_http_batch_v2 requires 2-3 args");
         return nullptr;
     }
 
-    PyObject* buffer_obj = args[0];
-    PyObject* transport  = args[1];
+    PyObject *buffer_obj = args[0];
+    PyObject *transport = args[1];
     int sock_fd = -1;
     if (nargs >= 3) {
         sock_fd = (int)PyLong_AsLong(args[2]);
-        if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+        if (sock_fd == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            sock_fd = -1;
+        }
     }
 
     // Non-capsule path: delegate to v1 for backward compat (never hit in practice)
     if (UNLIKELY(!PyCapsule_CheckExact(buffer_obj))) {
-        PyObject* v1_args[3] = {buffer_obj, transport,
-                                 sock_fd >= 0 ? PyLong_FromLong(sock_fd) : Py_None};
-        PyObject* res = CoreApp_handle_http_batch(self, v1_args, 3);
+        PyObject *v1_args[3] = {buffer_obj, transport, sock_fd >= 0 ? PyLong_FromLong(sock_fd) : Py_None};
+        PyObject *res = CoreApp_handle_http_batch(self, v1_args, 3);
         if (sock_fd >= 0) Py_DECREF(v1_args[2]);
         return res;
     }
 
-    auto* hb = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
+    auto *hb = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
     if (UNLIKELY(!hb)) return nullptr;
 
     // Re-arm TCP_QUICKACK once for the whole batch (one syscall per data_received).
     // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
-    const char* raw_base = (const char*)hb->data();
-    Py_ssize_t  raw_len  = (Py_ssize_t)hb->size();
+    const char *raw_base = (const char *)hb->data();
+    Py_ssize_t raw_len = (Py_ssize_t)hb->size();
 
-    if (raw_len == 0) return PyLong_FromLong(-1);  // empty buffer — need more data
+    if (raw_len == 0) return PyLong_FromLong(-1); // empty buffer — need more data
 
-    Py_ssize_t prefix = 0;  // bytes consumed by sync requests so far
+    Py_ssize_t prefix = 0; // bytes consumed by sync requests so far
 
     while (true) {
-        PyObject* r = dispatch_one_request(
-            self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
+        PyObject *r = dispatch_one_request(self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
 
         if (LIKELY(r == Py_True)) {
             // Sync request done — accumulate and loop.
@@ -6295,14 +6475,14 @@ static PyObject* CoreApp_handle_http_batch_v2(
                 // 1 = partial request still in buffer — more data expected
                 return PyLong_FromLong(hb->size() > 0 ? 1 : 0);
             }
-            return PyLong_FromLong(-1);  // no progress — need more data (cached)
+            return PyLong_FromLong(-1); // no progress — need more data (cached)
         }
 
         if (r == Py_False) {
             // Parse error — 400 already sent.
             Py_DECREF(r);
             if (prefix > 0) hb->consume((size_t)prefix);
-            return PyLong_FromLong(-2);  // error (cached int, no allocation)
+            return PyLong_FromLong(-2); // error (cached int, no allocation)
         }
 
         // Async/WS/Pydantic: (consumed, inner) — consume buffer, return inner directly.
@@ -6310,7 +6490,7 @@ static PyObject* CoreApp_handle_http_batch_v2(
             Py_ssize_t total_consumed = prefix + self->last_consumed;
             hb->consume((size_t)total_consumed);
             // Steal ref to inner, release outer wrapper — no PyLong alloc needed.
-            PyObject* inner = PyTuple_GET_ITEM(r, 1);
+            PyObject *inner = PyTuple_GET_ITEM(r, 1);
             Py_INCREF(inner);
             Py_DECREF(r);
             return inner;
@@ -6321,7 +6501,6 @@ static PyObject* CoreApp_handle_http_batch_v2(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // serialize_and_write_http — for async endpoint results (METH_FASTCALL)
 //
 // Called from Python after awaiting an async endpoint's coroutine.
@@ -6329,18 +6508,15 @@ static PyObject* CoreApp_handle_http_batch_v2(
 // args[1] = transport (asyncio Transport)
 // args[2] = status_code (int)
 // args[3] = keep_alive (bool)
-// ═══════════════════════════════════════════════════════════════════════════════
 
-static PyObject* CoreApp_serialize_and_write_http(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_serialize_and_write_http(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs != 4) {
         PyErr_SetString(PyExc_TypeError, "serialize_and_write_http requires 4 args");
         return nullptr;
     }
 
-    PyObject* content = args[0];
-    PyObject* transport = args[1];
+    PyObject *content = args[0];
+    PyObject *transport = args[1];
     int status_code = (int)PyLong_AsLong(args[2]);
     bool keep_alive = PyObject_IsTrue(args[3]);
 
@@ -6354,7 +6530,7 @@ static PyObject* CoreApp_serialize_and_write_http(
         Py_RETURN_NONE;
     }
 
-    char* json_data;
+    char *json_data;
     Py_ssize_t json_len;
     PyBytes_AsStringAndSize(json_bytes.get(), &json_data, &json_len);
 
@@ -6366,7 +6542,6 @@ static PyObject* CoreApp_serialize_and_write_http(
     Py_RETURN_NONE;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // build_response — returns complete HTTP response as PyBytes (METH_FASTCALL)
 //
 // Combines JSON serialization + HTTP response building in ONE call.
@@ -6376,14 +6551,11 @@ static PyObject* CoreApp_serialize_and_write_http(
 // args[0] = content (Python object to serialize as JSON)
 // args[1] = status_code (int)
 // args[2] = keep_alive (bool)
-// ═══════════════════════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // write_async_result — direct-write serialized result for async endpoints
 //
 // Called from _handle_async after awaiting the coroutine.
 // Serializes result + writes directly to sock_fd (or transport if EAGAIN).
-// Eliminates 1 PyBytes allocation + 1 transport.write() call vs build_response.
 //
 // args[0] = result (Python object — dict, list, str, int, Pydantic, Response)
 // args[1] = transport
@@ -6393,32 +6565,30 @@ static PyObject* CoreApp_serialize_and_write_http(
 //
 // Returns:
 //   True  — response written successfully (non-streaming)
-//   None  — streaming response, Python must call _write_chunked_streaming
-// ═══════════════════════════════════════════════════════════════════════════════
-static PyObject* CoreApp_write_async_result(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_write_async_result(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs != 5) {
         PyErr_SetString(PyExc_TypeError, "write_async_result requires 5 args");
         return nullptr;
     }
 
-    PyObject* content   = args[0];
-    PyObject* transport = args[1];
-    int status_code     = (int)PyLong_AsLong(args[2]);
+    PyObject *content = args[0];
+    PyObject *transport = args[1];
+    int status_code = (int)PyLong_AsLong(args[2]);
     if (status_code == -1 && PyErr_Occurred()) return nullptr;
-    bool keep_alive     = PyObject_IsTrue(args[3]);
-    int sock_fd         = (int)PyLong_AsLong(args[4]);
-    if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+    bool keep_alive = PyObject_IsTrue(args[3]);
+    int sock_fd = (int)PyLong_AsLong(args[4]);
+    if (sock_fd == -1 && PyErr_Occurred()) {
+        PyErr_Clear();
+        sock_fd = -1;
+    }
 
     // Note: Python caller gates to dict/list only — no need to check body_iterator.
     // Use the same fused serialize+write path as sync endpoints:
     // scatter-gather writev(sock_fd) → zero intermediate PyBytes.
-    int rc = serialize_json_and_write_response(
-        sock_fd, transport, content, status_code, keep_alive,
-        nullptr, 0,   // no accept-encoding (async caller doesn't have it)
-        nullptr, nullptr, 0,  // no CORS
-        false);       // not a HEAD request
+    int rc = serialize_json_and_write_response(sock_fd, transport, content, status_code, keep_alive, nullptr,
+        0,                   // no accept-encoding (async caller doesn't have it)
+        nullptr, nullptr, 0, // no CORS
+        false);              // not a HEAD request
 
     if (rc >= 0) {
         Py_RETURN_TRUE;
@@ -6430,15 +6600,13 @@ static PyObject* CoreApp_write_async_result(
     Py_RETURN_TRUE;
 }
 
-static PyObject* CoreApp_build_response(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_build_response(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs != 3) {
         PyErr_SetString(PyExc_TypeError, "build_response requires 3 args (content, status_code, keep_alive)");
         return nullptr;
     }
 
-    PyObject* content = args[0];
+    PyObject *content = args[0];
     int status_code = (int)PyLong_AsLong(args[1]);
     if (status_code == -1 && PyErr_Occurred()) return nullptr;
     bool keep_alive = PyObject_IsTrue(args[2]);
@@ -6462,7 +6630,7 @@ static PyObject* CoreApp_build_response(
     char cl_str[20];
     int cl_digits = fast_i64_to_buf(cl_str, (long long)body_len);
 
-    const char* conn = keep_alive ? CONN_KA : CONN_CLOSE;
+    const char *conn = keep_alive ? CONN_KA : CONN_CLOSE;
     size_t conn_len = keep_alive ? sizeof(CONN_KA) - 1 : sizeof(CONN_CLOSE) - 1;
 
     if (status_code == 200) {
@@ -6470,13 +6638,19 @@ static PyObject* CoreApp_build_response(
         size_t hdr_len = sizeof(HDR_200) - 1;
         size_t total = hdr_len + (size_t)cl_digits + conn_len + body_len;
 
-        PyObject* result = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)total);
-        if (!result) { release_buffer(std::move(json_buf)); return nullptr; }
+        PyObject *result = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)total);
+        if (!result) {
+            release_buffer(std::move(json_buf));
+            return nullptr;
+        }
 
-        char* dest = PyBytes_AS_STRING(result);
-        memcpy(dest, HDR_200, hdr_len); dest += hdr_len;
-        memcpy(dest, cl_str, (size_t)cl_digits); dest += cl_digits;
-        memcpy(dest, conn, conn_len); dest += conn_len;
+        char *dest = PyBytes_AS_STRING(result);
+        memcpy(dest, HDR_200, hdr_len);
+        dest += hdr_len;
+        memcpy(dest, cl_str, (size_t)cl_digits);
+        dest += cl_digits;
+        memcpy(dest, conn, conn_len);
+        dest += conn_len;
         memcpy(dest, json_buf.data(), body_len);
 
         release_buffer(std::move(json_buf));
@@ -6484,13 +6658,11 @@ static PyObject* CoreApp_build_response(
     }
 
     // General path: non-200 status codes — use build_http_response_bytes
-    PyObject* result = build_http_response_bytes(
-        status_code, json_buf.data(), json_buf.size(), keep_alive);
+    PyObject *result = build_http_response_bytes(status_code, json_buf.data(), json_buf.size(), keep_alive);
     release_buffer(std::move(json_buf));
     return result;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // build_response_from_any — unified type dispatch + serialization in C++
 //
 // Takes: (raw_result, status_code, keep_alive)
@@ -6498,25 +6670,21 @@ static PyObject* CoreApp_build_response(
 //          Py_None if raw_result is a StreamingResponse (Python must handle it),
 //          NULL on error.
 // Handles: dict, list, str, int, float, bool, None, Response objects, Pydantic models
-// ═══════════════════════════════════════════════════════════════════════════════
 
-static PyObject* CoreApp_build_response_from_any(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_build_response_from_any(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs != 3) {
         PyErr_SetString(PyExc_TypeError, "build_response_from_any requires 3 args");
         return nullptr;
     }
 
-    PyObject* raw = args[0];
+    PyObject *raw = args[0];
     int status_code = (int)PyLong_AsLong(args[1]);
     if (status_code == -1 && PyErr_Occurred()) return nullptr;
     bool keep_alive = PyObject_IsTrue(args[2]);
 
     // FAST PATH: JSON-serializable primitives (90%+ of responses)
-    if (PyDict_Check(raw) || PyList_Check(raw) || PyUnicode_Check(raw) ||
-        PyLong_Check(raw) || PyFloat_Check(raw) || PyBool_Check(raw) ||
-        PyTuple_Check(raw) || raw == Py_None) {
+    if (PyDict_Check(raw) || PyList_Check(raw) || PyUnicode_Check(raw) || PyLong_Check(raw) || PyFloat_Check(raw) ||
+        PyBool_Check(raw) || PyTuple_Check(raw) || raw == Py_None) {
         return CoreApp_build_response(self, args, nargs);
     }
 
@@ -6526,13 +6694,14 @@ static PyObject* CoreApp_build_response_from_any(
     }
 
     // Response objects (HTMLResponse, etc.): has .body + .status_code
-    if (s_attr_body && s_attr_status_code &&
-        PyObject_HasAttr(raw, s_attr_body) && PyObject_HasAttr(raw, s_attr_status_code)) {
+    if (s_attr_body && s_attr_status_code && PyObject_HasAttr(raw, s_attr_body) &&
+        PyObject_HasAttr(raw, s_attr_status_code)) {
         PyRef body_attr(PyObject_GetAttr(raw, s_attr_body));
         PyRef sc_attr(PyObject_GetAttr(raw, s_attr_status_code));
         if (body_attr && PyBytes_Check(body_attr.get()) && sc_attr && PyLong_Check(sc_attr.get())) {
             int resp_sc = (int)PyLong_AsLong(sc_attr.get());
-            char* resp_body; Py_ssize_t resp_body_len;
+            char *resp_body;
+            Py_ssize_t resp_body_len;
             PyBytes_AsStringAndSize(body_attr.get(), &resp_body, &resp_body_len);
 
             PyRef raw_hdrs;
@@ -6548,7 +6717,7 @@ static PyObject* CoreApp_build_response_from_any(
 
             // Status line
             if (resp_sc > 0 && resp_sc < 600 && s_status_lines[resp_sc].data) {
-                const auto& sl = s_status_lines[resp_sc];
+                const auto &sl = s_status_lines[resp_sc];
                 buf_append(buf, sl.data, sl.len - 2);
             } else {
                 static const char prefix[] = "HTTP/1.1 ";
@@ -6557,7 +6726,7 @@ static PyObject* CoreApp_build_response_from_any(
                 int sn = fast_i64_to_buf(sc_buf, resp_sc);
                 buf_append(buf, sc_buf, sn);
                 buf.push_back(' ');
-                const char* reason = status_reason(resp_sc);
+                const char *reason = status_reason(resp_sc);
                 buf_append(buf, reason, strlen(reason));
             }
 
@@ -6566,10 +6735,10 @@ static PyObject* CoreApp_build_response_from_any(
             if (raw_hdrs && PyList_Check(raw_hdrs.get())) {
                 Py_ssize_t nhdr = PyList_GET_SIZE(raw_hdrs.get());
                 for (Py_ssize_t hi = 0; hi < nhdr; hi++) {
-                    PyObject* htuple = PyList_GET_ITEM(raw_hdrs.get(), hi);
+                    PyObject *htuple = PyList_GET_ITEM(raw_hdrs.get(), hi);
                     if (PyTuple_Check(htuple) && PyTuple_GET_SIZE(htuple) >= 2) {
-                        PyObject* hname = PyTuple_GET_ITEM(htuple, 0);
-                        PyObject* hval = PyTuple_GET_ITEM(htuple, 1);
+                        PyObject *hname = PyTuple_GET_ITEM(htuple, 0);
+                        PyObject *hval = PyTuple_GET_ITEM(htuple, 1);
                         if (PyBytes_Check(hname) && PyBytes_Check(hval)) {
                             buf_append(buf, "\r\n", 2);
                             buf_append(buf, PyBytes_AS_STRING(hname), (size_t)PyBytes_GET_SIZE(hname));
@@ -6577,7 +6746,7 @@ static PyObject* CoreApp_build_response_from_any(
                             buf_append(buf, PyBytes_AS_STRING(hval), (size_t)PyBytes_GET_SIZE(hval));
                             if (!saw_content_length2) {
                                 Py_ssize_t hn_len = PyBytes_GET_SIZE(hname);
-                                const char* hn_str = PyBytes_AS_STRING(hname);
+                                const char *hn_str = PyBytes_AS_STRING(hname);
                                 if (hn_len == 14 && strncasecmp(hn_str, "content-length", 14) == 0) {
                                     saw_content_length2 = true;
                                 }
@@ -6602,14 +6771,13 @@ static PyObject* CoreApp_build_response_from_any(
             }
             buf_append(buf, resp_body, resp_body_len);
 
-            PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+            PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
             release_buffer(std::move(buf));
             return result;
         }
         // body not bytes — fall through to Pydantic/fallback
     }
 
-    // Pydantic model: use model_dump_json(by_alias=True) → JSON bytes directly.
     // Faster than model_dump(mode='json') + yyjson re-serialization.
     // by_alias=True matches AstraAPI's jsonable_encoder default behavior.
     {
@@ -6623,17 +6791,16 @@ static PyObject* CoreApp_build_response_from_any(
                 PyRef json_bytes(kw ? PyObject_Call(mdj_method.get(), g_empty_tuple, kw.get())
                                     : PyObject_CallNoArgs(mdj_method.get()));
                 if (json_bytes) {
-                    const char* body_data = nullptr;
+                    const char *body_data = nullptr;
                     Py_ssize_t body_len = 0;
                     if (PyBytes_Check(json_bytes.get())) {
                         body_data = PyBytes_AS_STRING(json_bytes.get());
-                        body_len  = PyBytes_GET_SIZE(json_bytes.get());
+                        body_len = PyBytes_GET_SIZE(json_bytes.get());
                     } else if (PyUnicode_Check(json_bytes.get())) {
                         body_data = PyUnicode_AsUTF8AndSize(json_bytes.get(), &body_len);
                     }
                     if (body_data) {
-                        return build_http_response_bytes(
-                            status_code, body_data, (size_t)body_len, keep_alive);
+                        return build_http_response_bytes(status_code, body_data, (size_t)body_len, keep_alive);
                     }
                 }
                 PyErr_Clear();
@@ -6645,20 +6812,20 @@ static PyObject* CoreApp_build_response_from_any(
     {
         PyRef dict_attr(PyObject_GetAttrString(raw, "__dict__"));
         if (dict_attr && PyDict_Check(dict_attr.get())) {
-            PyObject* new_args[3] = {dict_attr.get(), args[1], args[2]};
+            PyObject *new_args[3] = {dict_attr.get(), args[1], args[2]};
             return CoreApp_build_response(self, new_args, 3);
-        } else { PyErr_Clear(); }
+        } else {
+            PyErr_Clear();
+        }
     }
     // Ultimate fallback: try to serialize whatever it is
     return CoreApp_build_response(self, args, nargs);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // PreparedRequest — returned by parse_and_route() for async dispatch
 // All PyObject* fields, T_OBJECT_EX for zero-overhead attribute access.
-// ═══════════════════════════════════════════════════════════════════════════════
 
-static void PreparedRequest_dealloc(PreparedRequestObject* self) {
+static void PreparedRequest_dealloc(PreparedRequestObject *self) {
     Py_XDECREF(self->kwargs);
     Py_XDECREF(self->endpoint);
     Py_XDECREF(self->status_code_obj);
@@ -6669,7 +6836,7 @@ static void PreparedRequest_dealloc(PreparedRequestObject* self) {
     Py_XDECREF(self->embed_body_fields);
     Py_XDECREF(self->json_body);
     Py_XDECREF(self->is_coroutine);
-    Py_TYPE(self)->tp_free((PyObject*)self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 static PyMemberDef PreparedRequest_members[] = {
@@ -6682,20 +6849,16 @@ static PyMemberDef PreparedRequest_members[] = {
     {"body_params", Py_T_OBJECT_EX, offsetof(PreparedRequestObject, body_params), Py_READONLY, nullptr},
     {"embed_body_fields", Py_T_OBJECT_EX, offsetof(PreparedRequestObject, embed_body_fields), Py_READONLY, nullptr},
     {"json_body", Py_T_OBJECT_EX, offsetof(PreparedRequestObject, json_body), Py_READONLY, nullptr},
-    {"is_coroutine", Py_T_OBJECT_EX, offsetof(PreparedRequestObject, is_coroutine), Py_READONLY, nullptr},
-    {nullptr}
-};
+    {"is_coroutine", Py_T_OBJECT_EX, offsetof(PreparedRequestObject, is_coroutine), Py_READONLY, nullptr}, {nullptr}};
 
 PyTypeObject PreparedRequestType = {
-    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_astraapi_core.PreparedRequest",
+    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0).tp_name = "_astraapi_core.PreparedRequest",
     .tp_basicsize = sizeof(PreparedRequestObject),
     .tp_dealloc = (destructor)PreparedRequest_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_DISALLOW_INSTANTIATION,
     .tp_members = PreparedRequest_members,
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // parse_and_route — NON-BLOCKING parse + route + param extraction
 //
 // Does ONLY fast work (~15μs): HTTP parsing, route matching, parameter
@@ -6711,31 +6874,27 @@ PyTypeObject PreparedRequestType = {
 //   (consumed, PreparedRequest)   — success, dispatch endpoint async
 //   (consumed, InlineResult)      — needs Pydantic validation
 //   (consumed, error_bytes)       — pre-built error response (404/405/500)
-// ═══════════════════════════════════════════════════════════════════════════════
 
-static PyObject* CoreApp_parse_and_route(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_parse_and_route(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs != 1) {
         PyErr_SetString(PyExc_TypeError, "parse_and_route requires 1 arg (buffer)");
         return nullptr;
     }
 
-    PyObject* buffer_obj = args[0];
+    PyObject *buffer_obj = args[0];
 
     Py_buffer view;
     if (PyObject_GetBuffer(buffer_obj, &view, PyBUF_SIMPLE) < 0) {
         return nullptr;
     }
     struct BufferGuard {
-        Py_buffer* v;
+        Py_buffer *v;
         ~BufferGuard() { PyBuffer_Release(v); }
     } buf_guard{&view};
 
-    char* buf_data = (char*)view.buf;
+    char *buf_data = (char *)view.buf;
     Py_ssize_t buf_len = view.len;
 
-    // ── Parse HTTP request ───────────────────────────────────────────────
     ParsedHttpRequest req = {};
     int parse_result = parse_http_request(buf_data, (size_t)buf_len, &req);
     if (self->force_close) req.keep_alive = false;
@@ -6758,72 +6917,80 @@ static PyObject* CoreApp_parse_and_route(
         return PyTuple_Pack(2, neg.get(), err_resp.release());
     }
 
-    // ── Route matching (routes always frozen after startup) ────
     if (UNLIKELY(!self->routes_frozen.load(std::memory_order_acquire))) {
         std::unique_lock wlock(self->routes_mutex);
         self->routes_frozen.store(true, std::memory_order_release);
     }
     auto match = self->router.at(req.path.data, req.path.len);
     if (!match) {
-            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
+        PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
         if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
         return make_consumed_true(self, req.total_consumed);
     }
 
     int idx = match->route_index;
     if (idx < 0 || idx >= (int)self->routes.size()) {
-            PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
+        PyRef resp(build_http_error_response(404, "Not Found", req.keep_alive));
         if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
         return make_consumed_true(self, req.total_consumed);
     }
 
-    const auto& route = self->routes[idx];
+    const auto &route = self->routes[idx];
 
-    // ── Method check (O(1) bitmask) ────────────────────────────────────
     if (route.method_mask) {
         uint8_t req_method = method_str_to_bit(req.method.data, req.method.len);
         if (!(route.method_mask & req_method)) {
-                    PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
+            PyRef resp(build_http_error_response(405, "Method Not Allowed", req.keep_alive));
             if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
             return make_consumed_true(self, req.total_consumed);
         }
     }
 
     if (!route.fast_spec) {
-            PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive));
+        PyRef resp(build_http_error_response(500, "Route not configured", req.keep_alive));
         if (resp) return make_consumed_obj(self, req.total_consumed, resp.release());
         return make_consumed_true(self, req.total_consumed);
     }
 
     // Copy route data to locals and release lock early.
-    const FastRouteSpec* spec_ptr = &(*route.fast_spec);
-    PyObject* endpoint_local = route.endpoint;
+    const FastRouteSpec *spec_ptr = &(*route.fast_spec);
+    PyObject *endpoint_local = route.endpoint;
     Py_INCREF(endpoint_local);
     uint16_t status_code_local = route.status_code;
     bool is_coroutine_local = route.is_coroutine;
     bool has_body_params_local = spec_ptr->has_body_params;
-    PyObject* body_params_local = spec_ptr->body_params;
+    PyObject *body_params_local = spec_ptr->body_params;
     if (body_params_local) Py_INCREF(body_params_local);
     bool embed_body_local = spec_ptr->embed_body_fields;
 
+    const auto &spec = *spec_ptr;
 
-    const auto& spec = *spec_ptr;
-
-    // ── Build kwargs dict ────────────────────────────────────────────────
     PyRef kwargs(PyDict_New());
-    if (!kwargs) { Py_DECREF(endpoint_local); Py_XDECREF(body_params_local); return nullptr; }
+    if (!kwargs) {
+        Py_DECREF(endpoint_local);
+        Py_XDECREF(body_params_local);
+        return nullptr;
+    }
 
-    // ── Path parameters ──────────────────────────────────────────────────
     if (match->param_count > 0) {
         for (int pi = 0; pi < match->param_count; pi++) {
             auto pname = match->params[pi].name;
             auto pval = match->params[pi].value;
             bool coerced = false;
-            for (const auto& fs : spec.path_specs) {
+            for (const auto &fs : spec.path_specs) {
                 if (fs.field_name == pname) {
-                    PyObject* py_val = coerce_param(pval, fs.type_tag);
-                    if (!py_val) { Py_DECREF(endpoint_local); Py_XDECREF(body_params_local); return nullptr; }
-                    if (PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val) < 0) { Py_DECREF(py_val); Py_DECREF(endpoint_local); Py_XDECREF(body_params_local); return nullptr; }
+                    PyObject *py_val = coerce_param(pval, fs.type_tag);
+                    if (!py_val) {
+                        Py_DECREF(endpoint_local);
+                        Py_XDECREF(body_params_local);
+                        return nullptr;
+                    }
+                    if (PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val) < 0) {
+                        Py_DECREF(py_val);
+                        Py_DECREF(endpoint_local);
+                        Py_XDECREF(body_params_local);
+                        return nullptr;
+                    }
                     Py_DECREF(py_val);
                     coerced = true;
                     break;
@@ -6837,13 +7004,12 @@ static PyObject* CoreApp_parse_and_route(
         }
     }
 
-    // ── Query parameters (O(1) hash map lookup) ────────────────────────
     if (spec.has_query_params && !req.query_string.empty()) {
-        const char* p = req.query_string.data;
-        const char* end = p + req.query_string.len;
+        const char *p = req.query_string.data;
+        const char *end = p + req.query_string.len;
         while (p < end) {
-            const char* key_start = p;
-            const char* eq = nullptr;
+            const char *key_start = p;
+            const char *eq = nullptr;
             while (p < end && *p != '&') {
                 if (*p == '=' && !eq) eq = p;
                 p++;
@@ -6854,8 +7020,8 @@ static PyObject* CoreApp_parse_and_route(
 
                 auto qit = spec.query_map.find(key_sv);
                 if (qit != spec.query_map.end()) {
-                    const auto& fs = spec.query_specs[qit->second];
-                    PyObject* py_val = coerce_param(val_sv, fs.type_tag);
+                    const auto &fs = spec.query_specs[qit->second];
+                    PyObject *py_val = coerce_param(val_sv, fs.type_tag);
                     if (py_val) {
                         PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val);
                         Py_DECREF(py_val);
@@ -6866,28 +7032,27 @@ static PyObject* CoreApp_parse_and_route(
         }
     }
 
-    // ── Header + Cookie extraction (O(1) hash map lookup) ──────────────
     if (spec.has_header_params || spec.has_cookie_params) {
         for (int i = 0; i < req.header_count; i++) {
-            const auto& hdr = req.headers[i];
+            const auto &hdr = req.headers[i];
 
             if (spec.has_cookie_params && hdr.name.iequals("cookie", 6)) {
-                const char* cp = hdr.value.data;
-                const char* cend = cp + hdr.value.len;
+                const char *cp = hdr.value.data;
+                const char *cend = cp + hdr.value.len;
                 while (cp < cend) {
                     while (cp < cend && (*cp == ' ' || *cp == ';')) cp++;
-                    const char* ck_start = cp;
+                    const char *ck_start = cp;
                     while (cp < cend && *cp != '=') cp++;
                     if (cp >= cend) break;
                     std::string_view cookie_name(ck_start, cp - ck_start);
                     cp++;
-                    const char* cv_start = cp;
+                    const char *cv_start = cp;
                     while (cp < cend && *cp != ';') cp++;
                     std::string_view cookie_val(cv_start, cp - cv_start);
 
                     auto cit = spec.cookie_map.find(cookie_name);
                     if (cit != spec.cookie_map.end()) {
-                        const auto& fs = spec.cookie_specs[cit->second];
+                        const auto &fs = spec.cookie_specs[cit->second];
                         PyRef py_val(PyUnicode_FromStringAndSize(cookie_val.data(), cookie_val.size()));
                         if (py_val) PyDict_SetItem(kwargs.get(), fs.py_field_name, py_val.get());
                     }
@@ -6904,12 +7069,12 @@ static PyObject* CoreApp_parse_and_route(
                 std::string_view normalized(norm_buf, norm_len);
                 auto hit = spec.header_map.find(normalized);
                 if (hit != spec.header_map.end()) {
-                    const auto& fs = spec.header_specs[hit->second];
+                    const auto &fs = spec.header_specs[hit->second];
                     {
                         PyRef py_val(PyUnicode_FromStringAndSize(hdr.value.data, hdr.value.len));
                         if (py_val) {
                             if (fs.is_sequence) {
-                                PyObject* existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
+                                PyObject *existing = PyDict_GetItem(kwargs.get(), fs.py_field_name);
                                 if (existing && PyList_Check(existing)) {
                                     PyList_Append(existing, py_val.get());
                                 } else {
@@ -6930,9 +7095,8 @@ static PyObject* CoreApp_parse_and_route(
         }
     }
 
-    // ── Fill defaults for missing params ─────────────────────────────────
-    auto fill_defaults = [&](const std::vector<FieldSpec>& specs) {
-        for (const auto& fs : specs) {
+    auto fill_defaults = [&](const std::vector<FieldSpec> &specs) {
+        for (const auto &fs : specs) {
             if (fs.default_value && !PyDict_Contains(kwargs.get(), fs.py_field_name)) {
                 PyDict_SetItem(kwargs.get(), fs.py_field_name, fs.default_value);
             }
@@ -6942,17 +7106,14 @@ static PyObject* CoreApp_parse_and_route(
     fill_defaults(spec.header_specs);
     fill_defaults(spec.cookie_specs);
 
-    // ── JSON body parsing (yyjson — GIL-released raw parse) ──
-    PyObject* json_body_obj = Py_None;
+    PyObject *json_body_obj = Py_None;
     if (spec.has_body_params && !req.body.empty()) {
-        yyjson_doc* doc = nullptr;
-        Py_BEGIN_ALLOW_THREADS
-        doc = yyjson_parse_raw(req.body.data, req.body.len);
-        Py_END_ALLOW_THREADS
-        if (doc) {
+        yyjson_doc *doc = nullptr;
+        Py_BEGIN_ALLOW_THREADS doc = yyjson_parse_raw(req.body.data, req.body.len);
+        Py_END_ALLOW_THREADS if (doc) {
             if (spec.embed_body_fields && kwargs) {
                 // OPT: merge yyjson keys directly into kwargs in one pass
-                PyObject* full_dict = nullptr;
+                PyObject *full_dict = nullptr;
                 if (yyjson_doc_merge_to_dict(doc, kwargs.get(), &full_dict) == 0 && full_dict) {
                     json_body_obj = full_dict;
                 }
@@ -6973,9 +7134,8 @@ static PyObject* CoreApp_parse_and_route(
         }
     }
 
-    // ── If route has Pydantic body params — return InlineResult ──────────
     if (has_body_params_local && body_params_local) {
-        InlineResultObject* ir = PyObject_New(InlineResultObject, &InlineResultType);
+        InlineResultObject *ir = PyObject_New(InlineResultObject, &InlineResultType);
         if (!ir) {
             if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
             Py_DECREF(endpoint_local);
@@ -6984,7 +7144,8 @@ static PyObject* CoreApp_parse_and_route(
         }
 
         ir->status_code_obj = get_cached_status(status_code_local);
-        ir->has_body_params = Py_True; Py_INCREF(Py_True);
+        ir->has_body_params = Py_True;
+        Py_INCREF(Py_True);
         ir->embed_body_fields = embed_body_local ? Py_True : Py_False;
         Py_INCREF(ir->embed_body_fields);
         ir->kwargs = kwargs.release();
@@ -6997,14 +7158,13 @@ static PyObject* CoreApp_parse_and_route(
         ir->endpoint = endpoint_local;
         ir->body_params = body_params_local;
 
-        return make_consumed_obj(self, req.total_consumed, (PyObject*)ir);
+        return make_consumed_obj(self, req.total_consumed, (PyObject *)ir);
     }
 
     // Clean up body_params_local if not used
     Py_XDECREF(body_params_local);
 
-    // ── Build PreparedRequest for async dispatch ─────────────────────────
-    PreparedRequestObject* prep = PyObject_New(PreparedRequestObject, &PreparedRequestType);
+    PreparedRequestObject *prep = PyObject_New(PreparedRequestObject, &PreparedRequestType);
     if (!prep) {
         if (json_body_obj != Py_None) Py_DECREF(json_body_obj);
         Py_DECREF(endpoint_local);
@@ -7012,16 +7172,18 @@ static PyObject* CoreApp_parse_and_route(
     }
 
     prep->kwargs = kwargs.release();
-    prep->endpoint = endpoint_local;  // transfer strong ref
+    prep->endpoint = endpoint_local; // transfer strong ref
     prep->status_code_obj = get_cached_status(status_code_local);
     prep->keep_alive_obj = req.keep_alive ? Py_True : Py_False;
     Py_INCREF(prep->keep_alive_obj);
     Py_INCREF(Py_None);
     prep->error_response = Py_None;
-    prep->has_body_params = Py_False; Py_INCREF(Py_False);
+    prep->has_body_params = Py_False;
+    Py_INCREF(Py_False);
     Py_INCREF(Py_None);
     prep->body_params = Py_None;
-    prep->embed_body_fields = Py_False; Py_INCREF(Py_False);
+    prep->embed_body_fields = Py_False;
+    Py_INCREF(Py_False);
     if (json_body_obj != Py_None) {
         prep->json_body = json_body_obj;
     } else {
@@ -7031,11 +7193,10 @@ static PyObject* CoreApp_parse_and_route(
     prep->is_coroutine = is_coroutine_local ? Py_True : Py_False;
     Py_INCREF(prep->is_coroutine);
 
-    return make_consumed_obj(self, req.total_consumed, (PyObject*)prep);
+    return make_consumed_obj(self, req.total_consumed, (PyObject *)prep);
 }
 
-// ── configure_rate_limit(enabled, max_requests, window_seconds) ────────────
-static PyObject* CoreApp_configure_rate_limit(CoreAppObject* self, PyObject* args) {
+static PyObject *CoreApp_configure_rate_limit(CoreAppObject *self, PyObject *args) {
     int enabled, max_req, window_sec;
     if (!PyArg_ParseTuple(args, "pii", &enabled, &max_req, &window_sec)) return nullptr;
     self->rate_limit_enabled = (bool)enabled;
@@ -7044,9 +7205,8 @@ static PyObject* CoreApp_configure_rate_limit(CoreAppObject* self, PyObject* arg
     Py_RETURN_NONE;
 }
 
-// ── set_client_ip(ip_string) ───────────────────────────────────────────────
-static PyObject* CoreApp_set_client_ip(CoreAppObject* self, PyObject* arg) {
-    const char* ip = PyUnicode_AsUTF8(arg);
+static PyObject *CoreApp_set_client_ip(CoreAppObject *self, PyObject *arg) {
+    const char *ip = PyUnicode_AsUTF8(arg);
     if (!ip) return nullptr;
     self->current_client_ip = ip;
     // Pre-compute shard index for rate limiting (avoids hash per request)
@@ -7054,8 +7214,7 @@ static PyObject* CoreApp_set_client_ip(CoreAppObject* self, PyObject* arg) {
     Py_RETURN_NONE;
 }
 
-// ── set_post_response_hook(callable_or_None) ───────────────────────────────
-static PyObject* CoreApp_set_post_response_hook(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_set_post_response_hook(CoreAppObject *self, PyObject *arg) {
     Py_XDECREF(self->post_response_hook);
     if (arg == Py_None) {
         self->post_response_hook = nullptr;
@@ -7066,12 +7225,11 @@ static PyObject* CoreApp_set_post_response_hook(CoreAppObject* self, PyObject* a
     Py_RETURN_NONE;
 }
 
-// ── Warmup — exercise hot-path code to warm instruction caches ──────────────
 // Called once at server startup. Eliminates ~164ms first-request spike.
 
-static PyObject* CoreApp_warmup(CoreAppObject* self, PyObject*) {
+static PyObject *CoreApp_warmup(CoreAppObject *self, PyObject *) {
     // 1. Warm HTTP parser (llhttp state machine instructions)
-    const char* dummy = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const char *dummy = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     ParsedHttpRequest req = {};
     parse_http_request(dummy, strlen(dummy), &req);
 
@@ -7094,7 +7252,7 @@ static PyObject* CoreApp_warmup(CoreAppObject* self, PyObject*) {
 
     // 4. Warm HTTP response builder
     {
-        const char* body = "{\"s\":\"ok\"}";
+        const char *body = "{\"s\":\"ok\"}";
         PyRef resp(build_http_response_bytes(200, body, 10, true));
         (void)resp;
     }
@@ -7103,13 +7261,9 @@ static PyObject* CoreApp_warmup(CoreAppObject* self, PyObject*) {
     Py_RETURN_NONE;
 }
 
-// ── Method table ────────────────────────────────────────────────────────────
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // handle_http_append_and_dispatch — fused append + dispatch (METH_FASTCALL)
 //
 // Combines _http_buf_append + handle_http_batch_v2 into a single Python→C++ call.
-// Eliminates one Python→C++ boundary crossing per data_received() invocation.
 //
 // args[0] = buffer capsule (HttpConnectionBuffer)
 // args[1] = data (bytes-like)   — appended into buffer first
@@ -7119,53 +7273,47 @@ static PyObject* CoreApp_warmup(CoreAppObject* self, PyObject*) {
 // Returns:
 //   False  (PyFalse)  = buffer overflow (413 logic should be handled by caller)
 //   int ≥ 0           = sync batch done; value = remaining bytes in buffer
-//   None              = need more data
 //   False (as parse)  = parse error (400 sent)
 //   tuple             = inner async/ws/stream/InlineResult payload
-// ═══════════════════════════════════════════════════════════════════════════════
-static PyObject* CoreApp_handle_http_append_and_dispatch(
-    CoreAppObject* self, PyObject* const* args, Py_ssize_t nargs)
-{
+static PyObject *CoreApp_handle_http_append_and_dispatch(CoreAppObject *self, PyObject *const *args, Py_ssize_t nargs) {
     if (nargs < 3 || nargs > 4) {
         PyErr_SetString(PyExc_TypeError, "handle_http_append_and_dispatch requires 3-4 args");
         return nullptr;
     }
 
-    PyObject* buffer_obj = args[0];
-    PyObject* data_obj   = args[1];
-    PyObject* transport  = args[2];
+    PyObject *buffer_obj = args[0];
+    PyObject *data_obj = args[1];
+    PyObject *transport = args[2];
     int sock_fd = -1;
     if (nargs >= 4) {
         sock_fd = (int)PyLong_AsLong(args[3]);
-        if (sock_fd == -1 && PyErr_Occurred()) { PyErr_Clear(); sock_fd = -1; }
+        if (sock_fd == -1 && PyErr_Occurred()) {
+            PyErr_Clear();
+            sock_fd = -1;
+        }
     }
 
-    // ── Append data to buffer ──────────────────────────────────────────────
     // Fast path: capsule + bytes/bytearray
     if (UNLIKELY(!PyCapsule_CheckExact(buffer_obj))) {
-        // Fallback: shouldn't happen in normal operation
         PyErr_SetString(PyExc_TypeError, "buffer must be HttpConnectionBuffer capsule");
         return nullptr;
     }
 
-    auto* hb = static_cast<HttpConnectionBuffer*>(
-        PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
+    auto *hb = static_cast<HttpConnectionBuffer *>(PyCapsule_GetPointer(buffer_obj, HTTP_BUF_CAPSULE_NAME));
     if (UNLIKELY(!hb)) return nullptr;
 
     // Append data (bytes or bytearray) with minimal overhead
     bool append_ok;
     if (LIKELY(PyBytes_CheckExact(data_obj))) {
-        append_ok = hb->append(
-            reinterpret_cast<const uint8_t*>(PyBytes_AS_STRING(data_obj)),
+        append_ok = hb->append(reinterpret_cast<const uint8_t *>(PyBytes_AS_STRING(data_obj)),
             (size_t)PyBytes_GET_SIZE(data_obj));
     } else if (data_obj == Py_None) {
-        // None data: nothing to append, just dispatch
         append_ok = true;
     } else {
         // Slow path: bytearray, memoryview, etc.
         Py_buffer view;
         if (PyObject_GetBuffer(data_obj, &view, PyBUF_SIMPLE) < 0) return nullptr;
-        append_ok = hb->append(static_cast<const uint8_t*>(view.buf), (size_t)view.len);
+        append_ok = hb->append(static_cast<const uint8_t *>(view.buf), (size_t)view.len);
         PyBuffer_Release(&view);
     }
 
@@ -7174,19 +7322,17 @@ static PyObject* CoreApp_handle_http_append_and_dispatch(
         return PyLong_FromLong(-3);
     }
 
-    // ── Dispatch (same as handle_http_batch_v2) ────────────────────────────
     // if (sock_fd >= 0) platform_rearm_quickack(sock_fd);
 
-    const char* raw_base = (const char*)hb->data();
-    Py_ssize_t  raw_len  = (Py_ssize_t)hb->size();
+    const char *raw_base = (const char *)hb->data();
+    Py_ssize_t raw_len = (Py_ssize_t)hb->size();
 
-    if (raw_len == 0) return PyLong_FromLong(-1);  // empty — need more data
+    if (raw_len == 0) return PyLong_FromLong(-1); // empty — need more data
 
     Py_ssize_t prefix = 0;
 
     while (true) {
-        PyObject* r = dispatch_one_request(
-            self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
+        PyObject *r = dispatch_one_request(self, raw_base + prefix, raw_len - prefix, transport, sock_fd);
 
         if (LIKELY(r == Py_True)) {
             prefix += self->last_consumed;
@@ -7201,19 +7347,19 @@ static PyObject* CoreApp_handle_http_append_and_dispatch(
                 // 0 = buffer empty (connection idle), 1 = partial request pending
                 return PyLong_FromLong(hb->size() > 0 ? 1 : 0);
             }
-            return PyLong_FromLong(-1);  // no progress — need more data (cached)
+            return PyLong_FromLong(-1); // no progress — need more data (cached)
         }
 
         if (r == Py_False) {
             Py_DECREF(r);
             if (prefix > 0) hb->consume((size_t)prefix);
-            return PyLong_FromLong(-2);  // parse error (cached)
+            return PyLong_FromLong(-2); // parse error (cached)
         }
 
         if (LIKELY(PyTuple_Check(r) && PyTuple_GET_SIZE(r) == 2)) {
             Py_ssize_t total_consumed = prefix + self->last_consumed;
             hb->consume((size_t)total_consumed);
-            PyObject* inner = PyTuple_GET_ITEM(r, 1);
+            PyObject *inner = PyTuple_GET_ITEM(r, 1);
             Py_INCREF(inner);
             Py_DECREF(r);
             return inner;
@@ -7224,15 +7370,14 @@ static PyObject* CoreApp_handle_http_append_and_dispatch(
 }
 
 // set_max_body_size(size_bytes: int) -- 0 = unlimited
-static PyObject* CoreApp_set_max_body_size(CoreAppObject* self, PyObject* arg) {
+static PyObject *CoreApp_set_max_body_size(CoreAppObject *self, PyObject *arg) {
     Py_ssize_t sz = PyLong_AsSsize_t(arg);
     if (sz == -1 && PyErr_Occurred()) return nullptr;
     self->max_body_size = (sz <= 0) ? 0 : (size_t)sz;
     Py_RETURN_NONE;
 }
 
-static PyMethodDef CoreApp_methods[] = {
-    {"next_route_id", (PyCFunction)CoreApp_next_route_id, METH_NOARGS, nullptr},
+static PyMethodDef CoreApp_methods[] = {{"next_route_id", (PyCFunction)CoreApp_next_route_id, METH_NOARGS, nullptr},
     {"record_request_start", (PyCFunction)CoreApp_record_request_start, METH_NOARGS, nullptr},
     {"record_request_end", (PyCFunction)CoreApp_record_request_end, METH_NOARGS, nullptr},
     {"record_error", (PyCFunction)CoreApp_record_error, METH_NOARGS, nullptr},
@@ -7254,19 +7399,20 @@ static PyMethodDef CoreApp_methods[] = {
     {"set_has_http_middleware", (PyCFunction)CoreApp_set_has_http_middleware, METH_VARARGS, nullptr},
     {"set_https_redirect", (PyCFunction)CoreApp_set_https_redirect, METH_VARARGS, nullptr},
     // C++ HTTP server path — bypass ASGI entirely
-    {"handle_http", (PyCFunction)(void(*)(void))CoreApp_handle_http, METH_FASTCALL, nullptr},
-    {"handle_http_batch", (PyCFunction)(void(*)(void))CoreApp_handle_http_batch, METH_FASTCALL, nullptr},
-    {"handle_http_batch_v2", (PyCFunction)(void(*)(void))CoreApp_handle_http_batch_v2, METH_FASTCALL, nullptr},
-    {"handle_http_append_and_dispatch", (PyCFunction)(void(*)(void))CoreApp_handle_http_append_and_dispatch, METH_FASTCALL, nullptr},
-    {"serialize_and_write_http", (PyCFunction)(void(*)(void))CoreApp_serialize_and_write_http, METH_FASTCALL, nullptr},
+    {"handle_http", (PyCFunction)(void (*)(void))CoreApp_handle_http, METH_FASTCALL, nullptr},
+    {"handle_http_batch", (PyCFunction)(void (*)(void))CoreApp_handle_http_batch, METH_FASTCALL, nullptr},
+    {"handle_http_batch_v2", (PyCFunction)(void (*)(void))CoreApp_handle_http_batch_v2, METH_FASTCALL, nullptr},
+    {"handle_http_append_and_dispatch", (PyCFunction)(void (*)(void))CoreApp_handle_http_append_and_dispatch,
+        METH_FASTCALL, nullptr},
+    {"serialize_and_write_http", (PyCFunction)(void (*)(void))CoreApp_serialize_and_write_http, METH_FASTCALL, nullptr},
     // Direct-write for async endpoints — serializes + writes to fd, no PyBytes alloc
-    {"write_async_result", (PyCFunction)(void(*)(void))CoreApp_write_async_result, METH_FASTCALL, nullptr},
+    {"write_async_result", (PyCFunction)(void (*)(void))CoreApp_write_async_result, METH_FASTCALL, nullptr},
     // Returns complete HTTP response as single PyBytes (no transport calls)
-    {"build_response", (PyCFunction)(void(*)(void))CoreApp_build_response, METH_FASTCALL, nullptr},
+    {"build_response", (PyCFunction)(void (*)(void))CoreApp_build_response, METH_FASTCALL, nullptr},
     // Unified type dispatch + serialization — handles dict/list/Response/Pydantic, returns None for StreamingResponse
-    {"build_response_from_any", (PyCFunction)(void(*)(void))CoreApp_build_response_from_any, METH_FASTCALL, nullptr},
+    {"build_response_from_any", (PyCFunction)(void (*)(void))CoreApp_build_response_from_any, METH_FASTCALL, nullptr},
     // Non-blocking parse+route — returns PreparedRequest for async dispatch
-    {"parse_and_route", (PyCFunction)(void(*)(void))CoreApp_parse_and_route, METH_FASTCALL, nullptr},
+    {"parse_and_route", (PyCFunction)(void (*)(void))CoreApp_parse_and_route, METH_FASTCALL, nullptr},
     {"freeze_routes", (PyCFunction)CoreApp_freeze_routes, METH_NOARGS, nullptr},
     {"begin_registration", (PyCFunction)CoreApp_begin_registration, METH_NOARGS, nullptr},
     {"end_registration", (PyCFunction)CoreApp_end_registration, METH_NOARGS, nullptr},
@@ -7278,29 +7424,24 @@ static PyMethodDef CoreApp_methods[] = {
     {"set_client_ip", (PyCFunction)CoreApp_set_client_ip, METH_O, nullptr},
     {"set_post_response_hook", (PyCFunction)CoreApp_set_post_response_hook, METH_O, nullptr},
     {"warmup", (PyCFunction)CoreApp_warmup, METH_NOARGS, nullptr},
-    {"set_max_body_size", (PyCFunction)CoreApp_set_max_body_size, METH_O, nullptr},
-    {nullptr}
-};
+    {"set_max_body_size", (PyCFunction)CoreApp_set_max_body_size, METH_O, nullptr}, {nullptr}};
 
-static PyObject* CoreApp_get_max_body_size(CoreAppObject* self, void*) {
+static PyObject *CoreApp_get_max_body_size(CoreAppObject *self, void *) {
     return PyLong_FromSize_t(self->max_body_size);
 }
 static PyGetSetDef CoreApp_getset[] = {
-    {"max_body_size", (getter)CoreApp_get_max_body_size, nullptr, nullptr, nullptr},
-    {nullptr}
-};
+    {"max_body_size", (getter)CoreApp_get_max_body_size, nullptr, nullptr, nullptr}, {nullptr}};
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
 static PyMemberDef CoreApp_members[] = {
     {"last_consumed", Py_T_PYSSIZET, offsetof(CoreAppObject, last_consumed), Py_READONLY, nullptr},
     {"force_close", Py_T_INT, offsetof(CoreAppObject, force_close), 0, nullptr},
-    {"redirect_slashes", Py_T_BOOL, offsetof(CoreAppObject, redirect_slashes), 0, nullptr},
-    {nullptr}
-};
-
+    {"redirect_slashes", Py_T_BOOL, offsetof(CoreAppObject, redirect_slashes), 0, nullptr}, {nullptr}};
+#pragma GCC diagnostic pop
 
 PyTypeObject CoreAppType = {
-    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0)
-    .tp_name = "_astraapi_core.CoreApp",
+    .ob_base = PyVarObject_HEAD_INIT(nullptr, 0).tp_name = "_astraapi_core.CoreApp",
     .tp_basicsize = sizeof(CoreAppObject),
     .tp_dealloc = (destructor)CoreApp_dealloc,
     .tp_flags = Py_TPFLAGS_DEFAULT,
@@ -7310,17 +7451,13 @@ PyTypeObject CoreAppType = {
     .tp_new = CoreApp_new,
 };
 
-// ── Module registration ─────────────────────────────────────────────────────
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // Standalone response helpers (called from Python _cpp_server.py)
-// ═══════════════════════════════════════════════════════════════════════════════
 
 // build_response_from_parts(status_code, headers_list, body, keep_alive) → bytes
 // Replaces _write_response_obj() Python f-string + b"".join() with single C++ call
-PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
+PyObject *py_build_response_from_parts(PyObject * /*self*/, PyObject *args) {
     int status_code;
-    PyObject* headers_list;
+    PyObject *headers_list;
     Py_buffer body;
     int keep_alive;
 
@@ -7334,7 +7471,7 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
 
     // Status line (use cache if available)
     if (status_code >= 0 && status_code < 600 && s_status_lines[status_code].data) {
-        const auto& sl = s_status_lines[status_code];
+        const auto &sl = s_status_lines[status_code];
         buf_append(buf, sl.data, sl.len);
     } else {
         static const char prefix[] = "HTTP/1.1 ";
@@ -7343,7 +7480,7 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
         int sn = fast_i64_to_buf(sc_buf, status_code);
         buf_append(buf, sc_buf, sn);
         buf.push_back(' ');
-        const char* reason = status_reason(status_code);
+        const char *reason = status_reason(status_code);
         size_t rlen = strlen(reason);
         buf_append(buf, reason, rlen);
         buf_append(buf, "\r\n", 2);
@@ -7353,13 +7490,13 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
     bool has_content_length = false;
     Py_ssize_t n_hdrs = PyList_Size(headers_list);
     for (Py_ssize_t i = 0; i < n_hdrs; i++) {
-        PyObject* item = PyList_GET_ITEM(headers_list, i);
-        PyObject* key = PyTuple_GET_ITEM(item, 0);
-        PyObject* val = PyTuple_GET_ITEM(item, 1);
+        PyObject *item = PyList_GET_ITEM(headers_list, i);
+        PyObject *key = PyTuple_GET_ITEM(item, 0);
+        PyObject *val = PyTuple_GET_ITEM(item, 1);
 
         Py_ssize_t klen, vlen;
-        const char* kstr = PyUnicode_AsUTF8AndSize(key, &klen);
-        const char* vstr = PyUnicode_AsUTF8AndSize(val, &vlen);
+        const char *kstr = PyUnicode_AsUTF8AndSize(key, &klen);
+        const char *vstr = PyUnicode_AsUTF8AndSize(val, &vlen);
         if (!kstr || !vstr) {
             PyBuffer_Release(&body);
             release_buffer(std::move(buf));
@@ -7401,10 +7538,10 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
 
     // End of headers + body
     buf_append(buf, "\r\n", 2);
-    buf_append(buf, (const char*)body.buf, body_len);
+    buf_append(buf, (const char *)body.buf, body_len);
     PyBuffer_Release(&body);
 
-    PyObject* result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
+    PyObject *result = PyBytes_FromStringAndSize(buf.data(), (Py_ssize_t)buf.size());
     release_buffer(std::move(buf));
     return result;
 }
@@ -7412,7 +7549,7 @@ PyObject* py_build_response_from_parts(PyObject* /*self*/, PyObject* args) {
 // build_chunked_frame(chunk: bytes) → bytes
 // Builds "{hex_len}\r\n{chunk}\r\n" in a single allocation
 // Replaces Python: f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n"
-PyObject* py_build_chunked_frame(PyObject* /*self*/, PyObject* arg) {
+PyObject *py_build_chunked_frame(PyObject * /*self*/, PyObject *arg) {
     Py_buffer chunk;
     if (PyObject_GetBuffer(arg, &chunk, PyBUF_SIMPLE) < 0) {
         return nullptr;
@@ -7430,13 +7567,13 @@ PyObject* py_build_chunked_frame(PyObject* /*self*/, PyObject* arg) {
 
     // Total: hex + \r\n + chunk + \r\n
     size_t total = (size_t)hex_len + 2 + chunk_len + 2;
-    PyObject* result = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)total);
+    PyObject *result = PyBytes_FromStringAndSize(nullptr, (Py_ssize_t)total);
     if (!result) {
         PyBuffer_Release(&chunk);
         return nullptr;
     }
 
-    char* out = PyBytes_AS_STRING(result);
+    char *out = PyBytes_AS_STRING(result);
     memcpy(out, hex_buf, (size_t)hex_len);
     out[hex_len] = '\r';
     out[hex_len + 1] = '\n';
@@ -7448,7 +7585,7 @@ PyObject* py_build_chunked_frame(PyObject* /*self*/, PyObject* arg) {
     return result;
 }
 
-int register_app_types(PyObject* module) {
+int register_app_types(PyObject *module) {
     if (PyType_Ready(&CoreAppType) < 0) return -1;
     if (PyType_Ready(&MatchResultType) < 0) return -1;
     if (PyType_Ready(&ResponseDataType) < 0) return -1;
@@ -7456,15 +7593,15 @@ int register_app_types(PyObject* module) {
     if (PyType_Ready(&PreparedRequestType) < 0) return -1;
 
     Py_INCREF(&CoreAppType);
-    PyModule_AddObject(module, "CoreApp", (PyObject*)&CoreAppType);
+    PyModule_AddObject(module, "CoreApp", (PyObject *)&CoreAppType);
     Py_INCREF(&MatchResultType);
-    PyModule_AddObject(module, "MatchResult", (PyObject*)&MatchResultType);
+    PyModule_AddObject(module, "MatchResult", (PyObject *)&MatchResultType);
     Py_INCREF(&ResponseDataType);
-    PyModule_AddObject(module, "ResponseData", (PyObject*)&ResponseDataType);
+    PyModule_AddObject(module, "ResponseData", (PyObject *)&ResponseDataType);
     Py_INCREF(&InlineResultType);
-    PyModule_AddObject(module, "InlineResult", (PyObject*)&InlineResultType);
+    PyModule_AddObject(module, "InlineResult", (PyObject *)&InlineResultType);
     Py_INCREF(&PreparedRequestType);
-    PyModule_AddObject(module, "PreparedRequest", (PyObject*)&PreparedRequestType);
+    PyModule_AddObject(module, "PreparedRequest", (PyObject *)&PreparedRequestType);
 
     return 0;
 }

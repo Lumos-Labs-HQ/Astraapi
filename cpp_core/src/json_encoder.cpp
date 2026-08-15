@@ -1,29 +1,25 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
-#include "pyref.hpp"
 #include "json_writer.hpp"
+#include "pyref.hpp"
 
-// ══════════════════════════════════════════════════════════════════════════════
+#include <Python.h>
+
 // fast_jsonable_encode(obj: PyAny) → PyAny
 //
-// Pydantic-aware encoder: converts Python objects to JSON-serializable form.
 // Handles: BaseModel, dict, list, tuple, datetime, UUID, Enum, Decimal,
 //          set, frozenset, bytes, PurePath, GeneratorType.
 //
 // Returns a JSON-serializable Python object (not bytes).
-// ══════════════════════════════════════════════════════════════════════════════
 
-// Cached type objects for isinstance checks
-static PyObject* g_datetime_type = nullptr;
-static PyObject* g_date_type = nullptr;
-static PyObject* g_time_type = nullptr;
-static PyObject* g_timedelta_type = nullptr;
-static PyObject* g_uuid_type = nullptr;
-static PyObject* g_decimal_type = nullptr;
-static PyObject* g_enum_type = nullptr;
-static PyObject* g_purepath_type = nullptr;
+static PyObject *g_datetime_type = nullptr;
+static PyObject *g_date_type = nullptr;
+static PyObject *g_time_type = nullptr;
+static PyObject *g_timedelta_type = nullptr;
+static PyObject *g_uuid_type = nullptr;
+static PyObject *g_decimal_type = nullptr;
+static PyObject *g_enum_type = nullptr;
+static PyObject *g_purepath_type = nullptr;
 
-// FIX C-14: Use std::call_once for thread-safe lazy initialization
 #include <mutex>
 static std::once_flag g_types_init_flag;
 
@@ -53,27 +49,22 @@ static void _do_ensure_types() {
     if (enum_mod) g_enum_type = PyObject_GetAttrString(enum_mod.get(), "Enum");
     PyErr_Clear();
 
-    // PurePath
     PyRef pathlib_mod(PyImport_ImportModule("pathlib"));
     if (pathlib_mod) g_purepath_type = PyObject_GetAttrString(pathlib_mod.get(), "PurePath");
     PyErr_Clear();
 }
 
-void ensure_types_initialized() {
-    std::call_once(g_types_init_flag, _do_ensure_types);
-}
+void ensure_types_initialized() { std::call_once(g_types_init_flag, _do_ensure_types); }
 
-static PyObject* encode_recursive(PyObject* obj, int depth);
+static PyObject *encode_recursive(PyObject *obj, int depth);
 
-static PyObject* encode_recursive(PyObject* obj, int depth) {
+static PyObject *encode_recursive(PyObject *obj, int depth) {
     if (depth > 64) {
         PyErr_SetString(PyExc_ValueError, "Maximum recursion depth exceeded");
         return nullptr;
     }
 
-    // None, bool, int, float, str — return as-is
-    if (obj == Py_None || PyBool_Check(obj) || PyLong_Check(obj) ||
-        PyFloat_Check(obj) || PyUnicode_Check(obj)) {
+    if (obj == Py_None || PyBool_Check(obj) || PyLong_Check(obj) || PyFloat_Check(obj) || PyUnicode_Check(obj)) {
         Py_INCREF(obj);
         return obj;
     }
@@ -83,8 +74,8 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         PyRef result(PyDict_New());
         if (!result) return nullptr;
 
-        PyObject* key;
-        PyObject* value;
+        PyObject *key;
+        PyObject *value;
         Py_ssize_t pos = 0;
         while (PyDict_Next(obj, &pos, &key, &value)) {
             PyRef encoded_key(encode_recursive(key, depth + 1));
@@ -106,9 +97,9 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         PyRef result(PyList_New(n));
         if (!result) return nullptr;
         for (Py_ssize_t i = 0; i < n; i++) {
-            PyObject* item = encode_recursive(PyList_GET_ITEM(obj, i), depth + 1);
+            PyObject *item = encode_recursive(PyList_GET_ITEM(obj, i), depth + 1);
             if (!item) return nullptr;
-            PyList_SET_ITEM(result.get(), i, item);  // steals ref
+            PyList_SET_ITEM(result.get(), i, item); // steals ref
         }
         return result.release();
     }
@@ -119,7 +110,7 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         PyRef result(PyList_New(n));
         if (!result) return nullptr;
         for (Py_ssize_t i = 0; i < n; i++) {
-            PyObject* item = encode_recursive(PyTuple_GET_ITEM(obj, i), depth + 1);
+            PyObject *item = encode_recursive(PyTuple_GET_ITEM(obj, i), depth + 1);
             if (!item) return nullptr;
             PyList_SET_ITEM(result.get(), i, item);
         }
@@ -132,7 +123,7 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         if (!iter) return nullptr;
         PyRef result(PyList_New(0));
         if (!result) return nullptr;
-        while (PyObject* item = PyIter_Next(iter.get())) {
+        while (PyObject *item = PyIter_Next(iter.get())) {
             PyRef encoded(encode_recursive(item, depth + 1));
             Py_DECREF(item);
             if (!encoded) return nullptr;
@@ -144,18 +135,14 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
 
     // bytes → str (utf-8 decode)
     if (PyBytes_Check(obj)) {
-        char* data;
+        char *data;
         Py_ssize_t len;
         PyBytes_AsStringAndSize(obj, &data, &len);
         return PyUnicode_FromStringAndSize(data, len);
     }
 
-    // Pydantic BaseModel — try model_dump()
-    // FIX H-24: Use type check + HasAttr instead of pure strstr matching.
-    // Check model_dump first (definitive Pydantic v2 marker).
-    // Use PyObject_GetOptionalAttrString on Python 3.13+ to avoid warnings.
     {
-        PyObject* md_attr = nullptr;
+        PyObject *md_attr = nullptr;
         int has_md = PyObject_GetOptionalAttrString(obj, "model_dump", &md_attr);
         if (has_md > 0 && md_attr != nullptr) {
             Py_DECREF(md_attr);
@@ -167,18 +154,15 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         }
     }
 
-    // Pydantic v1 — try dict()
     if (PyObject_HasAttrString(obj, "dict") && PyObject_HasAttrString(obj, "__fields__")) {
         PyRef dumped(PyObject_CallMethod(obj, "dict", nullptr));
         if (dumped) return encode_recursive(dumped.get(), depth + 1);
         PyErr_Clear();
     }
 
-    // Enum — get .value
-    // FIX H-25: Check PyObject_IsInstance return value (-1 = error)
     if (g_enum_type) {
         int r = PyObject_IsInstance(obj, g_enum_type);
-        if (r < 0) return nullptr;  // propagate exception
+        if (r < 0) return nullptr; // propagate exception
         if (r) {
             PyRef val(PyObject_GetAttrString(obj, "value"));
             if (val) return encode_recursive(val.get(), depth + 1);
@@ -186,7 +170,6 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         }
     }
 
-    // datetime, date, time → .isoformat()
     if (g_datetime_type) {
         int r = PyObject_IsInstance(obj, g_datetime_type);
         if (r < 0) return nullptr;
@@ -203,7 +186,6 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         if (r) return PyObject_CallMethod(obj, "isoformat", nullptr);
     }
 
-    // timedelta → total_seconds()
     if (g_timedelta_type) {
         int r = PyObject_IsInstance(obj, g_timedelta_type);
         if (r < 0) return nullptr;
@@ -217,27 +199,24 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         if (r) return PyObject_Str(obj);
     }
 
-    // FIX M-30: Decimal → str (preserves precision instead of lossy float conversion)
     if (g_decimal_type) {
         int r = PyObject_IsInstance(obj, g_decimal_type);
         if (r < 0) return nullptr;
         if (r) return PyObject_Str(obj);
     }
 
-    // PurePath → str
     if (g_purepath_type) {
         int r = PyObject_IsInstance(obj, g_purepath_type);
         if (r < 0) return nullptr;
         if (r) return PyObject_Str(obj);
     }
 
-    // Generator/Iterator → list
     if (PyIter_Check(obj)) {
         PyRef result(PyList_New(0));
         if (!result) return nullptr;
         PyRef iter(PyObject_GetIter(obj));
         if (!iter) return nullptr;
-        while (PyObject* item = PyIter_Next(iter.get())) {
+        while (PyObject *item = PyIter_Next(iter.get())) {
             PyRef encoded(encode_recursive(item, depth + 1));
             Py_DECREF(item);
             if (!encoded) return nullptr;
@@ -247,10 +226,7 @@ static PyObject* encode_recursive(PyObject* obj, int depth) {
         return result.release();
     }
 
-    // Fallback: try __str__
     return PyObject_Str(obj);
 }
 
-PyObject* py_fast_jsonable_encode(PyObject* self, PyObject* arg) {
-    return encode_recursive(arg, 0);
-}
+PyObject *py_fast_jsonable_encode(PyObject *self, PyObject *arg) { return encode_recursive(arg, 0); }

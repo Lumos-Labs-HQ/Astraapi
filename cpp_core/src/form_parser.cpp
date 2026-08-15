@@ -1,38 +1,37 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #include "percent_decode.hpp"
 #include "pyref.hpp"
+
+#include <Python.h>
+
 #include <cstring>
 #include <string>
 #include <vector>
 
 // Portable memmem — memchr-accelerated: skip to first-byte matches
-static const void* safe_memmem(const void* haystack, size_t haystacklen,
-                               const void* needle, size_t needlelen) {
+static const void *safe_memmem(const void *haystack, size_t haystacklen, const void *needle, size_t needlelen) {
     if (needlelen == 0) return haystack;
     if (haystacklen < needlelen) return nullptr;
-    const char* h = (const char*)haystack;
-    const char* n = (const char*)needle;
-    const char* end = h + haystacklen - needlelen + 1;
-    while ((h = (const char*)memchr(h, n[0], end - h)) != nullptr) {
+    const char *h = (const char *)haystack;
+    const char *n = (const char *)needle;
+    const char *end = h + haystacklen - needlelen + 1;
+    while ((h = (const char *)memchr(h, n[0], end - h)) != nullptr) {
         if (memcmp(h, n, needlelen) == 0) return h;
         h++;
     }
     return nullptr;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // parse_urlencoded_body(body: bytes) → PyList of (str, str) tuples
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_parse_urlencoded_body(PyObject* self, PyObject* arg) {
-    char* data;
+PyObject *py_parse_urlencoded_body(PyObject *self, PyObject *arg) {
+    char *data;
     Py_ssize_t data_len;
 
     if (PyBytes_Check(arg)) {
         PyBytes_AsStringAndSize(arg, &data, &data_len);
     } else if (PyUnicode_Check(arg)) {
-        data = (char*)PyUnicode_AsUTF8AndSize(arg, &data_len);
+        data = (char *)PyUnicode_AsUTF8AndSize(arg, &data_len);
         if (!data) return nullptr;
     } else {
         PyErr_SetString(PyExc_TypeError, "expected bytes or str");
@@ -43,12 +42,12 @@ PyObject* py_parse_urlencoded_body(PyObject* self, PyObject* arg) {
     PyRef result(PyList_New(0));
     if (!result) return nullptr;
 
-    const char* p = data;
-    const char* end = data + data_len;
+    const char *p = data;
+    const char *end = data + data_len;
 
     while (p < end) {
-        const char* key_start = p;
-        const char* eq = nullptr;
+        const char *key_start = p;
+        const char *eq = nullptr;
         while (p < end && *p != '&') {
             if (*p == '=' && !eq) eq = p;
             p++;
@@ -76,19 +75,17 @@ PyObject* py_parse_urlencoded_body(PyObject* self, PyObject* arg) {
     return result.release();
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // parse_multipart_body(body: bytes, boundary: str) → PyList of dicts
 // Each dict: {name, data, filename, content_type, headers}
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
-    PyObject* body_obj;
-    const char* boundary;
+PyObject *py_parse_multipart_body(PyObject *self, PyObject *args) {
+    PyObject *body_obj;
+    const char *boundary;
     Py_ssize_t boundary_len;
 
     if (!PyArg_ParseTuple(args, "Os#", &body_obj, &boundary, &boundary_len)) return nullptr;
 
-    char* data;
+    char *data;
     Py_ssize_t data_len;
     if (PyBytes_Check(body_obj)) {
         PyBytes_AsStringAndSize(body_obj, &data, &data_len);
@@ -105,12 +102,12 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
     delim.append(boundary, boundary_len);
 
     // Find parts between delimiters
-    const char* p = data;
-    const char* end = data + data_len;
+    const char *p = data;
+    const char *end = data + data_len;
 
     // Skip preamble — find first delimiter
-    const char* first = (const char*)safe_memmem(p, end - p, delim.c_str(), delim.size());
-    if (!first) return result.release();  // no parts
+    const char *first = (const char *)safe_memmem(p, end - p, delim.c_str(), delim.size());
+    if (!first) return result.release(); // no parts
 
     p = first + delim.size();
 
@@ -127,7 +124,7 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
         PyRef headers_dict(PyDict_New());
 
         while (p < end) {
-            const char* line_start = p;
+            const char *line_start = p;
             while (p < end && *p != '\r' && *p != '\n') p++;
             size_t line_len = p - line_start;
 
@@ -135,7 +132,7 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
             if (p < end && *p == '\r') p++;
             if (p < end && *p == '\n') p++;
 
-            if (line_len == 0) break;  // empty line — end of headers
+            if (line_len == 0) break; // empty line — end of headers
 
             // Parse header line
             std::string line(line_start, line_len);
@@ -153,7 +150,8 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
 
                 // Lowercase header name for comparison
                 std::string hname_lower = hname;
-                for (auto& c : hname_lower) if (c >= 'A' && c <= 'Z') c += 32;
+                for (auto &c : hname_lower)
+                    if (c >= 'A' && c <= 'Z') c += 32;
 
                 PyRef pk(PyUnicode_FromString(hname_lower.c_str()));
                 PyRef pv(PyUnicode_FromString(hval.c_str()));
@@ -180,11 +178,11 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
         }
 
         // Find next delimiter — body is everything until then
-        const char* next_delim = (const char*)safe_memmem(p, end - p, delim.c_str(), delim.size());
+        const char *next_delim = (const char *)safe_memmem(p, end - p, delim.c_str(), delim.size());
         if (!next_delim) next_delim = end;
 
         // Body: strip trailing CRLF before delimiter
-        const char* body_end = next_delim;
+        const char *body_end = next_delim;
         if (body_end > p && *(body_end - 1) == '\n') body_end--;
         if (body_end > p && *(body_end - 1) == '\r') body_end--;
 
@@ -199,16 +197,16 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
         // Form fields: use PyBytes (small text values).
         Py_ssize_t part_len = (Py_ssize_t)(body_end - p);
         if (!filename.empty()) {
-            static PyObject* s_spooled_cls = nullptr;
-            static PyObject* s_write_str = nullptr;
-            static PyObject* s_seek_str = nullptr;
+            static PyObject *s_spooled_cls = nullptr;
+            static PyObject *s_write_str = nullptr;
+            static PyObject *s_seek_str = nullptr;
             if (!s_spooled_cls) {
                 PyRef tf(PyImport_ImportModule("tempfile"));
                 if (tf) s_spooled_cls = PyObject_GetAttrString(tf.get(), "SpooledTemporaryFile");
                 s_write_str = PyUnicode_InternFromString("write");
-                s_seek_str  = PyUnicode_InternFromString("seek");
+                s_seek_str = PyUnicode_InternFromString("seek");
             }
-            PyObject* spooled = nullptr;
+            PyObject *spooled = nullptr;
             if (s_spooled_cls) {
                 PyRef kw(PyDict_New());
                 PyRef max_sz(PyLong_FromLong(1048576));
@@ -256,7 +254,6 @@ PyObject* py_parse_multipart_body(PyObject* self, PyObject* args) {
         PyDict_SetItemString(part.get(), "headers", headers_dict.get());
         PyList_Append(result.get(), part.get());
 
-        // Advance past delimiter
         p = next_delim + delim.size();
     }
 

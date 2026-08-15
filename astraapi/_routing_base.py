@@ -29,9 +29,6 @@ from astraapi._types import ASGIApp, Lifespan, Receive, Scope, Send
 from astraapi._websocket import WebSocket
 
 
-# ---------------------------------------------------------------------------
-# NoMatchFound exception
-# ---------------------------------------------------------------------------
 
 
 class NoMatchFound(Exception):
@@ -44,9 +41,6 @@ class NoMatchFound(Exception):
         super().__init__(f'No route exists for name "{name}" and params "{params}".')
 
 
-# ---------------------------------------------------------------------------
-# Match enum
-# ---------------------------------------------------------------------------
 
 
 class Match(enum.Enum):
@@ -55,9 +49,6 @@ class Match(enum.Enum):
     FULL = 2
 
 
-# ---------------------------------------------------------------------------
-# Convertors
-# ---------------------------------------------------------------------------
 
 T = TypeVar("T")
 
@@ -146,9 +137,7 @@ def register_url_convertor(key: str, convertor: Convertor[Any]) -> None:
     CONVERTOR_TYPES[key] = convertor
 
 
-# ---------------------------------------------------------------------------
 # URLPath -- a str subclass that carries protocol/host metadata
-# ---------------------------------------------------------------------------
 
 
 class URLPath(str):
@@ -181,9 +170,7 @@ class URLPath(str):
         return URL(f"{scheme}://{netloc}{path}")
 
 
-# ---------------------------------------------------------------------------
 # WebSocketClose -- lightweight ASGI close
-# ---------------------------------------------------------------------------
 
 
 class WebSocketClose:
@@ -197,9 +184,6 @@ class WebSocketClose:
         await send({"type": "websocket.close", "code": self.code, "reason": self.reason})
 
 
-# ---------------------------------------------------------------------------
-# Helper: get_route_path
-# ---------------------------------------------------------------------------
 
 
 def get_route_path(scope: Scope) -> str:
@@ -217,9 +201,6 @@ def get_route_path(scope: Scope) -> str:
     return path
 
 
-# ---------------------------------------------------------------------------
-# Helper: get_name
-# ---------------------------------------------------------------------------
 
 
 def get_name(endpoint: Callable[..., Any]) -> str:
@@ -227,9 +208,6 @@ def get_name(endpoint: Callable[..., Any]) -> str:
     return getattr(endpoint, "__name__", endpoint.__class__.__name__)
 
 
-# ---------------------------------------------------------------------------
-# Helper: replace_params
-# ---------------------------------------------------------------------------
 
 
 def replace_params(
@@ -247,11 +225,7 @@ def replace_params(
     return path, path_params
 
 
-# ---------------------------------------------------------------------------
-# compile_path
-# ---------------------------------------------------------------------------
 
-# Match parameters in URL paths, eg. '{param}', and '{param:int}'
 PARAM_REGEX = re.compile("{([a-zA-Z_][a-zA-Z0-9_]*)(:[a-zA-Z_][a-zA-Z0-9_]*)?}")
 
 
@@ -300,7 +274,6 @@ def compile_path(
         raise ValueError(f"Duplicated param name{ending} {names} at path {path}")
 
     if is_host:
-        # Align with Host.matches() behavior, which ignores port.
         hostname = path[idx:].split(":")[0]
         path_regex += re.escape(hostname) + "$"
     else:
@@ -311,9 +284,7 @@ def compile_path(
     return re.compile(path_regex), path_format, param_convertors
 
 
-# ---------------------------------------------------------------------------
 # Middleware type placeholder
-# ---------------------------------------------------------------------------
 
 
 class Middleware:
@@ -336,9 +307,7 @@ class Middleware:
         return f"{class_name}({args_repr})"
 
 
-# ---------------------------------------------------------------------------
 # request_response / websocket_session -- ASGI adapters
-# ---------------------------------------------------------------------------
 
 
 def request_response(
@@ -385,9 +354,6 @@ def websocket_session(
     return app
 
 
-# ---------------------------------------------------------------------------
-# BaseRoute
-# ---------------------------------------------------------------------------
 
 
 class BaseRoute:
@@ -422,9 +388,6 @@ class BaseRoute:
         await self.handle(scope, receive, send)
 
 
-# ---------------------------------------------------------------------------
-# Route
-# ---------------------------------------------------------------------------
 
 
 class Route(BaseRoute):
@@ -450,12 +413,10 @@ class Route(BaseRoute):
         while isinstance(endpoint_handler, functools.partial):
             endpoint_handler = endpoint_handler.func
         if inspect.isfunction(endpoint_handler) or inspect.ismethod(endpoint_handler):
-            # Endpoint is function or method. Treat it as `func(request) -> response`.
             self.app = request_response(endpoint)
             if methods is None:
                 methods = ["GET"]
         else:
-            # Endpoint is a class. Treat it as ASGI.
             self.app = endpoint
 
         if middleware is not None:
@@ -529,9 +490,6 @@ class Route(BaseRoute):
         return f"{class_name}(path={path!r}, name={name!r}, methods={methods!r})"
 
 
-# ---------------------------------------------------------------------------
-# WebSocketRoute
-# ---------------------------------------------------------------------------
 
 
 class WebSocketRoute(BaseRoute):
@@ -554,10 +512,8 @@ class WebSocketRoute(BaseRoute):
         while isinstance(endpoint_handler, functools.partial):
             endpoint_handler = endpoint_handler.func
         if inspect.isfunction(endpoint_handler) or inspect.ismethod(endpoint_handler):
-            # Endpoint is function or method. Treat it as `func(websocket)`.
             self.app = websocket_session(endpoint)
         else:
-            # Endpoint is a class. Treat it as ASGI.
             self.app = endpoint
 
         if middleware is not None:
@@ -606,9 +562,6 @@ class WebSocketRoute(BaseRoute):
         return f"{self.__class__.__name__}(path={self.path!r}, name={self.name!r})"
 
 
-# ---------------------------------------------------------------------------
-# Mount
-# ---------------------------------------------------------------------------
 
 
 class Mount(BaseRoute):
@@ -668,7 +621,6 @@ class Mount(BaseRoute):
 
     def url_path_for(self, name: str, /, **path_params: Any) -> URLPath:
         if self.name is not None and name == self.name and "path" in path_params:
-            # 'name' matches "<mount_name>".
             path_params["path"] = path_params["path"].lstrip("/")
             path, remaining_params = replace_params(
                 self.path_format, self.param_convertors, path_params
@@ -677,10 +629,8 @@ class Mount(BaseRoute):
                 return URLPath(path=path)
         elif self.name is None or name.startswith(self.name + ":"):
             if self.name is None:
-                # No mount name.
                 remaining_name = name
             else:
-                # 'name' matches "<mount_name>:<child_name>".
                 remaining_name = name[len(self.name) + 1:]
             path_kwarg = path_params.get("path")
             path_params["path"] = ""
@@ -712,9 +662,7 @@ class Mount(BaseRoute):
         return f"{class_name}(path={self.path!r}, name={name!r}, app={self.app!r})"
 
 
-# ---------------------------------------------------------------------------
 # Lifespan helpers (vendored from starlette.routing)
-# ---------------------------------------------------------------------------
 
 _T = TypeVar("_T")
 
@@ -761,9 +709,6 @@ class _DefaultLifespan:
         return self
 
 
-# ---------------------------------------------------------------------------
-# Router
-# ---------------------------------------------------------------------------
 
 
 class Router:
@@ -778,8 +723,6 @@ class Router:
         default: ASGIApp | None = None,
         on_startup: Sequence[Callable[[], Any]] | None = None,
         on_shutdown: Sequence[Callable[[], Any]] | None = None,
-        # the generic to Lifespan[AppType] is the type of the top level application
-        # which the router cannot know statically, so we use Any
         lifespan: Lifespan[Any] | None = None,
         *,
         middleware: Sequence[Middleware] | None = None,
@@ -838,9 +781,6 @@ class Router:
             await websocket_close(scope, receive, send)
             return
 
-        # If we're running inside an application then raise an exception,
-        # so that the configurable exception handler can deal with returning
-        # the response.  For plain ASGI apps, just return the response.
         if "app" in scope:
             from astraapi.exceptions import HTTPException
             raise HTTPException(status_code=404)
@@ -919,8 +859,6 @@ class Router:
         partial_scope: dict[str, Any] = {}
 
         for route in self.routes:
-            # Determine if any route matches the incoming scope,
-            # and hand over to the matching route if found.
             match, child_scope = route.matches(scope)
             if match == Match.FULL:
                 scope.update(child_scope)
@@ -931,9 +869,6 @@ class Router:
                 partial_scope = child_scope
 
         if partial is not None:
-            # Handle partial matches. These are cases where an endpoint is
-            # able to handle the request, but is not a preferred option.
-            # We use this in particular to deal with "405 Method Not Allowed".
             scope.update(partial_scope)
             await partial.handle(scope, receive, send)
             return
@@ -956,7 +891,6 @@ class Router:
 
         await self.default(scope, receive, send)
 
-    # -- convenience methods (compat with starlette Router) -----------------
 
     def mount(self, path: str, app: ASGIApp, name: str | None = None) -> None:
         route = Mount(path, app=app, name=name)
@@ -987,7 +921,6 @@ class Router:
     ) -> None:
         route = WebSocketRoute(path, endpoint=endpoint, name=name)
         self.routes.append(route)
-        # Pre-compute WS parameter name at registration (avoids inspect on first connection)
         try:
             from astraapi._cpp_server import precompute_ws_signature
             precompute_ws_signature(endpoint)

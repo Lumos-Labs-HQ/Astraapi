@@ -91,19 +91,16 @@ from astraapi._core_bridge import (
     process_request,
 )
 
-# Atomic counter for unique route IDs (used by Core param extractor)
 import itertools as _itertools
 import base64 as _base64
 
 _route_id_counter = _itertools.count(1)
-# FIX H-11: Use WeakValueDictionary for _route_id_to_route to allow GC of unused routes.
 # For _endpoint_id_to_route, use bounded cache with object validation to detect id() reuse.
 import weakref as _weakref
 
 # Maps core_route_id -> APIRoute for scope["route"] injection
 _route_id_to_route: dict = {}
 # Maps id(endpoint) -> (weakref_to_endpoint, APIRoute) for scope["route"] injection in C++ fast path
-# FIX H-11: Validate that the id still points to the same object before returning cached route.
 _endpoint_id_to_route: dict = {}
 
 
@@ -114,7 +111,6 @@ def _register_endpoint_route(endpoint, route):
         ref = _weakref.ref(endpoint, lambda r, eid=ep_id: _endpoint_id_to_route.pop(eid, None))
         _endpoint_id_to_route[ep_id] = (ref, route)
     except TypeError:
-        # Builtins/C functions can't be weakly referenced
         _endpoint_id_to_route[ep_id] = (None, route)
 
 
@@ -128,7 +124,6 @@ def _get_route_for_endpoint(endpoint):
     if ref is not None:
         obj = ref()
         if obj is None or obj is not endpoint:
-            # Stale — id was reused
             del _endpoint_id_to_route[ep_id]
             return None
     return route
@@ -136,7 +131,6 @@ def _get_route_for_endpoint(endpoint):
 from astraapi.exceptions import HTTPException as _DepHTTPExc
 _DEP_HTTP_EXC_TYPES: tuple = (_DepHTTPExc,)
 
-# Hoisted hot-path imports (avoid per-request module dict lookups in DI resolvers)
 try:
     from astraapi._cpp_server import (
         _current_raw_headers as _crh_mod,
@@ -173,7 +167,6 @@ from astraapi.security.http import (
 )
 
 
-# Copy of starlette.routing.request_response modified to include the
 # dependencies' AsyncExitStack
 def request_response(
     func: Callable[[Request], Union[Awaitable[Response], Response]],
@@ -190,7 +183,6 @@ def request_response(
         request = Request(scope, receive, send)
 
         async def app(scope: Scope, receive: Receive, send: Send) -> None:
-            # Starts customization
             response_awaited = False
             async with AsyncExitStack() as request_stack:
                 scope["astraapi_inner_astack"] = request_stack
@@ -198,7 +190,6 @@ def request_response(
                     scope["astraapi_function_astack"] = function_stack
                     response = await f(request)
                 await response(scope, receive, send)
-                # Continues customization
                 response_awaited = True
             if not response_awaited:
                 raise AstraAPIError(
@@ -209,13 +200,11 @@ def request_response(
                     "docs: https://astraapi.tiangolo.com/tutorial/dependencies/dependencies-with-yield/#dependencies-with-yield-and-except"
                 )
 
-        # Same as in Starlette
         await wrap_app_handling_exceptions(app, request)(scope, receive, send)
 
     return app
 
 
-# Copy of starlette.routing.websocket_session modified to include the
 # dependencies' AsyncExitStack
 def websocket_session(
     func: Callable[[WebSocket], Awaitable[None]],
@@ -223,7 +212,6 @@ def websocket_session(
     """
     Takes a coroutine `func(session)`, and returns an ASGI application.
     """
-    # assert asyncio.iscoroutinefunction(func), "WebSocket endpoints must be async"
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         session = WebSocket(scope, receive=receive, send=send)
@@ -235,7 +223,6 @@ def websocket_session(
                     scope["astraapi_function_astack"] = function_stack
                     await func(session)
 
-        # Same as in Starlette
         await wrap_app_handling_exceptions(app, session)(scope, receive, send)
 
     return app
@@ -244,7 +231,6 @@ def websocket_session(
 _T = TypeVar("_T")
 
 
-# Vendored from starlette.routing to avoid importing private symbols
 class _AsyncLiftContextManager(AbstractAsyncContextManager[_T]):
     """
     Wraps a synchronous context manager to make it async.
@@ -267,7 +253,6 @@ class _AsyncLiftContextManager(AbstractAsyncContextManager[_T]):
         return self._cm.__exit__(exc_type, exc_value, traceback)
 
 
-# Vendored from starlette.routing to avoid importing private symbols
 def _wrap_gen_lifespan_context(
     lifespan_context: Callable[[Any], Generator[Any, Any, Any]],
 ) -> Callable[[Any], AbstractAsyncContextManager[Any]]:
@@ -326,7 +311,6 @@ class _DefaultLifespan:
         return self
 
 
-# FIX H-10: Use bounded LRU cache for endpoint context to prevent unbounded growth
 # and detect id() reuse after GC. Max 2048 entries covers any realistic app.
 from collections import OrderedDict as _OrderedDict_ctx
 
@@ -339,17 +323,14 @@ def _extract_endpoint_context(func: Any) -> EndpointContext:
     func_id = id(func)
 
     if func_id in _endpoint_context_cache:
-        # Validate it's the same function (detect id() reuse)
         cached = _endpoint_context_cache[func_id]
         cached_name = cached.get('function_name')
         if cached_name == getattr(func, '__name__', None):
             _endpoint_context_cache.move_to_end(func_id)
             return cached
-        # id() reused by different function — evict stale entry
         del _endpoint_context_cache[func_id]
 
     ctx: EndpointContext = {}
-    # Always capture function name first — never lose it due to file I/O errors
     if (func_name := getattr(func, "__name__", None)) is not None:
         ctx["function"] = func_name
     try:
@@ -360,7 +341,6 @@ def _extract_endpoint_context(func: Any) -> EndpointContext:
     except Exception:
         pass
 
-    # FIX H-10: Evict oldest entry if cache is full
     if len(_endpoint_context_cache) >= _ENDPOINT_CTX_CACHE_MAX:
         _endpoint_context_cache.popitem(last=False)
     _endpoint_context_cache[func_id] = ctx
@@ -406,15 +386,12 @@ async def serialize_response(
         )
 
     else:
-        # Fix #4: try C++ json_writer first (handles datetime/UUID/Pydantic/dataclasses).
-        # Only fall back to Python jsonable_encoder for types C++ can't handle.
         try:
             from astraapi._core_bridge import encode_to_json_bytes as _enc
             if _enc is not None:
                 _raw_type = type(response_content)
                 if _raw_type is dict or _raw_type is list or _raw_type is str or _raw_type is int or _raw_type is float or _raw_type is bool or response_content is None:
                     return response_content  # pass-through — C++ serializes at write time
-                # For Pydantic models, use model_dump() which C++ json_writer handles
                 if hasattr(response_content, 'model_dump'):
                     return response_content.model_dump()
         except Exception:
@@ -425,8 +402,6 @@ async def serialize_response(
 async def run_endpoint_function(
     *, dependant: Dependant, values: dict[str, Any], is_coroutine: bool
 ) -> Any:
-    # Only called by get_request_handler. Has been split into its own function to
-    # facilitate profiling endpoints, since inner functions are harder to profile.
     assert dependant.call is not None, "dependant.call must be a function"
 
     if is_coroutine:
@@ -441,7 +416,6 @@ def _extract_boundary(content_type: str) -> Optional[str]:
         part = part.strip()
         if part.lower().startswith("boundary="):
             value = part[9:]
-            # Strip surrounding quotes if present
             if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
                 value = value[1:-1]
             return value
@@ -642,7 +616,6 @@ def get_request_handler(
                     body_bytes = await request.body()
                     if body_bytes:
                         json_body: Any = Undefined
-                        # Fix #14: skip process_request if C++ already parsed headers/query
                         # (set by _cpp_server.py data_received via ContextVar).
                         # Only call process_request when the scope doesn't already have
                         # pre-parsed data from the C++ fast path.
@@ -761,7 +734,6 @@ def get_request_handler(
                         is_coroutine=is_coroutine,
                         endpoint_ctx=endpoint_ctx,
                     )
-                # Core fast-path: encode + serialize to JSON bytes in one
                 # GIL-releasing call, skipping JSONResponse.render()
                 if actual_response_class is JSONResponse:
                     try:
@@ -1016,7 +988,6 @@ def _make_param_validator(dependant: Dependant) -> Optional[Any]:
     if not param_info and not model_param_info:
         return None
 
-    # ── Fast path: trivial scalar params (no constraints) ──────────────────
     # For routes where every scalar param has a trivial schema (plain str with
     # no min_length, ge, regex, etc.), we can skip the expensive Pydantic
     # TypeAdapter.validate_python() call entirely.  For str: C++ already extracts
@@ -1969,7 +1940,6 @@ def _resolve_deps_sync(dep_nodes, kwargs_dict, _exc_types=_DEP_HTTP_EXC_TYPES, _
                     pass
 
             result = node['call'](**dep_kwargs)
-            # FIX C-05: Detect unawaited coroutines from async dependency overrides.
             # In the sync resolver, receiving a coroutine means the dep was overridden
             # to be async — close it and raise a clear error.
             if hasattr(result, 'cr_frame'):
@@ -2564,7 +2534,6 @@ def _make_dep_solver(dependant: Dependant, dependency_overrides_provider: Option
         _solve_gen_async._has_gen_deps = True
         return _solve_gen_async
 
-    # ── Fast path: trivial dependency trees (up to 3 nodes) ────────────────
     # When all deps are trivial (no Request, Response, Security, etc.) and
     # the tree is small, we bypass the heavy _resolve_deps_async machinery.
     # This saves ~30-40 µs for single deps, ~20-30 µs for small trees.
@@ -3279,8 +3248,6 @@ class APIRouter(routing.Router):
                 """
             ),
         ] = None,
-        # the generic to Lifespan[AppType] is the type of the top level application
-        # which the router cannot know statically, so we use typing.Any
         lifespan: Annotated[
             Optional[Lifespan[Any]],
             Doc(

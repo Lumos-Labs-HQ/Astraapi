@@ -16,9 +16,7 @@ from urllib.parse import unquote, urlparse
 from astraapi._concurrency import run_in_threadpool  # kept for other callers
 
 
-# ---------------------------------------------------------------------------
 # State
-# ---------------------------------------------------------------------------
 
 
 class State:
@@ -68,9 +66,7 @@ class State:
         return State(dict(self._state))
 
 
-# ---------------------------------------------------------------------------
 # URL
-# ---------------------------------------------------------------------------
 
 
 class URL:
@@ -151,9 +147,7 @@ class URL:
         return hash(self._url)
 
 
-# ---------------------------------------------------------------------------
 # Address
-# ---------------------------------------------------------------------------
 
 
 class Address:
@@ -190,9 +184,7 @@ class Address:
         return hash((self.host, self.port))
 
 
-# ---------------------------------------------------------------------------
 # ImmutableMultiDict — base for Headers and QueryParams
-# ---------------------------------------------------------------------------
 
 
 class ImmutableMultiDict:
@@ -202,9 +194,7 @@ class ImmutableMultiDict:
         raise NotImplementedError
 
 
-# ---------------------------------------------------------------------------
 # Headers
-# ---------------------------------------------------------------------------
 
 
 class Headers(ImmutableMultiDict):
@@ -326,9 +316,7 @@ class Headers(ImmutableMultiDict):
         return NotImplemented
 
 
-# ---------------------------------------------------------------------------
 # QueryParams
-# ---------------------------------------------------------------------------
 
 
 class QueryParams(ImmutableMultiDict):
@@ -432,9 +420,7 @@ class QueryParams(ImmutableMultiDict):
         return NotImplemented
 
 
-# ---------------------------------------------------------------------------
 # UploadFile
-# ---------------------------------------------------------------------------
 
 
 class UploadFile:
@@ -511,9 +497,7 @@ class UploadFile:
         return NotImplemented
 
 
-# ---------------------------------------------------------------------------
 # FormData
-# ---------------------------------------------------------------------------
 
 
 class FormData:

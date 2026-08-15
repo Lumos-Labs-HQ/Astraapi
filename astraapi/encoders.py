@@ -33,12 +33,10 @@ from ._compat import (
 from ._core_bridge import fast_jsonable_encode
 
 
-# Taken from Pydantic v1 as is
 def isoformat(o: Union[datetime.date, datetime.time]) -> str:
     return o.isoformat()
 
 
-# Adapted from Pydantic v1
 # TODO: pv2 should this return strings instead?
 def decimal_encoder(dec_value: Decimal) -> Union[int, float]:
     """
@@ -212,7 +210,6 @@ def jsonable_encoder(
     Read more about it in the
     [AstraAPI docs for JSON Compatible Encoder](https://astraapi.tiangolo.com/tutorial/encoder/).
     """
-    # Core fast-path: for simple primitive types (dict/list/str/int/float/bool/None)
     # with no special options, encode entirely in Core for maximum performance.
     # Only use for types that fast_jsonable_encode handles correctly.
     if (

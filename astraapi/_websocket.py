@@ -13,7 +13,6 @@ from typing import Any, Optional
 from astraapi._request import HTTPConnection
 from astraapi._types import Receive, Scope, Send
 
-# Optional C++ accelerated JSON for WebSocket payloads
 try:
     from astraapi._core_bridge import encode_to_json_bytes as _core_ws_serialize
 
@@ -22,9 +21,6 @@ except Exception:
     _CORE_WS_JSON = False
 
 
-# ---------------------------------------------------------------------------
-# WebSocket state & exceptions
-# ---------------------------------------------------------------------------
 
 
 class WebSocketState(enum.Enum):
@@ -44,9 +40,6 @@ class WebSocketDisconnect(Exception):
         super().__init__(f"WebSocket disconnect: code={code}, reason={self.reason}")
 
 
-# ---------------------------------------------------------------------------
-# WebSocket
-# ---------------------------------------------------------------------------
 
 
 class WebSocket(HTTPConnection):
@@ -61,7 +54,6 @@ class WebSocket(HTTPConnection):
         super().__init__(scope, receive, send)
         self.client_state = WebSocketState.CONNECTING
         self.application_state = WebSocketState.CONNECTING
-        # Cache CppWebSocket for fast-path bypass of ASGI dict overhead
         self._cpp_ws = getattr(receive, '__self__', None) if receive is not None else None
 
     @property
@@ -74,7 +66,6 @@ class WebSocket(HTTPConnection):
         assert self._send is not None, "No send channel available"
         return self._send
 
-    # -- Connection lifecycle ------------------------------------------------
 
     async def accept(
         self,
@@ -83,7 +74,6 @@ class WebSocket(HTTPConnection):
     ) -> None:
         """Accept the WebSocket connection."""
         if self.client_state == WebSocketState.CONNECTING:
-            # Wait for the client connect message
             message = await self.receive()
             message_type = message["type"]
             if message_type != "websocket.connect":
@@ -112,13 +102,11 @@ class WebSocket(HTTPConnection):
             await self.send(close_message)
             self.application_state = WebSocketState.DISCONNECTED
 
-    # -- Sending -------------------------------------------------------------
 
     async def send_text(self, data: str) -> None:
         """Send a text message."""
         cpp_ws = self._cpp_ws
         if cpp_ws is not None:
-            # FIX M-28: Check state before sending via C++ fast path
             self._assert_connected()
             await cpp_ws.send_text(data)
             return
@@ -129,7 +117,6 @@ class WebSocket(HTTPConnection):
         """Send a binary message."""
         cpp_ws = self._cpp_ws
         if cpp_ws is not None:
-            # FIX M-28: Check state before sending via C++ fast path
             self._assert_connected()
             await cpp_ws.send_bytes(data)
             return
@@ -149,7 +136,6 @@ class WebSocket(HTTPConnection):
         """
         self._assert_connected()
 
-        # Try C++ fast-path
         if _CORE_WS_JSON:
             try:
                 json_bytes = _core_ws_serialize(data)
@@ -171,7 +157,6 @@ class WebSocket(HTTPConnection):
                 {"type": "websocket.send", "bytes": text.encode("utf-8")}
             )
 
-    # -- Receiving -----------------------------------------------------------
 
     async def receive_text(self) -> str:
         """Receive a text message."""
@@ -219,7 +204,6 @@ class WebSocket(HTTPConnection):
                 raise RuntimeError("Expected binary frame, got text")
             return _json_loads(data)
 
-    # -- Iteration -----------------------------------------------------------
 
     async def __aiter__(self):
         """Iterate over incoming messages until disconnect."""
@@ -234,7 +218,6 @@ class WebSocket(HTTPConnection):
         except WebSocketDisconnect:
             return
 
-    # -- Internal helpers ----------------------------------------------------
 
     async def _receive_message(self) -> dict[str, Any]:
         """Receive the next WebSocket message, handling disconnects."""

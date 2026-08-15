@@ -1,23 +1,21 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
-#include "json_writer.hpp"
 #include "json_parser.hpp"
+#include "json_writer.hpp"
 #include "pyref.hpp"
 
-// ══════════════════════════════════════════════════════════════════════════════
-// parse_json_body(data: bytes) → PyAny — yyjson (~3GB/s)
-// ══════════════════════════════════════════════════════════════════════════════
+#include <Python.h>
 
-PyObject* py_parse_json_body(PyObject* self, PyObject* arg) {
+// parse_json_body(data: bytes) → PyAny — yyjson (~3GB/s)
+
+PyObject *py_parse_json_body(PyObject *self, PyObject *arg) {
     if (!PyBytes_Check(arg)) {
         PyErr_SetString(PyExc_TypeError, "expected bytes");
         return nullptr;
     }
 
-    char* data;
+    char *data;
     Py_ssize_t data_len;
-    if (PyBytes_AsStringAndSize(arg, &data, &data_len) < 0)
-        return nullptr;
+    if (PyBytes_AsStringAndSize(arg, &data, &data_len) < 0) return nullptr;
 
     if (data_len == 0) {
         PyErr_SetString(PyExc_ValueError, "Empty JSON input");
@@ -27,21 +25,15 @@ PyObject* py_parse_json_body(PyObject* self, PyObject* arg) {
     return yyjson_parse_to_pyobject(data, (size_t)data_len);
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // serialize_to_json_bytes(obj: PyAny) → PyBytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_serialize_to_json_bytes(PyObject* self, PyObject* arg) {
-    return serialize_to_json_pybytes(arg);
-}
+PyObject *py_serialize_to_json_bytes(PyObject *self, PyObject *arg) { return serialize_to_json_pybytes(arg); }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // serialize_to_json_bytes_pretty(obj: PyAny) → PyBytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_serialize_to_json_bytes_pretty(PyObject* self, PyObject* arg) {
+PyObject *py_serialize_to_json_bytes_pretty(PyObject *self, PyObject *arg) {
     // Use Python's json.dumps for pretty printing
-    static PyObject* json_dumps = nullptr;
+    static PyObject *json_dumps = nullptr;
     if (!json_dumps) {
         PyRef json_mod(PyImport_ImportModule("json"));
         if (!json_mod) return nullptr;

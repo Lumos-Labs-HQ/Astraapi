@@ -597,7 +597,6 @@ async def solve_dependencies(
     embed_body_fields: bool,
     _depth: int = 0,
 ) -> SolvedDependency:
-    # FIX M-23: Prevent infinite recursion from circular dependencies
     _MAX_DEPENDENCY_DEPTH = 100
     if _depth > _MAX_DEPENDENCY_DEPTH:
         raise RuntimeError(

@@ -1,6 +1,8 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #include "pyref.hpp"
+
+#include <Python.h>
+
 #include <cstring>
 #include <string>
 #include <vector>
@@ -16,17 +18,16 @@
 
 // Brotli headers (optional — CMake defines HAS_BROTLI=1 if found)
 #if HAS_BROTLI
-#include <brotli/encode.h>
 #include <brotli/decode.h>
+#include <brotli/encode.h>
 #endif
 #ifndef HAS_BROTLI
 #define HAS_BROTLI 0
 #endif
 
-// ── Deduplicated case-insensitive helpers (file-scope static inline) ─────────
 // Previously duplicated as lambdas inside 3 different functions.
 
-static inline bool ci_starts_mw(const char* s, size_t s_len, const char* prefix, size_t p_len) {
+static inline bool ci_starts_mw(const char *s, size_t s_len, const char *prefix, size_t p_len) {
     if (s_len < p_len) return false;
     for (size_t i = 0; i < p_len; i++) {
         char c = s[i];
@@ -36,17 +37,17 @@ static inline bool ci_starts_mw(const char* s, size_t s_len, const char* prefix,
     return true;
 }
 
-static inline bool ci_contains_mw(const char* s, size_t s_len, const char* needle, size_t n_len) {
-    // FIX L-19: Token-boundary-aware matching. The needle must be delimited by
-    // string boundaries, commas, semicolons, or spaces to prevent false positives
-    // (e.g., "br" matching inside "hebrew" or "abbreviate").
+static inline bool ci_contains_mw(const char *s, size_t s_len, const char *needle, size_t n_len) {
     if (s_len < n_len) return false;
     for (size_t i = 0; i <= s_len - n_len; i++) {
         bool match = true;
         for (size_t j = 0; j < n_len; j++) {
             char c = s[i + j];
             if (c >= 'A' && c <= 'Z') c += 32;
-            if (c != needle[j]) { match = false; break; }
+            if (c != needle[j]) {
+                match = false;
+                break;
+            }
         }
         if (match) {
             // Check left boundary: must be start of string, or preceded by delimiter
@@ -58,8 +59,8 @@ static inline bool ci_contains_mw(const char* s, size_t s_len, const char* needl
             size_t end_pos = i + n_len;
             if (end_pos < s_len) {
                 char right = s[end_pos];
-                if (right != ',' && right != ' ' && right != '\t' &&
-                    right != ';' && right != '=' && right != '\0') continue;
+                if (right != ',' && right != ' ' && right != '\t' && right != ';' && right != '=' && right != '\0')
+                    continue;
             }
             return true;
         }
@@ -67,10 +68,9 @@ static inline bool ci_contains_mw(const char* s, size_t s_len, const char* needl
     return false;
 }
 
-// ── Pre-interned encoding strings (eliminates PyUnicode_FromString per call) ─
-static PyObject* s_enc_gzip = nullptr;
-static PyObject* s_enc_br = nullptr;
-static PyObject* s_enc_identity = nullptr;
+static PyObject *s_enc_gzip = nullptr;
+static PyObject *s_enc_br = nullptr;
+static PyObject *s_enc_identity = nullptr;
 
 static void ensure_interned_encodings() {
     if (!s_enc_gzip) {
@@ -80,16 +80,13 @@ static void ensure_interned_encodings() {
     }
 }
 
-// ── Thread-local compression output buffer (avoids malloc/free per response) ─
 static thread_local std::vector<uint8_t> tl_compress_buf;
 
-// ══════════════════════════════════════════════════════════════════════════════
 // gzip_compress(data: bytes, level: int = 6) → PyBytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_gzip_compress(PyObject* self, PyObject* args) {
-    PyObject* data_obj;
-    int level = 4;  // Level 4: ~30-40% less CPU than 6 for ~2-3% larger output
+PyObject *py_gzip_compress(PyObject *self, PyObject *args) {
+    PyObject *data_obj;
+    int level = 4; // Level 4: ~30-40% less CPU than 6 for ~2-3% larger output
     if (!PyArg_ParseTuple(args, "O|i", &data_obj, &level)) return nullptr;
 
     if (!PyBytes_Check(data_obj)) {
@@ -97,47 +94,42 @@ PyObject* py_gzip_compress(PyObject* self, PyObject* args) {
         return nullptr;
     }
 
-    char* data;
+    char *data;
     Py_ssize_t data_len;
     PyBytes_AsStringAndSize(data_obj, &data, &data_len);
 
 #if HAS_LIBDEFLATE
-    // libdeflate fast-path: 2-3x faster single-shot gzip compression
-    // Uses thread-local buffer to avoid malloc/free per response
     tl_compress_buf.clear();
     size_t actual_size = 0;
     bool ok = false;
 
-    Py_BEGIN_ALLOW_THREADS
-    struct libdeflate_compressor* c = libdeflate_alloc_compressor(level);
+    Py_BEGIN_ALLOW_THREADS struct libdeflate_compressor *c = libdeflate_alloc_compressor(level);
     if (c) {
         size_t bound = libdeflate_gzip_compress_bound(c, (size_t)data_len);
         tl_compress_buf.resize(bound);
-        actual_size = libdeflate_gzip_compress(c, data, (size_t)data_len,
-                                                tl_compress_buf.data(), tl_compress_buf.size());
+        actual_size =
+            libdeflate_gzip_compress(c, data, (size_t)data_len, tl_compress_buf.data(), tl_compress_buf.size());
         libdeflate_free_compressor(c);
         ok = (actual_size > 0);
     }
     Py_END_ALLOW_THREADS
 
-    if (!ok) {
+        if (!ok) {
         PyErr_SetString(PyExc_RuntimeError, "gzip compression failed (libdeflate)");
         return nullptr;
     }
-    return PyBytes_FromStringAndSize((const char*)tl_compress_buf.data(), (Py_ssize_t)actual_size);
+    return PyBytes_FromStringAndSize((const char *)tl_compress_buf.data(), (Py_ssize_t)actual_size);
 #else
-    // zlib fallback — thread-local buffer
     tl_compress_buf.clear();
     int zret;
 
     Py_BEGIN_ALLOW_THREADS
 
-    z_stream strm = {};
-    // windowBits = 15 + 16 for gzip format
+        z_stream strm = {};
     zret = deflateInit2(&strm, level, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
     if (zret == Z_OK) {
         tl_compress_buf.resize(deflateBound(&strm, (uLong)data_len));
-        strm.next_in = (Bytef*)data;
+        strm.next_in = (Bytef *)data;
         strm.avail_in = (uInt)data_len;
         strm.next_out = tl_compress_buf.data();
         strm.avail_out = (uInt)tl_compress_buf.size();
@@ -151,21 +143,19 @@ PyObject* py_gzip_compress(PyObject* self, PyObject* args) {
 
     Py_END_ALLOW_THREADS
 
-    if (zret != Z_STREAM_END && zret != Z_OK) {
+        if (zret != Z_STREAM_END && zret != Z_OK) {
         PyErr_SetString(PyExc_RuntimeError, "gzip compression failed");
         return nullptr;
     }
 
-    return PyBytes_FromStringAndSize((const char*)tl_compress_buf.data(), (Py_ssize_t)tl_compress_buf.size());
+    return PyBytes_FromStringAndSize((const char *)tl_compress_buf.data(), (Py_ssize_t)tl_compress_buf.size());
 #endif
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // gzip_decompress(data: bytes) → PyBytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
-    PyObject* data_obj;
+PyObject *py_gzip_decompress(PyObject *self, PyObject *args) {
+    PyObject *data_obj;
     if (!PyArg_ParseTuple(args, "O", &data_obj)) return nullptr;
 
     if (!PyBytes_Check(data_obj)) {
@@ -173,28 +163,26 @@ PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
         return nullptr;
     }
 
-    char* data;
+    char *data;
     Py_ssize_t data_len;
     PyBytes_AsStringAndSize(data_obj, &data, &data_len);
 
     std::vector<uint8_t> output;
     int zret;
-    static constexpr size_t MAX_DECOMPRESSED = 256 * 1024 * 1024;  // 256 MB
-    // FIX M-25: Decompression bomb ratio check. If output grows to >1000x input,
+    static constexpr size_t MAX_DECOMPRESSED = 256 * 1024 * 1024; // 256 MB
     // reject as a potential zip bomb (a 1KB payload should not decompress to 1MB+).
     static constexpr size_t MAX_DECOMPRESS_RATIO = 1000;
 
     Py_BEGIN_ALLOW_THREADS
 
-    z_stream strm = {};
-    // windowBits = 15 + 32 for auto-detect gzip/zlib
+        z_stream strm = {};
     zret = inflateInit2(&strm, 15 + 32);
     if (zret == Z_OK) {
         // Smarter initial size: cap at 16MB to avoid overalloc on small inputs
         size_t initial = std::min((size_t)data_len * 4, (size_t)(16 * 1024 * 1024));
         if (initial < 4096) initial = 4096;
         output.resize(initial);
-        strm.next_in = (Bytef*)data;
+        strm.next_in = (Bytef *)data;
         strm.avail_in = (uInt)data_len;
 
         while (true) {
@@ -210,7 +198,6 @@ PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
                     zret = Z_MEM_ERROR;
                     break;
                 }
-                // FIX M-25: Ratio check — reject zip bombs
                 if (data_len > 0 && new_size / (size_t)data_len > MAX_DECOMPRESS_RATIO) {
                     zret = Z_DATA_ERROR;
                     break;
@@ -224,20 +211,18 @@ PyObject* py_gzip_decompress(PyObject* self, PyObject* args) {
 
     Py_END_ALLOW_THREADS
 
-    if (zret != Z_STREAM_END) {
+        if (zret != Z_STREAM_END) {
         PyErr_SetString(PyExc_RuntimeError, "gzip decompression failed");
         return nullptr;
     }
 
-    return PyBytes_FromStringAndSize((const char*)output.data(), (Py_ssize_t)output.size());
+    return PyBytes_FromStringAndSize((const char *)output.data(), (Py_ssize_t)output.size());
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // brotli_compress(data: bytes, quality: int = 4) → PyBytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_brotli_compress(PyObject* self, PyObject* args) {
-    PyObject* data_obj;
+PyObject *py_brotli_compress(PyObject *self, PyObject *args) {
+    PyObject *data_obj;
     int quality = 4;
     if (!PyArg_ParseTuple(args, "O|i", &data_obj, &quality)) return nullptr;
 
@@ -246,7 +231,7 @@ PyObject* py_brotli_compress(PyObject* self, PyObject* args) {
         return nullptr;
     }
 
-    char* data;
+    char *data;
     Py_ssize_t data_len;
     PyBytes_AsStringAndSize(data_obj, &data, &data_len);
 
@@ -254,38 +239,32 @@ PyObject* py_brotli_compress(PyObject* self, PyObject* args) {
     size_t output_size = BrotliEncoderMaxCompressedSize((size_t)data_len);
     if (output_size == 0) output_size = (size_t)data_len + 1024;
 
-    // Thread-local buffer for brotli output
     tl_compress_buf.clear();
     tl_compress_buf.resize(output_size);
     int ok;
 
     Py_BEGIN_ALLOW_THREADS
 
-    ok = BrotliEncoderCompress(
-        quality, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE,
-        (size_t)data_len, (const uint8_t*)data,
-        &output_size, tl_compress_buf.data());
+        ok = BrotliEncoderCompress(quality, BROTLI_DEFAULT_WINDOW, BROTLI_DEFAULT_MODE, (size_t)data_len,
+            (const uint8_t *)data, &output_size, tl_compress_buf.data());
 
     Py_END_ALLOW_THREADS
 
-    if (!ok) {
+        if (!ok) {
         PyErr_SetString(PyExc_RuntimeError, "brotli compression failed");
         return nullptr;
     }
 
-    return PyBytes_FromStringAndSize((const char*)tl_compress_buf.data(), (Py_ssize_t)output_size);
+    return PyBytes_FromStringAndSize((const char *)tl_compress_buf.data(), (Py_ssize_t)output_size);
 #else
-    // Fallback: return gzip compressed
     return py_gzip_compress(self, args);
 #endif
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // negotiate_encoding(accept_encoding: str) → str
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_negotiate_encoding(PyObject* self, PyObject* arg) {
-    const char* ae;
+PyObject *py_negotiate_encoding(PyObject *self, PyObject *arg) {
+    const char *ae;
     Py_ssize_t ae_len;
     if (PyUnicode_Check(arg)) {
         ae = PyUnicode_AsUTF8AndSize(arg, &ae_len);
@@ -312,12 +291,10 @@ PyObject* py_negotiate_encoding(PyObject* self, PyObject* arg) {
     return s_enc_identity;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // should_compress(content_type: str, body_size: int, min_size: int = 500) → bool
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_should_compress(PyObject* self, PyObject* args) {
-    const char* content_type;
+PyObject *py_should_compress(PyObject *self, PyObject *args) {
+    const char *content_type;
     Py_ssize_t body_size;
     Py_ssize_t min_size = 500;
 
@@ -331,30 +308,27 @@ PyObject* py_should_compress(PyObject* self, PyObject* args) {
         ci_contains_mw(content_type, ct_len, "application/json", 16) ||
         ci_contains_mw(content_type, ct_len, "application/xml", 15) ||
         ci_contains_mw(content_type, ct_len, "application/javascript", 22) ||
-        ci_contains_mw(content_type, ct_len, "+json", 5) ||
-        ci_contains_mw(content_type, ct_len, "+xml", 4)) {
+        ci_contains_mw(content_type, ct_len, "+json", 5) || ci_contains_mw(content_type, ct_len, "+xml", 4)) {
         Py_RETURN_TRUE;
     }
 
     Py_RETURN_FALSE;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // compress_response(body, accept_encoding, content_type, min_size, gzip_level, brotli_quality)
 // → Optional[Tuple[PyBytes, str]]
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_compress_response(PyObject* self, PyObject* args) {
-    PyObject* body_obj;
-    const char* accept_encoding;
-    const char* content_type;
+PyObject *py_compress_response(PyObject *self, PyObject *args) {
+    PyObject *body_obj;
+    const char *accept_encoding;
+    const char *content_type;
     Py_ssize_t min_size = 500;
     int gzip_level = 4;
     int brotli_quality = 4;
 
-    if (!PyArg_ParseTuple(args, "Oss|nii",
-            &body_obj, &accept_encoding, &content_type,
-            &min_size, &gzip_level, &brotli_quality)) return nullptr;
+    if (!PyArg_ParseTuple(args, "Oss|nii", &body_obj, &accept_encoding, &content_type, &min_size, &gzip_level,
+            &brotli_quality))
+        return nullptr;
 
     if (!PyBytes_Check(body_obj)) {
         PyErr_SetString(PyExc_TypeError, "expected bytes body");
@@ -363,23 +337,22 @@ PyObject* py_compress_response(PyObject* self, PyObject* args) {
 
     Py_ssize_t body_size = PyBytes_GET_SIZE(body_obj);
 
-    // Check if we should compress
     if (body_size < min_size) Py_RETURN_NONE;
 
     size_t ct_len = strlen(content_type);
-    bool compressible = (ci_starts_mw(content_type, ct_len, "text/", 5) ||
-                         ci_contains_mw(content_type, ct_len, "application/json", 16) ||
-                         ci_contains_mw(content_type, ct_len, "application/xml", 15) ||
-                         ci_contains_mw(content_type, ct_len, "application/javascript", 22) ||
-                         ci_contains_mw(content_type, ct_len, "+json", 5) ||
-                         ci_contains_mw(content_type, ct_len, "+xml", 4));
+    bool compressible =
+        (ci_starts_mw(content_type, ct_len, "text/", 5) ||
+            ci_contains_mw(content_type, ct_len, "application/json", 16) ||
+            ci_contains_mw(content_type, ct_len, "application/xml", 15) ||
+            ci_contains_mw(content_type, ct_len, "application/javascript", 22) ||
+            ci_contains_mw(content_type, ct_len, "+json", 5) || ci_contains_mw(content_type, ct_len, "+xml", 4));
     if (!compressible) Py_RETURN_NONE;
 
     // Negotiate encoding — zero-alloc case-insensitive search
     size_t ae_len = strlen(accept_encoding);
 
-    const char* encoding = nullptr;
-    PyObject* compressed = nullptr;
+    const char *encoding = nullptr;
+    PyObject *compressed = nullptr;
 
 #if HAS_BROTLI
     if (ci_contains_mw(accept_encoding, ae_len, "br", 2)) {
@@ -388,19 +361,22 @@ PyObject* py_compress_response(PyObject* self, PyObject* args) {
         compressed = py_brotli_compress(self, br_args.get());
     } else
 #endif
-    if (ci_contains_mw(accept_encoding, ae_len, "gzip", 4)) {
+        if (ci_contains_mw(accept_encoding, ae_len, "gzip", 4)) {
         encoding = "gzip";
         PyRef gz_args(Py_BuildValue("(Oi)", body_obj, gzip_level));
         compressed = py_gzip_compress(self, gz_args.get());
     }
 
     if (!compressed || !encoding) Py_RETURN_NONE;
-    if (PyErr_Occurred()) { Py_XDECREF(compressed); return nullptr; }
+    if (PyErr_Occurred()) {
+        Py_XDECREF(compressed);
+        return nullptr;
+    }
 
     ensure_interned_encodings();
-    PyObject* enc_str = (strcmp(encoding, "br") == 0) ? s_enc_br : s_enc_gzip;
+    PyObject *enc_str = (strcmp(encoding, "br") == 0) ? s_enc_br : s_enc_gzip;
     Py_INCREF(enc_str);
-    PyObject* result = PyTuple_Pack(2, compressed, enc_str);
+    PyObject *result = PyTuple_Pack(2, compressed, enc_str);
     Py_DECREF(compressed);
     return result;
 }

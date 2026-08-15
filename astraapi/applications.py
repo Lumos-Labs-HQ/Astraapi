@@ -68,12 +68,10 @@ _global_sync_lock = threading.Lock()
 # server reuse when Python's memory allocator reuses object addresses (id()).
 _app_instance_counter = itertools.count(1)
 
-# ── Fast email validation patch ────────────────────────────────────────────
 # Pydantic's EmailStr uses email-validator which is ~60µs/call.  A regex-based
 # validator is ~0.3µs/call — a 200× speed-up for API hot paths.  We patch
 # pydantic.networks.validate_email at import time so all EmailStr fields
 # (including user-defined models) benefit automatically.
-# FIX C-06: Improved regex to enforce RFC 5321/5322 constraints:
 # - No consecutive dots in local part
 # - No leading/trailing dots in local part
 # - Domain labels must not start/end with hyphen
@@ -1034,7 +1032,6 @@ class AstraAPI(AppBase):
             ),
         ] = {}
 
-        # ── Lazy router: defer routing + pydantic import to first access ──
         self._router_params = dict(
             routes=routes,
             redirect_slashes=redirect_slashes,
@@ -1070,7 +1067,6 @@ class AstraAPI(AppBase):
         self.user_middleware: list[Middleware] = (
             [] if middleware is None else list(middleware)
         )
-        # ── v2.0: Initialize C++ core ─────────────────────────────────────
         self._core_app = CoreApp()
         self._core_app.redirect_slashes = bool(redirect_slashes)
         self._routes_synced: bool = False
@@ -1078,7 +1074,6 @@ class AstraAPI(AppBase):
         # when id(app) gets recycled by Python's allocator.
         self._app_instance_id = next(_app_instance_counter)
 
-    # ── Lazy router + webhooks properties ─────────────────────────────────
     # Defers `from astraapi import routing` (and thus pydantic) until the
     # first time the router is actually accessed (e.g. @app.get()).
 

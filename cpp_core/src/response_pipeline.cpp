@@ -1,52 +1,44 @@
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #include "json_writer.hpp"
 #include "pyref.hpp"
 
-// Forward from json_encoder.cpp
-extern PyObject* py_fast_jsonable_encode(PyObject* self, PyObject* arg);
+#include <Python.h>
 
-// ══════════════════════════════════════════════════════════════════════════════
+extern PyObject *py_fast_jsonable_encode(PyObject *self, PyObject *arg);
+
 // encode_to_json_bytes(obj: PyAny) → PyBytes
 //
 // Combined encode + serialize: first run fast_jsonable_encode to make the
 // object JSON-serializable, then serialize to bytes via streaming writer.
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_encode_to_json_bytes(PyObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {"obj", nullptr};
-    PyObject* obj;
+PyObject *py_encode_to_json_bytes(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static const char *kwlist[] = {"obj", nullptr};
+    PyObject *obj;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", (char**)kwlist, &obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", (char **)kwlist, &obj)) {
         return nullptr;
     }
 
-    // Step 1: Encode to JSON-serializable form
     PyRef encoded(py_fast_jsonable_encode(self, obj));
     if (!encoded) return nullptr;
 
-    // Step 2: Serialize to JSON bytes
     return serialize_to_json_pybytes(encoded.get());
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
 // encode_to_json_bytes_pretty(obj: PyAny) → PyBytes
-// ══════════════════════════════════════════════════════════════════════════════
 
-PyObject* py_encode_to_json_bytes_pretty(PyObject* self, PyObject* args, PyObject* kwargs) {
-    static const char* kwlist[] = {"obj", nullptr};
-    PyObject* obj;
+PyObject *py_encode_to_json_bytes_pretty(PyObject *self, PyObject *args, PyObject *kwargs) {
+    static const char *kwlist[] = {"obj", nullptr};
+    PyObject *obj;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", (char**)kwlist, &obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O", (char **)kwlist, &obj)) {
         return nullptr;
     }
 
-    // Step 1: Encode to JSON-serializable form
     PyRef encoded(py_fast_jsonable_encode(self, obj));
     if (!encoded) return nullptr;
 
-    // Step 2: Pretty-print via Python json.dumps
-    static PyObject* json_dumps = nullptr;
+    static PyObject *json_dumps = nullptr;
     if (!json_dumps) {
         PyRef json_mod(PyImport_ImportModule("json"));
         if (!json_mod) return nullptr;

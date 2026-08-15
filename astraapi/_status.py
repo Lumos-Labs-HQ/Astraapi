@@ -5,14 +5,12 @@ constants.  Naming convention follows ``HTTP_{code}_{PHRASE}`` for HTTP
 and ``WS_{code}_{PHRASE}`` for WebSocket close codes.
 """
 
-# ── 1xx Informational ────────────────────────────────────────────────────────
 
 HTTP_100_CONTINUE = 100
 HTTP_101_SWITCHING_PROTOCOLS = 101
 HTTP_102_PROCESSING = 102
 HTTP_103_EARLY_HINTS = 103
 
-# ── 2xx Success ──────────────────────────────────────────────────────────────
 
 HTTP_200_OK = 200
 HTTP_201_CREATED = 201
@@ -25,7 +23,6 @@ HTTP_207_MULTI_STATUS = 207
 HTTP_208_ALREADY_REPORTED = 208
 HTTP_226_IM_USED = 226
 
-# ── 3xx Redirection ──────────────────────────────────────────────────────────
 
 HTTP_300_MULTIPLE_CHOICES = 300
 HTTP_301_MOVED_PERMANENTLY = 301
@@ -37,7 +34,6 @@ HTTP_306_RESERVED = 306
 HTTP_307_TEMPORARY_REDIRECT = 307
 HTTP_308_PERMANENT_REDIRECT = 308
 
-# ── 4xx Client Error ─────────────────────────────────────────────────────────
 
 HTTP_400_BAD_REQUEST = 400
 HTTP_401_UNAUTHORIZED = 401
@@ -69,7 +65,6 @@ HTTP_429_TOO_MANY_REQUESTS = 429
 HTTP_431_REQUEST_HEADER_FIELDS_TOO_LARGE = 431
 HTTP_451_UNAVAILABLE_FOR_LEGAL_REASONS = 451
 
-# ── 5xx Server Error ─────────────────────────────────────────────────────────
 
 HTTP_500_INTERNAL_SERVER_ERROR = 500
 HTTP_501_NOT_IMPLEMENTED = 501
@@ -83,7 +78,6 @@ HTTP_508_LOOP_DETECTED = 508
 HTTP_510_NOT_EXTENDED = 510
 HTTP_511_NETWORK_AUTHENTICATION_REQUIRED = 511
 
-# ── WebSocket Close Codes (RFC 6455 + IANA) ──────────────────────────────────
 
 WS_1000_NORMAL_CLOSURE = 1000
 WS_1001_GOING_AWAY = 1001
